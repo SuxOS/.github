@@ -1,0 +1,247 @@
+name: Issue build — cluster related issues, one PR per cluster (reusable)
+
+# n -> m, never n -> 1: reads every open issue labeled `queued-for-build`, has Claude
+# group RELATED ones together (shared root cause / feature area / files touched), then
+# fans out one independent build session + one PR per cluster — never one giant PR for
+# the whole backlog. `queued-for-build` is the human chokepoint: fixer.yml (or a human)
+# files issues, but nothing gets autonomously built until a human opts it in with that
+# label. Each resulting PR is labeled using the SAME eligibility rule automerge.yml /
+# claude-autofix.yml already use, so it flows into the EXISTING automerge pipeline
+# unattended when it's genuinely safe, and stops at a human otherwise — this workflow
+# has no special-case automerge path of its own.
+#
+# Two jobs:
+#   cluster — one read-only Claude session lists `queued-for-build` issues and returns a
+#             clustering plan via --json-schema structured_output (never a written file —
+#             see README's structured_output gotcha). Claims each issue by swapping its
+#             label to `building` so a burst of label events can't double-process it.
+#             Capped at MAX_CLUSTERS; a truncated plan is logged, never silently dropped.
+#   build   — matrix, one job per cluster (native Actions fan-out, no worktree juggling).
+#             Fresh branch off main, Claude implements the cluster's issues, runs the
+#             repo's gates, pushes, opens a PR that Closes the source issues. If the
+#             gates don't pass, no PR is opened — the issues get a comment instead and
+#             are re-labeled `queued-for-build` so a future run retries them.
+#
+# Caller (needs its own `issues: { types: [labeled] }` trigger filtered to
+# `queued-for-build`, since workflow_call can't re-expose that event filter):
+#   uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+#   with: { gates-summary: "...", ci-workflow-name: "CI" }
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      max-clusters:
+        type: number
+        default: 5
+      cluster-model:
+        type: string
+        default: "sonnet"
+      build-model:
+        type: string
+        default: "sonnet"
+      build-max-turns:
+        type: number
+        default: 20
+      gates-summary:
+        description: "Human-readable list of gates each build session's change must pass before it pushes."
+        type: string
+        default: "the repo's lint/type-check/test/build commands"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+concurrency:
+  group: issue-build-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  cluster:
+    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      plan: ${{ steps.plan.outputs.clusters }}
+    steps:
+      - name: Preflight — need the key
+        id: pre
+        run: |
+          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
+            echo "ANTHROPIC_API_KEY not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+
+      - name: Claude — cluster the backlog
+        id: claude
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            List every open issue labeled `queued-for-build`
+            (`gh issue list --state open --label queued-for-build --json number,title,body`).
+
+            Group RELATED issues together — same root cause, same feature area, or issues
+            that would touch the same files — into clusters. Two issues that are unrelated
+            and would touch different parts of the codebase must NOT share a cluster (keep
+            each resulting PR small and reviewable). Two issues that WOULD touch the same
+            files must share a cluster (two concurrent sessions editing the same lines would
+            just collide). An issue with no relation to any other is its own single-issue
+            cluster. Never put every issue into one cluster — the whole point is n issues to
+            m clusters, m > 1 whenever the backlog actually contains unrelated work.
+
+            Return your plan via the structured output schema. For each cluster: a short
+            kebab-case `id`, a `branch` name like `bot/issue-build-<id>`, a conventional-commit
+            style `title` for the eventual PR, a one-paragraph `summary` of what the cluster
+            covers, and the `issue_numbers` in it.
+
+            Do not modify any issue and do not write any code in this step.
+          claude_args: >-
+            --max-turns 10 --model ${{ inputs.cluster-model }}
+            --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
+
+      - name: Cap cluster count and claim issues
+        id: plan
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          MAX_CLUSTERS: ${{ inputs.max-clusters }}
+        run: |
+          set -euo pipefail
+          total=$(echo "$VERDICT" | jq '.clusters | length')
+          capped=$(echo "$VERDICT" | jq -c --argjson n "$MAX_CLUSTERS" '.clusters[0:$n]')
+          kept=$(echo "$capped" | jq 'length')
+          if [ "$kept" -lt "$total" ]; then
+            echo "::warning::clustering plan had $total clusters, capped to $MAX_CLUSTERS — the rest stay queued-for-build for the next run"
+          fi
+          echo "clusters ($kept): $(echo "$capped" | jq -c '[.[] | {id,issue_numbers}]')"
+
+          # Claim: swap queued-for-build -> building on every issue in a kept cluster, so a
+          # burst of label events (or this run failing partway) can't double-process them.
+          echo "$capped" | jq -c '.[]' | while read -r c; do
+            for n in $(echo "$c" | jq -r '.issue_numbers[]'); do
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label queued-for-build --add-label building 2>/dev/null || true
+            done
+          done
+
+          echo "clusters=$capped" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: cluster
+    if: needs.cluster.outputs.plan != '' && needs.cluster.outputs.plan != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.cluster.outputs.plan) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout main, create cluster branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Create branch
+        run: git checkout -B "${{ matrix.branch }}"
+
+      - name: Claude — implement the cluster
+        id: claude
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ISSUE_NUMBERS: ${{ join(matrix.issue_numbers, ', ') }}
+          CLUSTER_SUMMARY: ${{ matrix.summary }}
+          GATES_SUMMARY: ${{ inputs.gates-summary }}
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            Implement GitHub issues #$ISSUE_NUMBERS in this repo (read each with
+            `gh issue view <n>` for full detail). Summary of what this cluster covers:
+            $CLUSTER_SUMMARY
+
+            These issues were grouped together because they're related — implement all of
+            them as one coherent change. This repo's gates must all pass before you commit:
+              $GATES_SUMMARY
+            Make the smallest correct change for each issue, run the gates locally, then
+            commit (conventional-commit style message) and push to this branch. Do NOT touch
+            secrets, do NOT weaken a test to make it pass, do NOT touch code unrelated to
+            these issues.
+
+            If you get all the way through and the gates pass, that's success — just finish
+            normally. If you cannot get the gates passing (a genuine design problem, missing
+            context, etc.), do NOT push a broken commit — say so clearly in your final
+            response instead, explaining what's blocking it.
+          claude_args: "--max-turns ${{ inputs.build-max-turns }} --model ${{ inputs.build-model }}"
+
+      - name: Push and open PR, or comment + requeue on failure
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ matrix.branch }}
+          TITLE: ${{ matrix.title }}
+          SUMMARY: ${{ matrix.summary }}
+          ISSUE_NUMBERS_JSON: ${{ toJSON(matrix.issue_numbers) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          nums=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')
+
+          # The only reliable success signal is a real commit ahead of main — a dirty,
+          # uncommitted working tree is ALSO a failure (Claude didn't finish committing),
+          # not something to silently push.
+          if [ -z "$(git log origin/main..HEAD 2>/dev/null)" ]; then
+            echo "no commits produced for this cluster → build session reported it couldn't finish"
+            for n in $nums; do
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 Auto-build attempted this issue as part of a cluster but couldn't get the gates passing. Re-queued as \`queued-for-build\`. Run: $RUN_URL" 2>/dev/null || true
+            done
+            exit 0
+          fi
+
+          git push -f origin "$BRANCH"
+
+          closes=$(for n in $nums; do echo "Closes #$n"; done)
+          body=$(printf '%s\n\n%s\n\n%s\n\nRun: %s' "$SUMMARY" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
+
+          # Same eligibility rule automerge.yml/claude-autofix.yml use: a safe conventional
+          # -commit type or explicit safe label auto-merges; everything else stops at a human.
+          labels="automerge"
+          if ! printf '%s' "$TITLE" | grep -qiE '^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\([^)]*\))?:'; then
+            labels="needs-review"
+          fi
+
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "$TITLE" --body "$body" --label "$labels"
+
+          for n in $nums; do
+            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
+          done

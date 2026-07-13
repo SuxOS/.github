@@ -14,6 +14,48 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
 `claude.yml` · `claude-autofix.yml` · `budget-guard.yml` · `skill-sync.yml`
 
+**Backlog pipeline** (finds work, builds it, feeds it into the autonomy pipeline
+above — nothing here merges anything itself):
+`fixer.yml` (scan a repo → file issues) · `issue-build.yml` (cluster related
+`queued-for-build` issues → one PR per cluster, n issues to m PRs, never n to
+1). `queued-for-build` is a manual human label — `fixer.yml` never applies it —
+so nothing gets autonomously built until a human opts an issue in. PRs
+`issue-build.yml` opens use the exact same safe-type/label eligibility rule as
+`automerge.yml`, so they either auto-merge when genuinely safe or stop at a
+human like any other PR — this pipeline has no special-case merge path.
+
+```yaml
+# .github/workflows/fixer.yml in a SuxOS caller repo — manual for now
+name: Fixer
+on:
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    secrets: inherit
+```
+
+```yaml
+# .github/workflows/issue-build.yml in a SuxOS caller repo — event-based:
+# fires when a human labels an issue queued-for-build. workflow_call can't
+# re-expose the issues: event, so the caller owns this trigger.
+name: Issue build
+on:
+  issues:
+    types: [labeled]
+jobs:
+  issue-build:
+    if: github.event.label.name == 'queued-for-build'
+    uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+    with:
+      gates-summary: "npm run type-check · npm test · npm run lint"
+    secrets: inherit
+```
+
+Both repos need a `queued-for-build` label (and the usual `automerge` /
+`needs-review` labels `issue-build.yml`'s PRs get tagged with) created once:
+`gh label create queued-for-build --description "Human-approved for autonomous clustering + build" --color 5319e7`.
+
 ## Caller-stub pattern
 
 Each file here is a `workflow_call` reusable workflow with `inputs:` (defaults
