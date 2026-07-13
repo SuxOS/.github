@@ -1,0 +1,102 @@
+name: Fixer — scan repo for forgotten work (reusable)
+
+# Scans the repo for TODOs, correctness bugs, missing tests/docs, dead code, and
+# forgotten/half-finished work, and files each as a GitHub issue — the CI mirror of
+# the local `/fixer` skill. Dedupes against existing open issues before filing.
+# Never opens a PR and never touches code — filing the issue is the deliverable. It
+# deliberately does NOT label what it files `queued-for-build`: a human decides what's
+# worth autonomously building by adding that label (see issue-build.yml). Inert until
+# ANTHROPIC_API_KEY is set.
+#
+# Caller (workflow_dispatch — manual for now, add a schedule: later if desired):
+#   uses: SuxOS/.github/.github/workflows/fixer.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: "sonnet"
+      max-turns:
+        type: number
+        default: 25
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: fixer-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fixer:
+    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Preflight — need the key
+        id: pre
+        run: |
+          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
+            echo "ANTHROPIC_API_KEY not set → fixer inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+
+      - name: Claude — scan and file issues
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the fixer. Find work that needs doing in this repo and make sure it's
+            tracked — do NOT do the work yourself, do NOT open any PR.
+
+            What to look for:
+              - TODO/FIXME/XXX/HACK comments (each a candidate unless trivial/stale-obvious).
+              - Correctness bugs: read code in areas of recent churn
+                (`git log --since=30.days --stat`) and anything the TODOs point at — don't
+                cold-scan the whole repo file-by-file.
+              - Missing tests/docs: exported functions with no coverage where the repo has a
+                clear test convention elsewhere; README/CLAUDE.md sections describing behavior
+                the code no longer matches.
+              - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
+                newer part of the repo has already replaced.
+              - Forgotten work: a flag defined but never wired up, a stubbed function, a config
+                option with no effect, PLAN.md/ROADMAP items not actually implemented.
+
+            Before filing: `gh issue list --limit 200 --state open` and skip anything a
+            duplicate already covers (don't even comment, unless you found new, materially
+            different information). Batch candidates first, then dedupe against each other —
+            one root cause showing up in three files is one issue, not three.
+
+            File each surviving candidate with `gh issue create`:
+              - Title: short, specific, imperative ("Fix X", "Add test for Y") — not vague.
+              - Body: what's wrong/missing, file:line references, why it matters if
+                non-obvious, a suggested fix direction if you have one. A paragraph, not a
+                report.
+              - Do NOT add the `queued-for-build` label — a human decides what's worth
+                autonomously building from what you file.
+
+            Skip anything you're not confident is real — a plausible-sounding but unverified
+            guess is worse than silence. When done, summarize: how many issues filed (with
+            links), how many discarded as duplicates/low-confidence, and anything important
+            you weren't sure enough about to file.
+          claude_args: "--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}"
