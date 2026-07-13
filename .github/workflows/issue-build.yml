@@ -201,7 +201,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.cluster.outputs.plan) }}
+        # Default an EMPTY plan to '[]' before fromJSON. The matrix expression is evaluated at
+        # job-setup time regardless of the job `if:`, so a cheap-exit run (no queued issues → no
+        # cluster output → plan is '') would hit fromJSON('') and fail the WHOLE run with
+        # startup_failure. `|| '[]'` yields a valid empty array (zero matrix jobs) instead — the
+        # `if:` still skips the job, this just stops the parse from throwing. (A label-event storm
+        # makes empty-plan runs the common case, so this is load-bearing, not an edge guard.)
+        include: ${{ fromJSON(needs.cluster.outputs.plan || '[]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
