@@ -8,7 +8,7 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 ## The two groups
 
 **Gates** (required checks that block merge):
-`ci.yml` · `security-review.yml` · `audit.yml` · `secret-scan.yml` · `health.yml`
+`ci.yml` · `security-review.yml` · `audit.yml` · `health.yml`
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
@@ -120,7 +120,7 @@ Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
 - Repo variable `ACTIONS_BUDGET_PAUSED` — set/read by `budget-guard.yml`; you
   don't need to create it yourself, the guard creates it on first trip.
 - Branch protection on `main` (strict, requiring at minimum `Type-check &
-  build`, `security-review`, `gitleaks`, `npm audit & SBOM`) — `automerge.yml`
+  build`, `security-review`, `npm audit & SBOM`) — `automerge.yml`
   refuses to arm auto-merge unless it can verify these are actually required,
   so set this up before wiring the caller stub for `automerge.yml`.
 
