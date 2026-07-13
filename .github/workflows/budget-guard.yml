@@ -66,11 +66,20 @@ jobs:
         run: |
           set -uo pipefail
 
-          billing=$(gh api "/users/${OWNER}/settings/billing/actions" 2>/dev/null || true)
-          used=$(printf '%s' "$billing" | jq -r '.total_minutes_used // empty' 2>/dev/null || true)
+          owner_type=$(gh api "/users/${OWNER}" --jq '.type' 2>/dev/null || true)
+          if [ "$owner_type" = "Organization" ]; then
+            # The legacy /orgs/{org}/settings/billing/actions endpoint is 410 Gone;
+            # read Actions minutes from the enhanced metered-usage report instead.
+            used=$(gh api "/organizations/${OWNER}/settings/billing/usage" \
+              --jq '[.usageItems[]? | select(.product == "actions" and .unitType == "Minutes") | .quantity] | add // 0 | floor' 2>/tmp/billing_err || true)
+          else
+            used=$(gh api "/users/${OWNER}/settings/billing/actions" \
+              --jq '.total_minutes_used // empty' 2>/tmp/billing_err || true)
+          fi
           if ! printf '%s' "$used" | grep -qE '^[0-9]+$'; then
-            echo "::warning::could not read used Actions minutes (billing API returned nothing usable) — no-op this run"
-            exit 0
+            echo "::error::budget-guard could not read used Actions minutes for ${owner_type:-unknown} owner '${OWNER}' — the billing read failed, so the guard is INACTIVE (fail-open) until fixed."
+            cat /tmp/billing_err >&2 2>/dev/null || true
+            exit 1
           fi
           echo "used Actions minutes this cycle: $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
 
