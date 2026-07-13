@@ -1,0 +1,178 @@
+name: Triage — investigate untriaged issues, queue for build (reusable)
+
+# The INVESTIGATOR in the three-stage backlog pipeline (propose -> investigate -> build).
+# Independent of whoever filed the issue: it re-checks every open UNTRIAGED issue — ones
+# fixer.yml proposed AND ones a human filed — and decides, on its own read of the code,
+# what's real and what should get built.
+#
+# "Untriaged" = open, and NOT already labeled `queued-for-build` / `building` / `hold` /
+# `triaged` (see below). For each such issue the investigator:
+#   1. Investigates: for a bug, reads enough code to judge whether it actually reproduces;
+#      for a feature/idea, judges whether it's coherent and safely buildable unattended.
+#   2. Assigns its OWN type (`bug`/`enhancement`/`security`/`documentation`) and confidence
+#      (`confidence:high|medium|low`) — overriding the proposer's guess. High is reserved
+#      for changes that are narrow, unambiguous, and low-risk REGARDLESS of type (most
+#      net-new features never qualify), because high confidence is what clears a build to
+#      auto-merge unattended (see issue-build.yml).
+#   3. Decides buildable vs not. OPT-OUT DEFAULT: it queues MOST issues for build — the aim
+#      is that most work drains autonomously. It withholds `queued-for-build` only when the
+#      issue genuinely can't be built by an unattended session: a question, a duplicate,
+#      needs external info/credentials/a human decision, or is too vague/large to attempt
+#      safely. Those it labels `triaged` + `needs-human` and comments why, so they're not
+#      re-investigated every run but a human sees them.
+# Applying `queued-for-build` fires issue-build.yml via its `issues: labeled` trigger; a
+# manual issue-build dispatch is the backstop. Everything the investigator queues also gets
+# `triaged` so a partial/failed run (or the label-claim race in issue-build) can't cause it
+# to be picked up twice.
+#
+# Deterministic-apply pattern: the model returns a structured plan (--json-schema
+# structured_output, never a written file — see README gotcha) and a SHELL step applies the
+# labels, so the labeling is auditable and can't half-happen inside a model turn.
+#
+# Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), not a metered
+# ANTHROPIC_API_KEY — inert until that secret is set.
+#
+# Caller (owns its own dispatch/schedule triggers — workflow_call can't re-expose them):
+#   uses: SuxOS/.github/.github/workflows/triage.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: "sonnet"
+      max-turns:
+        type: number
+        default: 30
+      max-issues:
+        description: "Cap issues investigated per run — a burst of proposals can't run up an unbounded bill."
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: triage-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → triage inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Select untriaged issues
+        id: select
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MAX_ISSUES: ${{ inputs.max-issues }}
+        run: |
+          set -euo pipefail
+          # Untriaged = open and carrying NONE of the exclusion labels (queued-for-build /
+          # building / hold / triaged). Pull all open issues with their labels and filter in
+          # jq — a label-set predicate is more robust than composing a GitHub search string.
+          # Cap to MAX_ISSUES oldest-first so a proposal burst can't blow the budget in one
+          # run; the rest wait for the next run.
+          all=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
+            --json number,labels 2>/dev/null || echo '[]')
+          picked=$(echo "$all" | jq -c --argjson n "$MAX_ISSUES" '
+            [ .[]
+              | (.labels | map(.name)) as $l
+              | select(([ "queued-for-build","building","hold","triaged" ] - $l) | length == 4)
+            ] | sort_by(.number) | .[0:$n] | map(.number)')
+          count=$(echo "$picked" | jq 'length')
+          echo "untriaged issues to investigate ($count): $picked"
+          echo "numbers=$picked" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+
+      - name: Claude — investigate and decide
+        id: claude
+        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ISSUE_NUMBERS: ${{ steps.select.outputs.numbers }}
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the investigator. These open issue numbers are untriaged: $ISSUE_NUMBERS
+
+            Investigate EACH (`gh issue view <n>` for the full text; whoever filed it — the
+            fixer bot or a human — is irrelevant, judge the substance). Read enough of the
+            actual code to form your own view; do NOT trust the filer's framing or their
+            confidence label.
+
+            For each issue decide, on your own read:
+              - type: `bug` | `enhancement` | `security` | `documentation`
+              - confidence: `high` | `medium` | `low`.
+                  high  = you confirmed it's real by reading the code AND the change is narrow,
+                          unambiguous, and low-risk. This is the bar that lets a build merge
+                          with NO human review, so reserve it — most net-new features and any
+                          issue you couldn't fully confirm are NOT high.
+                  medium = real/worthwhile but with scope or judgment to it.
+                  low   = weak, big, ambiguous, or you couldn't confirm it.
+              - buildable: true unless an unattended coding session genuinely can't do it —
+                  a question, a duplicate, needs external info/credentials/a human decision, or
+                  too vague/large to attempt safely. DEFAULT TO true: the aim is that most work
+                  drains autonomously.
+
+            Do NOT modify any issue or write any code here — just return the plan via the
+            structured output schema, one entry per issue number you were given.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --json-schema '{"type":"object","properties":{"decisions":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"type":{"type":"string","enum":["bug","enhancement","security","documentation"]},"confidence":{"type":"string","enum":["high","medium","low"]},"buildable":{"type":"boolean"},"reason":{"type":"string"}},"required":["number","type","confidence","buildable","reason"],"additionalProperties":false}}},"required":["decisions"],"additionalProperties":false}'
+
+      - name: Apply triage labels
+        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          echo "$VERDICT" | jq -c '.decisions[]' | while read -r d; do
+            n=$(echo "$d" | jq -r '.number')
+            type=$(echo "$d" | jq -r '.type')
+            conf=$(echo "$d" | jq -r '.confidence')
+            buildable=$(echo "$d" | jq -r '.buildable')
+            reason=$(echo "$d" | jq -r '.reason // ""')
+
+            add=(--add-label "triaged" --add-label "$type" --add-label "confidence:$conf")
+            if [ "$buildable" = "true" ]; then
+              add+=(--add-label "queued-for-build")
+              echo "issue #$n → triaged, $type, confidence:$conf, queued-for-build"
+            else
+              add+=(--add-label "needs-human")
+              echo "issue #$n → triaged, $type, confidence:$conf, NOT buildable ($reason)"
+            fi
+            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" "${add[@]}" 2>/dev/null || echo "::warning::could not label #$n"
+            if [ "$buildable" != "true" ] && [ -n "$reason" ]; then
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 Triage held this off autonomous build: $reason (labeled \`needs-human\`). Add \`queued-for-build\` yourself to override." 2>/dev/null || true
+            fi
+          done

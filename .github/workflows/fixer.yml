@@ -1,0 +1,120 @@
+name: Fixer — propose work as issues (reusable)
+
+# The PROPOSER in the three-stage backlog pipeline (propose -> investigate -> build):
+#   fixer.yml (this)  — scans a repo and FILES bugs + feature ideas as issues, each with a
+#                       self-assessed `confidence:*` label. It never verifies deeply and never
+#                       decides what gets built — it just proposes.
+#   triage.yml        — an INDEPENDENT investigator re-checks each open untriaged issue (these
+#                       AND ones a human filed), assigns its own type + confidence, and opts
+#                       most of them into building with `queued-for-build` (opt-out default).
+#   issue-build.yml   — clusters the queued issues and builds one PR per chunk; only a verified
+#                       all-`confidence:high` cluster auto-merges, the rest stage for review.
+# Splitting propose from investigate is deliberate: the thing that files an issue should not
+# also be the thing that clears it for unattended building — a second, adversarial look
+# (triage.yml) catches a confidently-wrong proposal before it ever touches code.
+#
+# Never opens a PR, never touches code, never applies `queued-for-build` (that's triage's job).
+# Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`),
+# not a metered ANTHROPIC_API_KEY — inert until that secret is set.
+#
+# Caller (workflow_dispatch — manual for now; add a schedule: later if desired):
+#   uses: SuxOS/.github/.github/workflows/fixer.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: "sonnet"
+      max-turns:
+        type: number
+        default: 25
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+concurrency:
+  group: fixer-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fixer:
+    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → fixer inert. Run 'claude setup-token' and add it as an org/repo secret to arm."; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+
+      - name: Claude — scan and propose issues
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the proposer. Find work worth doing in this repo and file it as issues —
+            do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
+            investigator decides what actually gets built).
+
+            What to look for:
+              - Correctness bugs: read code in areas of recent churn
+                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
+                point at — don't cold-scan the whole repo file-by-file.
+              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
+                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
+                items not actually implemented).
+              - Missing tests/docs: exported functions with no coverage where the repo has a
+                clear test convention; README/CLAUDE.md describing behavior the code no longer
+                matches.
+              - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
+                newer part of the repo already replaced.
+
+            Before filing: `gh issue list --limit 300 --state all` and skip anything an existing
+            issue already covers (don't even comment, unless you found materially new
+            information). Batch candidates first, then dedupe against each other — one root
+            cause showing up in three files is ONE issue, not three.
+
+            File each surviving candidate with `gh issue create`, applying exactly two kinds of
+            label — a TYPE and a CONFIDENCE:
+              - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
+                docs; add `security` if it's a security issue. (These already exist as repo
+                labels.)
+              - Confidence — YOUR honest self-assessment, since the investigator will re-judge
+                it anyway:
+                  * `confidence:high`   — you read the code and are sure it's real, and the fix
+                                          is narrow, unambiguous, and low-risk.
+                  * `confidence:medium` — likely real but you didn't fully confirm, or the fix
+                                          has some judgment/scope to it.
+                  * `confidence:low`    — a hunch, a big/ambiguous idea, or anything you couldn't
+                                          verify.
+              - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
+                references, a suggested fix direction if you have one. A paragraph, not a report.
+
+            Skip anything you have no real basis for — a plausible-sounding but baseless guess is
+            worse than silence (file a genuine hunch as `confidence:low`, don't invent one). When
+            done, summarize: issues filed (with links + their confidence), how many you discarded
+            as duplicates/baseless.
+          claude_args: "--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}"

@@ -6,7 +6,8 @@ name: Claude autofix CI (reusable)
 #   - only bug/security/chore-safe/fix-type PRs (features are a human's job)
 #   - a hard cap of max-attempts bot commits per branch, then tags `needs-human`
 #   - --max-turns per run + concurrency cancel-in-progress + a cheaper model
-# Inert until ANTHROPIC_API_KEY is set.
+# Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN via 'claude setup-token'),
+# not a metered API key. Inert until that secret is set.
 #
 # Caller (needs its own `workflow_run: workflows: ["<caller's CI workflow name>"]` trigger —
 # workflow_run can't be re-exposed through workflow_call, so the caller repo owns this trigger
@@ -65,11 +66,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          HAVE_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAVE_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: |
           set -euo pipefail
           if [ "$HAVE_KEY" != "true" ]; then
-            echo "ANTHROPIC_API_KEY not set → autofix inert. Add the secret to arm it."; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → autofix inert. Run 'claude setup-token' and add it to arm."; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
           prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open \
                  --json number,labels,title,isDraft,authorAssociation,isCrossRepository,headRefName,baseRefName 2>/dev/null || echo '[]')
@@ -87,7 +88,7 @@ jobs:
           echo "PR #$num  title=$title  labels=$labels  draft=$draft  author=$assoc  fork=$fork"
 
           # RCE GUARD: this job checks out and RUNS the PR's code with a write token
-          # + ANTHROPIC_API_KEY. Only ever do that for a trusted author's same-repo
+          # + the Claude OAuth token. Only ever do that for a trusted author's same-repo
           # branch — never a fork or external contributor's untrusted code.
           case "$assoc" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "untrusted author ($assoc) → refuse to run PR code"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0;; esac
           if [ "$fork" = "true" ]; then echo "cross-repo/fork PR → refuse to run PR code"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
@@ -149,7 +150,7 @@ jobs:
           GATES_SUMMARY: ${{ inputs.gates-summary }}
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           prompt: |
             CI failed on this PR (branch $CI_HEAD_BRANCH,
