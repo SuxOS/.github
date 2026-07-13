@@ -40,7 +40,12 @@ draws from the same Pro/Max limits as interactive Claude Code / claude.ai use.
      (fixer's AND humans'), reading the code itself — it does not trust the filer's framing
      or confidence. Assigns its own type + confidence and, **opt-out by default, queues most
      issues** for build. Withholds `queued-for-build` only when an unattended session
-     genuinely can't do it (a question, a dup, needs external info, too vague) → `needs-human`.
+     genuinely can't do it (a question, a dup, needs credentials/a human decision, too vague)
+     → `needs-human`. **Research where needed:** when a call genuinely hinges on an external
+     fact the code can't settle (upstream API behavior, a known bug/CVE, what a spec mandates),
+     it does a focused web lookup and records the finding + source on the issue (`research_note`)
+     so it's auditable and the build stage inherits it — but only where needed, not per-issue.
+     Research often *un*-blocks an issue that would otherwise be `needs-human`.
    - `issue-build.yml` — **collate + build.** Clusters `queued-for-build` issues
      (n issues → m PRs, never n→1; confidence-pure clusters), fans out one build session +
      PR per cluster via a job matrix.
