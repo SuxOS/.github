@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+#
+# Scaffold the SuxOS caller-stub set for a repo.
+#
+# Every SuxOS repo inherits the shared pipeline in SuxOS/.github by dropping a
+# thin `workflow_call` caller stub for each reusable workflow into its own
+# `.github/workflows/`. This script emits that whole set in one shot, with the
+# event triggers that can't cross the `workflow_call` boundary (`workflow_run`,
+# `schedule`, `issues`, `pull_request`, ...) already declared in the caller —
+# the manual transcription the README's "Caller-stub pattern" section describes.
+#
+# Usage:
+#   scripts/scaffold-caller.sh [options]
+#
+# Options:
+#   -o, --out-dir DIR          Where to write the stubs (default: .github/workflows)
+#   -w, --wrangler-config PATH Wrangler config for CI's dry-run deploy + autofix.
+#                              Pass "" for a repo that deploys no Worker (default:
+#                              sux/wrangler.jsonc, mirroring sux-mcp).
+#   -r, --ref REF              Git ref of SuxOS/.github to pin `uses:` to
+#                              (default: main).
+#   -f, --force                Overwrite existing stub files.
+#   -h, --help                 Show this help.
+#
+# After scaffolding, finish the manual steps the generator can't do (see the
+# README "Required secrets/vars" section): set the org-level secrets, create the
+# labels, and turn on branch protection.
+
+set -euo pipefail
+
+OUT_DIR=".github/workflows"
+WRANGLER_CONFIG="sux/wrangler.jsonc"
+REF="main"
+FORCE=0
+
+die() { echo "scaffold-caller: $*" >&2; exit 1; }
+
+usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--out-dir)         OUT_DIR="${2:?}"; shift 2 ;;
+    -w|--wrangler-config) WRANGLER_CONFIG="${2-}"; shift 2 ;;
+    -r|--ref)             REF="${2:?}"; shift 2 ;;
+    -f|--force)           FORCE=1; shift ;;
+    -h|--help)            usage; exit 0 ;;
+    *)                    die "unknown option: $1 (try --help)" ;;
+  esac
+done
+
+REPO="SuxOS/.github"
+mkdir -p "$OUT_DIR"
+
+# emit NAME <<'YAML' ... YAML  — writes $OUT_DIR/NAME.yml, honouring --force.
+emit() {
+  local dest="$OUT_DIR/$1.yml"
+  if [ -e "$dest" ] && [ "$FORCE" -ne 1 ]; then
+    echo "skip   $dest (exists; --force to overwrite)"
+    return
+  fi
+  cat > "$dest"
+  echo "wrote  $dest"
+}
+
+# --- Gates -----------------------------------------------------------------
+
+emit ci <<YAML
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  ci:
+    uses: $REPO/.github/workflows/ci.yml@$REF
+    with:
+      wrangler-config: "$WRANGLER_CONFIG"
+    secrets: inherit
+YAML
+
+emit security-review <<YAML
+name: Security review
+on:
+  pull_request:
+jobs:
+  security-review:
+    uses: $REPO/.github/workflows/security-review.yml@$REF
+    secrets: inherit
+YAML
+
+emit audit <<YAML
+name: Audit
+on:
+  pull_request:
+jobs:
+  audit:
+    uses: $REPO/.github/workflows/audit.yml@$REF
+    secrets: inherit
+YAML
+
+emit health <<YAML
+name: Health
+on:
+  schedule: [{ cron: "0 * * * *" }]
+  workflow_dispatch:
+jobs:
+  health:
+    uses: $REPO/.github/workflows/health.yml@$REF
+    secrets: inherit
+YAML
+
+# --- Autonomy pipeline -----------------------------------------------------
+
+emit automerge <<YAML
+name: Automerge
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+jobs:
+  automerge:
+    uses: $REPO/.github/workflows/automerge.yml@$REF
+    secrets: inherit
+YAML
+
+emit pr-auto-update <<YAML
+name: PR auto-update
+on:
+  push:
+    branches: [main]
+jobs:
+  pr-auto-update:
+    uses: $REPO/.github/workflows/pr-auto-update.yml@$REF
+    secrets: inherit
+YAML
+
+emit pr-drain <<YAML
+name: PR drain
+on:
+  schedule: [{ cron: "0 3 * * *" }]
+  workflow_dispatch:
+jobs:
+  pr-drain:
+    uses: $REPO/.github/workflows/pr-drain.yml@$REF
+    secrets: inherit
+YAML
+
+emit pr-watch <<YAML
+name: PR watch
+on:
+  schedule: [{ cron: "0 */6 * * *" }]
+  workflow_dispatch:
+jobs:
+  pr-watch:
+    uses: $REPO/.github/workflows/pr-watch.yml@$REF
+    secrets: inherit
+YAML
+
+emit claude <<YAML
+name: Claude
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned]
+jobs:
+  claude:
+    uses: $REPO/.github/workflows/claude.yml@$REF
+    secrets: inherit
+YAML
+
+# workflow_run can't cross the workflow_call boundary — it must live here, and
+# workflows: ["CI"] must match the CI stub's `name:` above.
+emit claude-autofix <<YAML
+name: Claude autofix
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+jobs:
+  claude-autofix:
+    uses: $REPO/.github/workflows/claude-autofix.yml@$REF
+    with:
+      gates-summary: "npm run type-check · npm test · npm run lint"
+    secrets: inherit
+YAML
+
+emit budget-guard <<YAML
+name: Budget guard
+on:
+  schedule: [{ cron: "*/30 * * * *" }]
+  workflow_dispatch:
+jobs:
+  budget-guard:
+    uses: $REPO/.github/workflows/budget-guard.yml@$REF
+    secrets: inherit
+YAML
+
+emit skill-sync <<YAML
+name: Skill sync
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  skill-sync:
+    uses: $REPO/.github/workflows/skill-sync.yml@$REF
+    secrets: inherit
+YAML
+
+# --- Backlog pipeline (propose -> investigate -> build) --------------------
+
+emit fixer <<YAML
+name: Fixer
+on:
+  schedule: [{ cron: "17 8 * * *" }]
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: $REPO/.github/workflows/fixer.yml@$REF
+    secrets: inherit
+YAML
+
+emit triage <<YAML
+name: Triage
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+jobs:
+  triage:
+    uses: $REPO/.github/workflows/triage.yml@$REF
+    secrets: inherit
+YAML
+
+emit issue-build <<YAML
+name: Issue build
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+jobs:
+  issue-build:
+    if: github.event_name != 'issues' || github.event.label.name == 'queued-for-build'
+    uses: $REPO/.github/workflows/issue-build.yml@$REF
+    with:
+      gates-summary: "npm run type-check · npm test · npm run lint"
+    secrets: inherit
+YAML
+
+cat <<'DONE'
+
+Caller stubs scaffolded. Remaining manual steps (see README):
+  - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY,
+    SUX_BOT_APP_ID, SUX_BOT_PRIVATE_KEY.
+  - Create labels: queued-for-build, building, triaged, confidence:high|medium|low,
+    automerge, needs-review, needs-human, hold.
+  - Turn on strict branch protection on main (Type-check & build, security-review,
+    gitleaks, npm audit & SBOM) before relying on automerge.
+DONE
