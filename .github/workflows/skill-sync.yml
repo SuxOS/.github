@@ -93,6 +93,7 @@ jobs:
             gh pr comment "$existing" --body "Refreshed by the latest Skill sync run."
             echo "Updated existing PR #$existing." | tee -a "$GITHUB_STEP_SUMMARY"
           else
+            # shellcheck disable=SC2016  # backticks below are literal Markdown, not command substitution
             gh pr create \
               --title "docs: re-mirror plugin skill" \
               --body "$(printf 'Automated source-derived re-mirror by the **Skill sync** workflow:\n\n- `%s` — re-mirrored from source\n\nRun: %s/%s/actions/runs/%s' "$MIRROR_PATH" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")"

@@ -112,7 +112,11 @@ jobs:
             echo "UNDER resume-below → ensuring discretionary spenders are enabled"
             set_var "false"
             for wf in $DISCRETIONARY; do
-              gh workflow enable "$wf" --repo "$REPO" 2>/dev/null && echo "enabled $wf" || echo "$wf already enabled / perms"
+              if gh workflow enable "$wf" --repo "$REPO" 2>/dev/null; then
+                echo "enabled $wf"
+              else
+                echo "$wf already enabled / perms"
+              fi
             done
             if [ -n "$existing" ]; then
               gh issue comment "$existing" --repo "$REPO" \
