@@ -31,6 +31,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: health-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   health:
     name: Regression canary + smoke check
@@ -57,7 +61,8 @@ jobs:
           EXPECTED_STATUS: ${{ inputs.expected-status }}
         run: |
           set -euo pipefail
-          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SMOKE_URL" || echo 000)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SMOKE_URL")" || true
+          code="${code:-000}"
           echo "GET $SMOKE_URL -> HTTP ${code}"
           if [ "${code}" != "${EXPECTED_STATUS}" ]; then
             echo "::error::Expected HTTP ${EXPECTED_STATUS} from ${SMOKE_URL}, got ${code}"
