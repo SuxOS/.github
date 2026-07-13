@@ -82,7 +82,7 @@ jobs:
           prompt: |
             Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
             exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
-            `${{ github.event.* }}` in workflows), GitHub Actions abuse (pull_request_target +
+            `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
             untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
             blast radius, and any autonomous-bot action that could touch prod or user data
             unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
