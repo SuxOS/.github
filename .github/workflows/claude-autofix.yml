@@ -127,6 +127,9 @@ jobs:
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          if ! printf '%s' "$MAX_ATTEMPTS" | grep -qE '^[0-9]+$'; then
+            echo "::error::max-attempts must be a non-negative integer, got '$MAX_ATTEMPTS'"; exit 1
+          fi
           git fetch origin "$BASE_BRANCH" --quiet
           base=$(git merge-base "origin/$BASE_BRANCH" HEAD)
           attempts=$(git log --format='%an' "$base"..HEAD | grep -c -iE 'claude|github-actions|sux-bot|\[bot\]' || true)
