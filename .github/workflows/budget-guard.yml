@@ -88,7 +88,11 @@ jobs:
             echo "OVER soft cap → pausing discretionary spenders ($DISCRETIONARY)"
             set_var "true"
             for wf in $DISCRETIONARY; do
-              gh workflow disable "$wf" --repo "$REPO" 2>/dev/null && echo "disabled $wf" || echo "::warning::could not disable $wf (already off / perms)"
+              if gh workflow disable "$wf" --repo "$REPO" 2>/dev/null; then
+                echo "disabled $wf"
+              else
+                echo "::warning::could not disable $wf (already off / perms)"
+              fi
             done
             body=$(printf '%s\n' \
               "Auto-maintained by the Actions budget guard (${GITHUB_SERVER_URL}/${REPO}/actions/workflows/budget-guard.yml). $(date -u '+%Y-%m-%d %H:%M UTC')." \
@@ -121,7 +125,9 @@ jobs:
             if [ -n "$existing" ]; then
               gh issue comment "$existing" --repo "$REPO" \
                 --body "Used Actions minutes back under the resume threshold ($used < $RESUME_BELOW) as of $(date -u '+%Y-%m-%d %H:%M UTC'). Discretionary spenders re-enabled. Closing." 2>/dev/null || true
-              gh issue close "$existing" --repo "$REPO" 2>/dev/null && echo "closed tracking issue #$existing" || true
+              if gh issue close "$existing" --repo "$REPO" 2>/dev/null; then
+                echo "closed tracking issue #$existing"
+              fi
             fi
             exit 0
           fi
