@@ -19,14 +19,15 @@ name: Auto-merge (reusable)
 #
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/automerge.yml@main
-#   with: { app-id-secret-name: ..., ... }  # see inputs below
+#   with: { required-gates: ... }  # optional; see inputs below
 #   secrets: inherit
 #
-# NOTE: this workflow needs the caller's GitHub App id/key secret names, which
-# reusable workflows can't read dynamically — so the caller passes them as inputs
-# and this workflow reads them via `secrets: inherit` + the fixed names
-# SUX_BOT_APP_ID / SUX_BOT_PRIVATE_KEY (rename in the caller repo's secrets, or
-# fork this file, if a different bot identity is needed).
+# NOTE: this workflow mints its App token from the FIXED secret names
+# SUX_BOT_APP_ID / SUX_BOT_PRIVATE_KEY, inherited via `secrets: inherit`. The
+# caller must define the App id/key under exactly those names (there is no
+# secret-name input — reusable workflows can't read secret names dynamically).
+# For a different bot identity, store its id/key under SUX_BOT_APP_ID /
+# SUX_BOT_PRIVATE_KEY in the caller repo, or fork this file.
 
 on:
   workflow_call:
@@ -139,7 +140,8 @@ jobs:
 
           ineligible() {
             echo "$1 → not auto-merge-eligible; disabling any pending auto-merge"
-            gh pr merge --disable-auto "$PR_URL" 2>/dev/null || true
+            gh pr merge --disable-auto "$PR_URL" || {
+              echo "::warning::could not disable auto-merge on ineligible PR ($1) — if it was previously armed it may still complete once checks go green; disable it manually"; }
             exit 0
           }
 
