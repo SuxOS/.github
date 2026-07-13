@@ -5,9 +5,15 @@ name: PR drain — close-stale + reconcile (reusable)
 #     past STALE_DAYS get a heads-up comment and are closed. Opt out with `hold`/`keep`.
 #   RECONCILE — a green, mergeable PR eligible under the same predicate automerge.yml
 #     uses but never armed gets `gh pr merge --auto --squash`. Native auto-merge still
-#     gates the actual merge on CI + branch protection — this only ARMS it.
+#     gates the actual merge on CI + branch protection — this only ARMS it. Before
+#     arming, this shares automerge.yml's branch-protection assertion (the
+#     assert-branch-protection composite action) so it never re-arms auto-merge when
+#     main's required checks have lost a security gate.
 # gh CLI + jq only, no checkout. App token so mutations carry the bot identity.
-# Every mutation is per-PR `|| true` so one failure can't wedge the sweep.
+# Every mutation is per-PR `|| true` so one failure can't wedge the sweep. The batch
+# PR list only picks CANDIDATES — each PR's live labels/state are re-read immediately
+# before acting, so a `hold`/`keep` or a mergeStateStatus change from a concurrent bot
+# (automerge.yml, security-review.yml) in the intervening seconds is honoured.
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/pr-drain.yml@main
@@ -20,6 +26,17 @@ on:
       stale-days:
         type: string
         default: "14"
+      required-gates:
+        description: >-
+          Newline-separated check-run names that main branch protection (or a
+          ruleset) must require before RECONCILE is trusted to arm auto-merge —
+          shared with automerge.yml's identical assertion. Keep in sync with the
+          caller's automerge `required-gates`.
+        type: string
+        default: |
+          Type-check & build
+          security-review
+          npm audit & SBOM
 
 permissions:
   contents: write
@@ -46,7 +63,10 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
-      - name: Drain the open-PR queue
+      # ── CLOSE-STALE ────────────────────────────────────────────────────────────────
+      # The batch list picks candidates; each PR is re-read live before closing so a
+      # `hold`/`keep` or fresh activity from a concurrent bot in the interim wins.
+      - name: Close stale PRs
         id: drain
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -65,21 +85,30 @@ jobs:
             exit 1
           fi
 
-          now=$(date -u +%s)
           stale=$(( STALE_DAYS * 86400 ))
 
-          # ── CLOSE-STALE ──────────────────────────────────────────────────────────────
-          to_close=$(echo "$prs" | jq -r --argjson now "$now" --argjson stale "$stale" '
-            .[]
-            | select(.isDraft | not)
+          # shellcheck disable=SC2016  # jq program; $now/$stale/$l are jq vars, not shell
+          stale_filter='
+            select(.isDraft | not)
             | ([.labels[].name]) as $l
             | select(($l | index("self-improve")) or ($l | index("needs-human")))
             | select(($l | index("hold")) | not)
             | select(($l | index("keep")) | not)
-            | select(($now - (.updatedAt | fromdateiso8601)) >= $stale)
-            | .number')
-          for n in $to_close; do
+            | select((($now | tonumber) - (.updatedAt | fromdateiso8601)) >= ($stale | tonumber))
+            | .number'
+
+          candidates=$(printf '%s' "$prs" \
+            | jq -r --arg now "$(date -u +%s)" --arg stale "$stale" ".[] | $stale_filter")
+
+          for n in $candidates; do
             echo "::group::close-stale PR #$n"
+            # Re-read this PR's live state; skip if it no longer qualifies.
+            if ! gh pr view "$n" --json number,isDraft,labels,updatedAt 2>/dev/null \
+              | jq -e --arg now "$(date -u +%s)" --arg stale "$stale" "$stale_filter" >/dev/null; then
+              echo "#$n no longer stale-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
             gh pr comment "$n" --body "🧹 Closing as stale — no activity in ${STALE_DAYS}+ days. This was a bot/needs-human PR; reopen it, or add \`keep\`/\`hold\` to retain it next time." 2>/dev/null || true
             gh pr close "$n" && echo "closed #$n" || echo "::warning::could not close #$n (see gh error above)"
             echo "::endgroup::"
@@ -90,7 +119,7 @@ jobs:
           # Structural filter only (green, unarmed, trusted, not held/feature). The
           # drift-prone safe-type/label/breaking core predicate is applied by the
           # shared pr-eligibility action in the next step.
-          candidates=$(echo "$prs" | jq -c '
+          candidates=$(printf '%s' "$prs" | jq -c '
             [ .[]
               | select(.isDraft | not)
               | select(.mergeStateStatus == "CLEAN")
@@ -108,6 +137,18 @@ jobs:
         with:
           prs-json: ${{ steps.drain.outputs.reconcile-candidates }}
 
+      # Share automerge.yml's fail-closed branch-protection gate before arming any
+      # auto-merge, so a misconfigured main that dropped a required security gate
+      # stops this sweep from re-arming just as it stops automerge.yml.
+      - name: Assert main branch protection requires the security gates
+        uses: SuxOS/.github/.github/actions/assert-branch-protection@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          required-gates: ${{ inputs.required-gates }}
+
+      # The batch list picks candidates; each PR is re-read live before arming so a
+      # `hold`, a lost mergeStateStatus, or an already-armed auto-merge set by a
+      # concurrent bot in the interim wins.
       - name: Reconcile — arm auto-merge on eligible green PRs
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -115,9 +156,29 @@ jobs:
           ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
         run: |
           set -uo pipefail
+
+          # shellcheck disable=SC2016  # jq program; $l is a jq var, not shell
+          structural_filter='
+            select(.isDraft | not)
+            | select(.mergeStateStatus == "CLEAN")
+            | select(.autoMergeRequest == null)
+            | select(["OWNER","MEMBER","COLLABORATOR"] | index(.authorAssociation))
+            | ([.labels[].name]) as $l
+            | select(($l | index("hold")) | not)
+            | select(($l | index("feature")) | not)'
+
           for n in $ELIGIBLE_NUMBERS; do
             echo "::group::reconcile PR #$n (arm auto-merge)"
-            gh pr merge --auto --squash "$n" && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (see gh error above)"
+            # Re-read this PR's live state; skip if it no longer structurally qualifies
+            # (the safe-type/label/breaking predicate was already checked above; only
+            # the fast-changing structural fields are worth re-reading here).
+            if ! gh pr view "$n" --json number,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation 2>/dev/null \
+              | jq -e "$structural_filter" >/dev/null; then
+              echo "#$n no longer arm-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            gh pr merge --auto --squash "$n" 2>/dev/null && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (branch protection unmet / already merging)"
             echo "::endgroup::"
             sleep 2
           done
