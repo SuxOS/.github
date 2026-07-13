@@ -15,10 +15,16 @@ name: PR auto-update / self-drain (reusable)
 #
 # Caller (needs its own push/schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/pr-auto-update.yml@main
+#   with: { pr-limit: "200" }
 #   secrets: inherit
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      pr-limit:
+        description: "Max open PRs to fetch per run (gh pr list --limit)."
+        type: string
+        default: "100"
 
 permissions:
   contents: write
@@ -43,9 +49,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          PR_LIMIT: ${{ inputs.pr-limit }}
         run: |
           set -uo pipefail
-          prs=$(gh pr list --state open --limit 100 \
+          prs=$(gh pr list --state open --limit "$PR_LIMIT" \
             --json number,mergeStateStatus,isDraft,autoMergeRequest,labels \
             --jq '.[]
               | select(.isDraft == false)

@@ -7,7 +7,7 @@ name: Stuck-PR watcher (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/pr-watch.yml@main
-#   with: { stale-hours: "6" }
+#   with: { stale-hours: "6", pr-limit: "200" }
 #   secrets: inherit
 
 on:
@@ -19,6 +19,14 @@ on:
       issue-title:
         type: string
         default: "Stuck PRs — pipeline watcher"
+      pr-limit:
+        description: "Max open PRs to fetch per run (gh pr list --limit)."
+        type: string
+        default: "100"
+      issue-limit:
+        description: "Max open issues to fetch when de-duping the tracking issue (gh issue list --limit)."
+        type: string
+        default: "100"
 
 permissions:
   contents: read
@@ -33,6 +41,8 @@ concurrency:
 
 env:
   STALE_HOURS: ${{ inputs.stale-hours }}
+  PR_LIMIT: ${{ inputs.pr-limit }}
+  ISSUE_LIMIT: ${{ inputs.issue-limit }}
 
 jobs:
   watch:
@@ -46,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
             --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt)
 
           now=$(date -u +%s)
@@ -71,7 +81,7 @@ jobs:
           echo "stuck PRs: $count"
           echo "$stuck" | jq .
 
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit "$ISSUE_LIMIT" --json number,title \
             | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
 
           if [ "$count" -eq 0 ]; then

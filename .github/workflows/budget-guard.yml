@@ -11,7 +11,7 @@ name: Actions budget guard (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/budget-guard.yml@main
-#   with: { budget: "2500", resume-below: "2400", discretionary-workflows: "claude.yml claude-autofix.yml" }
+#   with: { budget: "2500", resume-below: "2400", discretionary-workflows: "claude.yml claude-autofix.yml", dry-run: false }
 #   secrets: inherit
 
 on:
@@ -30,6 +30,14 @@ on:
       issue-title:
         type: string
         default: "Actions budget — discretionary spenders paused"
+      issue-limit:
+        description: "Max open issues to fetch when de-duping the tracking issue (gh issue list --limit)."
+        type: string
+        default: "100"
+      dry-run:
+        description: "Log the computed action sets but skip gh workflow disable/enable, the ACTIONS_BUDGET_PAUSED variable-set, and the tracking-issue mutations."
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -45,6 +53,8 @@ env:
   RESUME_BELOW: ${{ inputs.resume-below }}
   ISSUE_TITLE: ${{ inputs.issue-title }}
   DISCRETIONARY: ${{ inputs.discretionary-workflows }}
+  ISSUE_LIMIT: ${{ inputs.issue-limit }}
+  DRY_RUN: ${{ inputs.dry-run }}
 
 jobs:
   guard:
@@ -75,20 +85,33 @@ jobs:
           echo "used Actions minutes this cycle: $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
 
           set_var() {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would set ACTIONS_BUDGET_PAUSED=$1"
+              return 0
+            fi
             gh api --method PATCH "/repos/${REPO}/actions/variables/ACTIONS_BUDGET_PAUSED" \
               -f "name=ACTIONS_BUDGET_PAUSED" -f "value=$1" >/dev/null 2>&1 && return 0
             gh api --method POST "/repos/${REPO}/actions/variables" \
               -f "name=ACTIONS_BUDGET_PAUSED" -f "value=$1" >/dev/null 2>&1 || true
           }
 
-          existing=$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+          existing=$(gh issue list --repo "$REPO" --state open --limit "$ISSUE_LIMIT" --json number,title \
             | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
 
           if [ "$used" -ge "$BUDGET" ]; then
-            echo "OVER soft cap → pausing discretionary spenders ($DISCRETIONARY)"
+            echo "to-disable: $DISCRETIONARY"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] OVER soft cap → would pause discretionary spenders ($DISCRETIONARY)"
+            else
+              echo "OVER soft cap → pausing discretionary spenders ($DISCRETIONARY)"
+            fi
             set_var "true"
             for wf in $DISCRETIONARY; do
-              gh workflow disable "$wf" --repo "$REPO" 2>/dev/null && echo "disabled $wf" || echo "::warning::could not disable $wf (already off / perms)"
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would disable $wf"
+              else
+                gh workflow disable "$wf" --repo "$REPO" 2>/dev/null && echo "disabled $wf" || echo "::warning::could not disable $wf (already off / perms)"
+              fi
             done
             body=$(printf '%s\n' \
               "Auto-maintained by the Actions budget guard (${GITHUB_SERVER_URL}/${REPO}/actions/workflows/budget-guard.yml). $(date -u '+%Y-%m-%d %H:%M UTC')." \
@@ -100,7 +123,13 @@ jobs:
               "Safety/deploy gates are untouched and still run." \
               "" \
               "Auto-resumes once used minutes drop below **$RESUME_BELOW**. To resume now: enable the discretionary workflows and set the repo variable \`ACTIONS_BUDGET_PAUSED=false\`.")
-            if [ -n "$existing" ]; then
+            if [ "$DRY_RUN" = "true" ]; then
+              if [ -n "$existing" ]; then
+                echo "[dry-run] would refresh tracking issue #$existing"
+              else
+                echo "[dry-run] would open tracking issue"
+              fi
+            elif [ -n "$existing" ]; then
               gh issue edit "$existing" --repo "$REPO" --body "$body" && echo "refreshed tracking issue #$existing"
             else
               gh issue create --repo "$REPO" --title "$ISSUE_TITLE" --body "$body" && echo "opened tracking issue"
@@ -109,15 +138,28 @@ jobs:
           fi
 
           if [ "$used" -lt "$RESUME_BELOW" ]; then
-            echo "UNDER resume-below → ensuring discretionary spenders are enabled"
+            echo "to-enable: $DISCRETIONARY"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] UNDER resume-below → would ensure discretionary spenders are enabled"
+            else
+              echo "UNDER resume-below → ensuring discretionary spenders are enabled"
+            fi
             set_var "false"
             for wf in $DISCRETIONARY; do
-              gh workflow enable "$wf" --repo "$REPO" 2>/dev/null && echo "enabled $wf" || echo "$wf already enabled / perms"
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would enable $wf"
+              else
+                gh workflow enable "$wf" --repo "$REPO" 2>/dev/null && echo "enabled $wf" || echo "$wf already enabled / perms"
+              fi
             done
             if [ -n "$existing" ]; then
-              gh issue comment "$existing" --repo "$REPO" \
-                --body "Used Actions minutes back under the resume threshold ($used < $RESUME_BELOW) as of $(date -u '+%Y-%m-%d %H:%M UTC'). Discretionary spenders re-enabled. Closing." 2>/dev/null || true
-              gh issue close "$existing" --repo "$REPO" 2>/dev/null && echo "closed tracking issue #$existing" || true
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "[dry-run] would comment + close tracking issue #$existing"
+              else
+                gh issue comment "$existing" --repo "$REPO" \
+                  --body "Used Actions minutes back under the resume threshold ($used < $RESUME_BELOW) as of $(date -u '+%Y-%m-%d %H:%M UTC'). Discretionary spenders re-enabled. Closing." 2>/dev/null || true
+                gh issue close "$existing" --repo "$REPO" 2>/dev/null && echo "closed tracking issue #$existing" || true
+              fi
             fi
             exit 0
           fi

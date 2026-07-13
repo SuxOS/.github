@@ -133,13 +133,13 @@ jobs:
               .join("\n");
 
             try {
-              const existing = await github.rest.issues.listForRepo({
+              const existing = await github.paginate(github.rest.issues.listForRepo, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 state: "open",
                 per_page: 100,
               });
-              const hit = existing.data.find(
+              const hit = existing.find(
                 (i) => !i.pull_request && i.title === title,
               );
               if (hit) {

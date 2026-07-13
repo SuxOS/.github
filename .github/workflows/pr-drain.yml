@@ -11,7 +11,7 @@ name: PR drain — close-stale + reconcile (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/pr-drain.yml@main
-#   with: { stale-days: "14" }
+#   with: { stale-days: "14", pr-limit: "200", dry-run: false }
 #   secrets: inherit
 
 on:
@@ -20,6 +20,14 @@ on:
       stale-days:
         type: string
         default: "14"
+      pr-limit:
+        description: "Max open PRs to fetch per run (gh pr list --limit)."
+        type: string
+        default: "100"
+      dry-run:
+        description: "Log the computed action sets but skip gh pr close / gh pr merge --auto mutations."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,6 +40,8 @@ concurrency:
 
 env:
   STALE_DAYS: ${{ inputs.stale-days }}
+  PR_LIMIT: ${{ inputs.pr-limit }}
+  DRY_RUN: ${{ inputs.dry-run }}
 
 jobs:
   drain:
@@ -52,7 +62,7 @@ jobs:
         run: |
           set -uo pipefail
 
-          prs=$(gh pr list --state open --limit 100 \
+          prs=$(gh pr list --state open --limit "$PR_LIMIT" \
             --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation,updatedAt)
 
           now=$(date -u +%s)
@@ -68,12 +78,17 @@ jobs:
             | select(($l | index("keep")) | not)
             | select(($now - (.updatedAt | fromdateiso8601)) >= $stale)
             | .number')
+          echo "to_close: $(echo "$to_close" | tr '\n' ' ')"
           for n in $to_close; do
             echo "::group::close-stale PR #$n"
-            gh pr comment "$n" --body "🧹 Closing as stale — no activity in ${STALE_DAYS}+ days. This was a bot/needs-human PR; reopen it, or add \`keep\`/\`hold\` to retain it next time." 2>/dev/null || true
-            gh pr close "$n" 2>/dev/null && echo "closed #$n" || echo "::warning::could not close #$n (skipping)"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would comment + close PR #$n"
+            else
+              gh pr comment "$n" --body "🧹 Closing as stale — no activity in ${STALE_DAYS}+ days. This was a bot/needs-human PR; reopen it, or add \`keep\`/\`hold\` to retain it next time." 2>/dev/null || true
+              gh pr close "$n" 2>/dev/null && echo "closed #$n" || echo "::warning::could not close #$n (skipping)"
+              sleep 2
+            fi
             echo "::endgroup::"
-            sleep 2
           done
 
           # ── RECONCILE ────────────────────────────────────────────────────────────────
@@ -92,11 +107,16 @@ jobs:
                 or (.title | test("^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\\([^)]*\\))?:"; "i"))
               )
             | .number')
+          echo "to_arm: $(echo "$to_arm" | tr '\n' ' ')"
           for n in $to_arm; do
             echo "::group::reconcile PR #$n (arm auto-merge)"
-            gh pr merge --auto --squash "$n" 2>/dev/null && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (branch protection unmet / already merging)"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would arm auto-merge on #$n"
+            else
+              gh pr merge --auto --squash "$n" 2>/dev/null && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (branch protection unmet / already merging)"
+              sleep 2
+            fi
             echo "::endgroup::"
-            sleep 2
           done
 
           echo "drain complete"
