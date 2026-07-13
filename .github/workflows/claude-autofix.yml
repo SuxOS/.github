@@ -72,8 +72,9 @@ jobs:
           if [ "$HAVE_KEY" != "true" ]; then
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → autofix inert. Run 'claude setup-token' and add it to arm."; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
-          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open \
-                 --json number,labels,title,isDraft,authorAssociation,isCrossRepository,headRefName,baseRefName 2>/dev/null || echo '[]')
+          if ! prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open \
+                 --json number,labels,title,isDraft,authorAssociation,isCrossRepository,headRefName,baseRefName); then
+            echo "::warning::gh pr list failed for head=$HEAD_BRANCH base=$BASE_BRANCH → cannot determine PR state, skipping (this is NOT a genuine 'no open PR')"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           matches=$(echo "$prs" | jq -c --arg h "$HEAD_BRANCH" --arg b "$BASE_BRANCH" '[.[] | select(.headRefName==$h and .baseRefName==$b)]')
           count=$(echo "$matches" | jq 'length')
           if [ "$count" -eq 0 ]; then echo "no open PR for $HEAD_BRANCH → $BASE_BRANCH → skip"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
