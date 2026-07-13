@@ -32,12 +32,16 @@ on:
   workflow_call:
     inputs:
       required-gates:
-        description: "Newline-separated check-run names that main branch protection must require before auto-merge is trusted to be gated (job `name`s, one per line)."
+        description: >-
+          Newline-separated check-run names that main branch protection (or a
+          ruleset) must require before auto-merge is trusted to be gated (job
+          `name`s, one per line). Secret scanning is GitHub's native
+          secret-scanning + push-protection (repo Settings → Security), not a
+          status check, so it needs no entry here.
         type: string
         default: |
           Type-check & build
           security-review
-          gitleaks
           npm audit & SBOM
 
 permissions:
@@ -68,17 +72,43 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       # Refuse to enable auto-merge unless every required gate is present in main's
-      # required_status_checks — native auto-merge completes the instant REQUIRED
-      # checks go green, so a slow security review only guards the merge if it's
-      # actually required. If the gates aren't required, this degrades to a no-op.
+      # required checks — native auto-merge completes the instant REQUIRED checks go
+      # green, so a slow security review only guards the merge if it's actually
+      # required. Reads BOTH governance surfaces (classic branch protection AND
+      # repository rulesets — a merge-queue is typically ruleset-gated, and its
+      # required checks don't appear in the classic-protection payload) and unions
+      # them; a gate need only be present in EITHER. Distinguishes a positive "not
+      # required" finding from a merely unreadable one:
+      #   • at least one surface reads OK but a required gate is still missing →
+      #     ::error:: + exit 1 (fail closed, LOUD) — this also covers a fully
+      #     unprotected branch (404 on both surfaces reads as "required = none"),
+      #     which used to warn-and-continue and let an ungated merge through.
+      #   • BOTH surfaces fail to read (403 / network — can't determine state at
+      #     all) → ::warning:: + continue: a perms blip must not jam every
+      #     auto-merge, and GitHub still won't complete the merge if a check is
+      #     actually required.
       - name: Assert main branch protection requires the security gates
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REQUIRED_GATES: ${{ inputs.required-gates }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          read_ok=false
+          required=""
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
-            required=$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | unique[]')
+            read_ok=true
+            required="$required
+          $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
+          fi
+          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+            read_ok=true
+            required="$required
+          $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
+          fi
+          if [ "$read_ok" != "true" ]; then
+            echo "::warning::could not READ main branch protection OR rulesets (token perms / network) — cannot determine protection state, so continuing WITHOUT blocking; a token/API blip must not jam the queue. If the checks are required, GitHub still gates the actual merge."
+          else
+            required=$(printf '%s\n' "$required" | sed 's/^ *//' | grep -v '^$' | sort -u)
             missing=""
             while IFS= read -r gate; do
               [ -z "$gate" ] && continue
@@ -87,12 +117,10 @@ jobs:
               fi
             done <<< "$REQUIRED_GATES"
             if [ -n "$missing" ]; then
-              echo "::error::main branch protection does NOT require these gates: $missing — refusing to enable auto-merge (they'd stay advisory and lose the race to fast CI). Add them to main's required_status_checks to re-arm auto-merge."
+              echo "::error::main does NOT require these gates (checked classic protection + rulesets): $missing — refusing to enable auto-merge (they'd stay advisory and lose the race to fast CI). Add them to main's required_status_checks (branch protection or a ruleset) to re-arm auto-merge."
               exit 1
             fi
-            echo "branch protection OK: main requires all security gates"
-          else
-            echo "::warning::could not READ main branch protection (token perms / 404 / network) — cannot determine protection state, so continuing WITHOUT blocking; a token blip must not jam the merge queue. If the checks are required, GitHub still gates the actual merge."
+            echo "branch protection/ruleset OK: main requires all security gates"
           fi
 
       - name: Decide eligibility and enable auto-merge
