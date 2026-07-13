@@ -6,7 +6,7 @@ name: Actions budget guard (reusable)
 # untouched. Two brakes: (1) sets repo variable ACTIONS_BUDGET_PAUSED=true, a
 # race-free fast-path the discretionary jobs gate their `if:` on, and (2)
 # `gh workflow disable`s them. Never touches ci/deploy/security-review/audit/
-# secret-scan. Hysteresis (resume-below < soft-cap) avoids flapping at the
+# health. Hysteresis (resume-below < soft-cap) avoids flapping at the
 # boundary. If the billing read fails, it does NOTHING.
 #
 # Caller (needs its own schedule/dispatch triggers):
@@ -72,13 +72,23 @@ jobs:
             echo "::warning::could not read used Actions minutes (billing API returned nothing usable) — no-op this run"
             exit 0
           fi
+          if ! printf '%s' "$BUDGET" | grep -qE '^[0-9]+$'; then
+            echo "::error::budget input is not a non-negative integer (got '$BUDGET')"
+            exit 1
+          fi
+          if ! printf '%s' "$RESUME_BELOW" | grep -qE '^[0-9]+$'; then
+            echo "::error::resume-below input is not a non-negative integer (got '$RESUME_BELOW')"
+            exit 1
+          fi
           echo "used Actions minutes this cycle: $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
 
           set_var() {
             gh api --method PATCH "/repos/${REPO}/actions/variables/ACTIONS_BUDGET_PAUSED" \
               -f "name=ACTIONS_BUDGET_PAUSED" -f "value=$1" >/dev/null 2>&1 && return 0
-            gh api --method POST "/repos/${REPO}/actions/variables" \
-              -f "name=ACTIONS_BUDGET_PAUSED" -f "value=$1" >/dev/null 2>&1 || true
+            if ! gh api --method POST "/repos/${REPO}/actions/variables" \
+              -f "name=ACTIONS_BUDGET_PAUSED" -f "value=$1" >/dev/null 2>&1; then
+              echo "::warning::could not set repo variable ACTIONS_BUDGET_PAUSED=$1 (PATCH and POST both failed — check the app token has actions:write on variables); workflows gating on it will not see the pause"
+            fi
           }
 
           existing=$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
@@ -88,7 +98,11 @@ jobs:
             echo "OVER soft cap → pausing discretionary spenders ($DISCRETIONARY)"
             set_var "true"
             for wf in $DISCRETIONARY; do
-              gh workflow disable "$wf" --repo "$REPO" 2>/dev/null && echo "disabled $wf" || echo "::warning::could not disable $wf (already off / perms)"
+              if err=$(gh workflow disable "$wf" --repo "$REPO" 2>&1); then
+                echo "disabled $wf"
+              else
+                echo "::warning::could not disable $wf: ${err:-unknown error}"
+              fi
             done
             body=$(printf '%s\n' \
               "Auto-maintained by the Actions budget guard (${GITHUB_SERVER_URL}/${REPO}/actions/workflows/budget-guard.yml). $(date -u '+%Y-%m-%d %H:%M UTC')." \
