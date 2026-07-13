@@ -1,6 +1,7 @@
 name: Claude mention + review (reusable)
 
-# Two hands-off assists (both inert until ANTHROPIC_API_KEY is set):
+# Two hands-off assists (both inert until CLAUDE_CODE_OAUTH_TOKEN is set):
+# Runs on a Claude Pro/Max subscription (claude setup-token), not a metered API key.
 #   1. @claude — mention the bot in any PR/issue comment or review and it responds.
 #   2. Review on open — a review pass on every non-draft PR.
 # Cost-bounded: concurrency cancel-in-progress, --max-turns, review only on
@@ -59,8 +60,8 @@ jobs:
       - name: Preflight — need the key
         id: pre
         run: |
-          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
-            echo "ANTHROPIC_API_KEY not set → inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       # Push with the App identity, not GITHUB_TOKEN — see automerge.yml comment;
       # GITHUB_TOKEN pushes never re-fire required CI checks.
@@ -82,7 +83,7 @@ jobs:
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: "@claude"
           claude_args: "--max-turns ${{ inputs.mention-max-turns }} --model ${{ inputs.mention-model }}"
@@ -100,8 +101,8 @@ jobs:
       - name: Preflight — need the key
         id: pre
         run: |
-          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
-            echo "ANTHROPIC_API_KEY not set → inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
@@ -113,6 +114,6 @@ jobs:
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ inputs.review-prompt }}
           claude_args: "--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }}"

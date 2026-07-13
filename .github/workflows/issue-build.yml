@@ -1,0 +1,306 @@
+name: Issue build — cluster related issues, one PR per cluster (reusable)
+
+# The COLLATE + BUILD stage of the backlog pipeline (propose -> investigate -> build).
+# n -> m, never n -> 1: reads every open issue labeled `queued-for-build` (triage.yml, or a
+# human, put that label there), has Claude group RELATED ones together (shared root cause /
+# feature area / files touched), then fans out one independent build session + one PR per
+# cluster — never one giant PR for the whole backlog.
+#
+# Auto-merge posture is OPT-OUT-BY-DEFAULT, keyed on the investigator's confidence label:
+#   - a cluster in which EVERY issue is `confidence:high` (and none is `hold`) → labeled
+#     `automerge`, flowing into the EXISTING automerge pipeline to merge unattended once the
+#     gates are green. `confidence:high` is triage.yml's high bar (narrow, verified, low-risk),
+#     so "merge high confidence" stays safe.
+#   - every other cluster → labeled `needs-review`: the PR still opens (most work gets built
+#     and drained), it just STAGES for a human instead of self-merging.
+# Eligibility is read from the SOURCE ISSUES' actual GitHub labels, never from the AI-authored
+# PR title — trusting the model's own title to gate unattended merge would be circular.
+#
+# Two jobs:
+#   cluster — one read-only Claude session lists `queued-for-build` issues (with their labels)
+#             and returns a clustering plan via --json-schema structured_output (never a
+#             written file — see README's structured_output gotcha). Keeps clusters
+#             CONFIDENCE-PURE (never mixes a `confidence:high` issue with a lower-confidence
+#             one) so a high cluster's automerge can't drag along an unverified issue. Claims
+#             each issue by swapping `queued-for-build` -> `building` so a burst of label
+#             events can't double-process it. Capped at MAX_CLUSTERS; truncation is logged.
+#   build   — matrix, one job per cluster (native Actions fan-out, no worktree juggling).
+#             Fresh branch off main, Claude implements the cluster's issues, runs the repo's
+#             gates, pushes, opens a PR that Closes the source issues and carries automerge or
+#             needs-review per the rule above. If the gates don't pass, no PR is opened — the
+#             issues get a comment and are re-labeled `queued-for-build` so a later run retries.
+#
+# Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), not a metered
+# ANTHROPIC_API_KEY — inert until that secret is set.
+#
+# Caller (needs its own `issues: { types: [labeled] }` trigger filtered to
+# `queued-for-build`, since workflow_call can't re-expose that event filter):
+#   uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+#   with: { gates-summary: "..." }
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      max-clusters:
+        type: number
+        default: 5
+      cluster-model:
+        type: string
+        default: "sonnet" # clustering is mechanical grouping — bulk tier is right
+      build-model:
+        type: string
+        # opus, deliberately: this is codegen that AUTO-MERGES for a confidence:high cluster.
+        # CI + security-review still gate it, but subtle-wrong-yet-passing code is exactly what a
+        # stronger model avoids. Codegen → opus (CLAUDE.md model doctrine).
+        default: "opus"
+      build-max-turns:
+        type: number
+        default: 20
+      gates-summary:
+        description: "Human-readable list of gates each build session's change must pass before it pushes."
+        type: string
+        default: "the repo's lint/type-check/test/build commands"
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+concurrency:
+  group: issue-build-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  cluster:
+    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      plan: ${{ steps.plan.outputs.clusters }}
+    steps:
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # Reaper + cheap-exit, BEFORE the expensive Claude cluster call. Two jobs:
+      #  1. Reap: an issue stuck in `building` with no activity for >REAP_STALE_HOURS is an
+      #     orphan from a build run that crashed/was cancelled after claiming but before
+      #     opening its PR — re-queue it so it isn't lost. (Self-healing; no separate cron.)
+      #  2. Cheap-exit: if there are then no `queued-for-build` issues, skip the Claude call
+      #     entirely. A burst of `issues.labeled` events fires this workflow N times; the
+      #     first claims everything, the rest hit this and exit in seconds with no LLM spend.
+      - name: Reap stale claims and count the queue
+        id: queue
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REAP_STALE_HOURS: "2"
+        run: |
+          set -euo pipefail
+          now=$(date -u +%s)
+          gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
+            --json number,updatedAt --jq '.[]' 2>/dev/null | while read -r row; do
+            n=$(echo "$row" | jq -r .number)
+            upd=$(echo "$row" | jq -r .updatedAt)
+            age_h=$(( (now - $(date -u -d "$upd" +%s 2>/dev/null || echo "$now")) / 3600 ))
+            if [ "$age_h" -ge "$REAP_STALE_HOURS" ]; then
+              echo "reaping orphaned building issue #$n (idle ${age_h}h)"
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
+            fi
+          done
+          qcount=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label queued-for-build --json number --jq 'length' 2>/dev/null || echo 0)
+          echo "queued-for-build issues: $qcount"
+          echo "count=$qcount" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+
+      - name: Claude — cluster the backlog
+        id: claude
+        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            List every open issue labeled `queued-for-build` (with its labels:
+            `gh issue list --state open --label queued-for-build --json number,title,body,labels`).
+
+            Group RELATED issues together — same root cause, same feature area, or issues
+            that would touch the same files — into clusters. Two issues that are unrelated
+            and would touch different parts of the codebase must NOT share a cluster (keep
+            each resulting PR small and reviewable). Two issues that WOULD touch the same
+            files must share a cluster (two concurrent sessions editing the same lines would
+            just collide). An issue with no relation to any other is its own single-issue
+            cluster. Never put every issue into one cluster — the whole point is n issues to
+            m clusters, m > 1 whenever the backlog actually contains unrelated work.
+
+            CONFIDENCE-PURITY RULE: never put a `confidence:high` issue in the same cluster as
+            an issue that is NOT `confidence:high`. A pure all-high cluster is what lets its PR
+            auto-merge unattended (see the build job); mixing in a lower-confidence issue would
+            either drag an unverified change into an auto-merge or force the whole cluster to
+            stage. So split by confidence first, then group by relatedness within each tier.
+
+            Return your plan via the structured output schema. For each cluster: a short
+            kebab-case `id`, a `branch` name like `bot/issue-build-<id>`, a conventional-commit
+            style `title` for the eventual PR, a one-paragraph `summary` of what the cluster
+            covers, and the `issue_numbers` in it.
+
+            Do not modify any issue and do not write any code in this step.
+          claude_args: >-
+            --max-turns 10 --model ${{ inputs.cluster-model }}
+            --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
+
+      - name: Cap cluster count and claim issues
+        id: plan
+        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          MAX_CLUSTERS: ${{ inputs.max-clusters }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to build"; echo "clusters=[]" >> "$GITHUB_OUTPUT"; exit 0; fi
+          total=$(echo "$VERDICT" | jq '.clusters | length')
+          capped=$(echo "$VERDICT" | jq -c --argjson n "$MAX_CLUSTERS" '.clusters[0:$n]')
+          kept=$(echo "$capped" | jq 'length')
+          if [ "$kept" -lt "$total" ]; then
+            echo "::warning::clustering plan had $total clusters, capped to $MAX_CLUSTERS — the rest stay queued-for-build for the next run"
+          fi
+          echo "clusters ($kept): $(echo "$capped" | jq -c '[.[] | {id,issue_numbers}]')"
+
+          echo "$capped" | jq -c '.[]' | while read -r c; do
+            for n in $(echo "$c" | jq -r '.issue_numbers[]'); do
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label queued-for-build --add-label building 2>/dev/null || true
+            done
+          done
+
+          echo "clusters=$capped" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: cluster
+    if: needs.cluster.outputs.plan != '' && needs.cluster.outputs.plan != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.cluster.outputs.plan) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout main, create cluster branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Create branch
+        run: git checkout -B "${{ matrix.branch }}"
+
+      - name: Claude — implement the cluster
+        id: claude
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ISSUE_NUMBERS: ${{ join(matrix.issue_numbers, ', ') }}
+          CLUSTER_SUMMARY: ${{ matrix.summary }}
+          GATES_SUMMARY: ${{ inputs.gates-summary }}
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            Implement GitHub issues #$ISSUE_NUMBERS in this repo (read each with
+            `gh issue view <n>` for full detail). Summary of what this cluster covers:
+            $CLUSTER_SUMMARY
+
+            These issues were grouped together because they're related — implement all of
+            them as one coherent change. This repo's gates must all pass before you commit:
+              $GATES_SUMMARY
+            Make the smallest correct change for each issue, run the gates locally, then
+            commit (conventional-commit style message) and push to this branch. Do NOT touch
+            secrets, do NOT weaken a test to make it pass, do NOT touch code unrelated to
+            these issues.
+
+            If you get all the way through and the gates pass, that's success — just finish
+            normally. If you cannot get the gates passing (a genuine design problem, missing
+            context, etc.), do NOT push a broken commit — say so clearly in your final
+            response instead, explaining what's blocking it.
+          claude_args: "--max-turns ${{ inputs.build-max-turns }} --model ${{ inputs.build-model }}"
+
+      - name: Push and open PR, or comment + requeue on failure
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ matrix.branch }}
+          TITLE: ${{ matrix.title }}
+          SUMMARY: ${{ matrix.summary }}
+          ISSUE_NUMBERS_JSON: ${{ toJSON(matrix.issue_numbers) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          nums=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')
+
+          # The only reliable success signal is a real commit ahead of main — a dirty,
+          # uncommitted working tree is ALSO a failure (Claude didn't finish committing).
+          if [ -z "$(git log origin/main..HEAD 2>/dev/null)" ]; then
+            echo "no commits produced for this cluster → build session reported it couldn't finish"
+            for n in $nums; do
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 Auto-build attempted this issue as part of a cluster but couldn't get the gates passing. Re-queued as \`queued-for-build\`. Run: $RUN_URL" 2>/dev/null || true
+            done
+            exit 0
+          fi
+
+          git push -f origin "$BRANCH"
+
+          closes=$(for n in $nums; do echo "Closes #$n"; done)
+          body=$(printf '%s\n\n%s\n\n%s\n\nRun: %s' "$SUMMARY" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
+
+          # OPT-OUT-BY-DEFAULT eligibility, derived from the SOURCE ISSUES' actual labels
+          # (never the AI-authored title): automerge ONLY if every issue in the cluster is
+          # confidence:high and none is hold; otherwise stage as needs-review.
+          eligible=true
+          for n in $nums; do
+            issue_labels=$(gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')
+            case ",$issue_labels," in
+              *,confidence:high,*) ;;
+              *) eligible=false ;;
+            esac
+            case ",$issue_labels," in
+              *,hold,*) eligible=false ;;
+            esac
+          done
+          labels="needs-review"
+          [ "$eligible" = "true" ] && labels="automerge"
+          echo "cluster automerge-eligible: $eligible → label $labels"
+
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+            --title "$TITLE" --body "$body" --label "$labels"
+
+          for n in $nums; do
+            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
+          done

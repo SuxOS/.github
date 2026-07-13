@@ -14,6 +14,27 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
 `claude.yml` · `claude-autofix.yml` · `budget-guard.yml` · `skill-sync.yml`
 
+**Backlog pipeline** (turns latent work into merged/staged PRs — propose → investigate → build):
+`fixer.yml` (propose issues w/ confidence) · `triage.yml` (independently verify + opt-out-queue
+for build) · `issue-build.yml` (cluster n issues → m PRs, one build session per cluster;
+`confidence:high` clusters auto-merge, the rest stage). Full design +
+state machine + auth split: [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
+Caller-stub examples below.
+
+## Auth: subscription vs metered API
+
+Every Claude workflow authenticates one of two ways:
+
+- **`CLAUDE_CODE_OAUTH_TOKEN`** (Pro/Max subscription, from `claude setup-token`) — used by
+  `fixer` / `triage` / `issue-build` / `claude` / `claude-autofix`. `claude-code-action` runs
+  Claude Code billed to your subscription, not per-token API. This is the high-volume
+  automation.
+- **`ANTHROPIC_API_KEY`** (metered) — used ONLY by `security-review.yml`, on purpose: it's a
+  required merge gate, and if it ran on the subscription an exhausted pool would jam the merge
+  queue for everyone. See the design doc § auth split — do not "unify" it to OAuth.
+
+Set both as **org-level** secrets so every repo inherits them via `secrets: inherit`.
+
 ## Caller-stub pattern
 
 Each file here is a `workflow_call` reusable workflow with `inputs:` (defaults
@@ -45,11 +66,55 @@ jobs:
     secrets: inherit
 ```
 
+### Backlog-pipeline caller stubs
+
+The event triggers live in the caller (a `workflow_call` file can't re-expose
+`issues:` / `schedule:`). See [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
+
+```yaml
+# fixer.yml — propose. Time/manual (nothing "happens" to trigger a scan).
+name: Fixer
+on:
+  schedule: [{ cron: "17 8 * * *" }] # daily, off-minute; drop for manual-only
+  workflow_dispatch:
+jobs:
+  fixer: { uses: SuxOS/.github/.github/workflows/fixer.yml@main, secrets: inherit }
+```
+
+```yaml
+# triage.yml — investigate. Fires on a newly-filed issue (fixer's or a human's) + manual drain.
+name: Triage
+on:
+  issues: { types: [opened, reopened] }
+  workflow_dispatch:
+jobs:
+  triage: { uses: SuxOS/.github/.github/workflows/triage.yml@main, secrets: inherit }
+```
+
+```yaml
+# issue-build.yml — collate + build. Fires when queued-for-build is applied + manual drain.
+name: Issue build
+on:
+  issues: { types: [labeled] }
+  workflow_dispatch:
+jobs:
+  issue-build:
+    if: github.event_name != 'issues' || github.event.label.name == 'queued-for-build'
+    uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+    with: { gates-summary: "npm run type-check · npm test · npm run lint" }
+    secrets: inherit
+```
+
+Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
+`triaged`, `confidence:high|medium|low`, plus the usual `automerge` /
+`needs-review` / `needs-human` / `hold`.
+
 ### Required secrets/vars in the caller repo
 
-- `ANTHROPIC_API_KEY` — arms every Claude-Code-action job (mention, review,
-  autofix, security-review). Every workflow preflights on it being set and is
-  otherwise inert — safe to omit until you want those features live.
+- `CLAUDE_CODE_OAUTH_TOKEN` — Pro/Max subscription token (`claude setup-token`);
+  arms `fixer`/`triage`/`issue-build`/`claude`/`claude-autofix`. Org-level secret.
+- `ANTHROPIC_API_KEY` — metered; arms `security-review.yml` ONLY (see § auth split).
+  Every Claude job preflights on its token being set and is otherwise inert.
 - `SUX_BOT_APP_ID` / `SUX_BOT_PRIVATE_KEY` — a GitHub App installed on the
   caller repo, used by every workflow that pushes or arms auto-merge.
 - Repo variable `ACTIONS_BUDGET_PAUSED` — set/read by `budget-guard.yml`; you

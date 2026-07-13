@@ -6,6 +6,14 @@ name: Security review (reusable)
 # from, so a file-write verdict silently disappears. See SuxOS/.github README /
 # docs for the "structured_output, not a file" gotcha.
 #
+# AUTH: this one DELIBERATELY stays on the metered ANTHROPIC_API_KEY, while every other
+# Claude workflow moved to the Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN). Reason:
+# security-review is a REQUIRED merge gate. If it ran on the subscription and that pool
+# exhausted, this check could not run → the merge queue would jam and NOTHING could merge,
+# including humans' PRs. Metered API has no shared pool to exhaust, so the gate always runs.
+# It's low-volume (one review per PR), so the metered cost is small. Do NOT "unify" this to
+# OAuth — see docs/design/backlog-pipeline.md § auth split.
+#
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/security-review.yml@main
 #   secrets: inherit
