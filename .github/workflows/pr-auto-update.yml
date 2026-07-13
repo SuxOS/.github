@@ -45,14 +45,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          prs=$(gh pr list --state open --limit 100 \
+          if ! prs=$(gh pr list --state open --limit 100 \
             --json number,mergeStateStatus,isDraft,autoMergeRequest,labels \
             --jq '.[]
               | select(.isDraft == false)
               | select(.autoMergeRequest != null)
               | select(.mergeStateStatus == "BEHIND")
               | select(([.labels[].name] | index("hold")) | not)
-              | .number')
+              | .number'); then
+            echo "::error::gh pr list failed (auth/API error) — cannot distinguish from no BEHIND PRs"
+            exit 1
+          fi
           if [ -z "$prs" ]; then
             echo "No armed BEHIND PRs to update."
             exit 0
