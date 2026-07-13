@@ -66,12 +66,29 @@ jobs:
           now=$(date -u +%s)
           stale=$(( STALE_HOURS * 3600 ))
 
-          stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" --argjson flagBehind "$FLAG_BEHIND" '
+          # main's required check names (classic branch protection + rulesets, unioned —
+          # a merge-queue is typically ruleset-gated). Only a FAILING check in this set is
+          # "required"; a failing optional/advisory check must not be labelled required.
+          required=""
+          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+            required="$required
+          $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
+          fi
+          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+            required="$required
+          $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
+          fi
+          required_json=$(printf '%s\n' "$required" | sed 's/^ *//' | grep -v '^$' | sort -u | jq -R . | jq -sc .)
+
+          stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" --argjson flagBehind "$FLAG_BEHIND" --argjson required "$required_json" '
             [ .[]
               | select(.isDraft | not)
               | select([.labels[].name] | index("hold") | not)
-              | ([.statusCheckRollup[]? | (.conclusion // .state // "" | ascii_upcase)]) as $st
-              | (($st | map(select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")) | length) > 0) as $failing
+              | ([.statusCheckRollup[]?
+                  | select((.conclusion // .state // "" | ascii_upcase)
+                      | . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")
+                  | (.name // .context // "")]) as $failed
+              | (($failed | map(select(. as $n | $required | index($n))) | length) > 0) as $failing
               | (($now - (.updatedAt | fromdateiso8601)) >= $stale) as $isStale
               | ( if ($flagBehind and .mergeStateStatus == "BEHIND") then "behind main — needs rebase/update"
                   elif $failing then "failing required check"
