@@ -81,6 +81,22 @@ The full autonomous chain: **fixer files → `issues.opened` fires triage → tr
 write re-fires the next workflow (a `GITHUB_TOKEN` write would NOT — GitHub suppresses
 downstream runs for it; this is why every writer mints a SUX_BOT App token first).
 
+## Model per stage (right-sized by stakes)
+
+Model choice follows one rule: **opus where the output is high-stakes or takes effect
+unreviewed; sonnet where it's gated, bulk, or advisory** (matches the repo CLAUDE.md doctrine —
+opus for codegen / adversarial review, sonnet for mechanical fan-out). All are `model` inputs,
+so any caller can override.
+
+| Stage | Model | Why |
+|---|---|---|
+| `triage` | **opus** | Its `confidence:high` call is what lets a build merge with NO human review — the most consequential judgment in the pipeline. |
+| `issue-build` / build | **opus** | Codegen that auto-merges for a high-confidence cluster. CI + security-review still gate it, but a stronger model avoids subtle-wrong-yet-passing code. |
+| `issue-build` / cluster | sonnet | Mechanical grouping. |
+| `fixer` | sonnet | Bulk scan; every proposal is re-verified by triage downstream. |
+| `security-review` | opus | Gates merge on its findings. |
+| `claude` review / `claude-autofix` | sonnet | Advisory (a human decides) / CI-gated + attempt-capped (deliberately cheap). |
+
 ## Bounding cost and chaos
 
 - **Structural caps** bound per-run spend: `fixer` max-turns; `triage` max-issues + max-turns;

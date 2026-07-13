@@ -47,10 +47,13 @@ on:
         default: 5
       cluster-model:
         type: string
-        default: "sonnet"
+        default: "sonnet" # clustering is mechanical grouping — bulk tier is right
       build-model:
         type: string
-        default: "sonnet"
+        # opus, deliberately: this is codegen that AUTO-MERGES for a confidence:high cluster.
+        # CI + security-review still gate it, but subtle-wrong-yet-passing code is exactly what a
+        # stronger model avoids. Codegen → opus (CLAUDE.md model doctrine).
+        default: "opus"
       build-max-turns:
         type: number
         default: 20

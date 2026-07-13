@@ -41,7 +41,10 @@ on:
     inputs:
       model:
         type: string
-        default: "sonnet"
+        # opus, deliberately: triage's confidence:high call is what lets a build merge with NO
+        # human review — the single most consequential judgment in the pipeline. Adversarial
+        # verification + a merge-gating decision → the strongest model (CLAUDE.md model doctrine).
+        default: "opus"
       max-turns:
         type: number
         default: 30
