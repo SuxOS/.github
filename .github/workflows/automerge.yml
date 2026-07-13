@@ -56,6 +56,7 @@ concurrency:
 jobs:
   enable-automerge:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     # PUBLIC REPO: only auto-merge PRs from trusted authors, or a Bot-authored PR
     # carrying `self-improve` (addable only by trusted write access).
     if: >

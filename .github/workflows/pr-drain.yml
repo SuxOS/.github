@@ -37,6 +37,7 @@ jobs:
   drain:
     name: Close stale PRs and reconcile unarmed green ones
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Mint app token
         id: app-token
