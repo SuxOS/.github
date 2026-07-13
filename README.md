@@ -120,7 +120,7 @@ Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
 - Repo variable `ACTIONS_BUDGET_PAUSED` — set/read by `budget-guard.yml`; you
   don't need to create it yourself, the guard creates it on first trip.
 - Branch protection on `main` (strict, requiring at minimum `Type-check &
-  build`, `security-review`, `gitleaks`, `npm audit & SBOM`) — `automerge.yml`
+  build`, `security-review`, `npm audit & SBOM`) — `automerge.yml`
   refuses to arm auto-merge unless it can verify these are actually required,
   so set this up before wiring the caller stub for `automerge.yml`.
 
