@@ -1,0 +1,33 @@
+name: Self-check (actionlint)
+
+# Self-CI for THIS repo. The product here is reusable workflows, so there is no
+# app to build — instead we lint the workflow YAML itself. actionlint also runs
+# shellcheck over embedded `run:` blocks, catching quoting/injection bugs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install actionlint
+        id: actionlint
+        run: bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash)
+        shell: bash
+
+      - name: Run actionlint
+        run: ${{ steps.actionlint.outputs.executable }} -color
+        shell: bash
