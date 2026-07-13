@@ -46,6 +46,7 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       - name: Drain the open-PR queue
+        id: drain
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -85,22 +86,35 @@ jobs:
           done
 
           # ── RECONCILE ────────────────────────────────────────────────────────────────
-          to_arm=$(echo "$prs" | jq -r '
-            .[]
-            | select(.isDraft | not)
-            | select(.mergeStateStatus == "CLEAN")
-            | select(.autoMergeRequest == null)
-            | select(["OWNER","MEMBER","COLLABORATOR"] | index(.authorAssociation))
-            | ([.labels[].name]) as $l
-            | select(($l | index("hold")) | not)
-            | select(($l | index("feature")) | not)
-            | select((.title | test("^[a-z]+(\\([^)]*\\))?!:"; "i")) | not)
-            | select(
-                (($l | index("automerge")) or ($l | index("bug")) or ($l | index("security")) or ($l | index("chore-safe")))
-                or (.title | test("^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\\([^)]*\\))?:"; "i"))
-              )
-            | .number')
-          for n in $to_arm; do
+          # Structural filter only (green, unarmed, trusted, not held/feature). The
+          # drift-prone safe-type/label/breaking core predicate is applied by the
+          # shared pr-eligibility action in the next step.
+          candidates=$(echo "$prs" | jq -c '
+            [ .[]
+              | select(.isDraft | not)
+              | select(.mergeStateStatus == "CLEAN")
+              | select(.autoMergeRequest == null)
+              | select(["OWNER","MEMBER","COLLABORATOR"] | index(.authorAssociation))
+              | ([.labels[].name]) as $l
+              | select(($l | index("hold")) | not)
+              | select(($l | index("feature")) | not)
+              | {number, title, labels: [.labels[].name]} ]')
+          echo "reconcile-candidates=$candidates" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate shared eligibility predicate
+        id: eligible
+        uses: SuxOS/.github/.github/actions/pr-eligibility@main
+        with:
+          prs-json: ${{ steps.drain.outputs.reconcile-candidates }}
+
+      - name: Reconcile — arm auto-merge on eligible green PRs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
+        run: |
+          set -uo pipefail
+          for n in $ELIGIBLE_NUMBERS; do
             echo "::group::reconcile PR #$n (arm auto-merge)"
             gh pr merge --auto --squash "$n" && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (see gh error above)"
             echo "::endgroup::"

@@ -159,6 +159,27 @@ jobs:
             echo "branch protection/ruleset OK: main requires all security gates"
           fi
 
+      # Serialize this PR's number/title/labels into the array shape the shared
+      # eligibility action expects (single-element array).
+      - name: Build eligibility payload
+        id: payload
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, '\n') }}
+        run: |
+          set -euo pipefail
+          prs=$(jq -cn --argjson n "$PR_NUM" --arg t "$TITLE" --arg l "$LABELS" \
+            '[{number: $n, title: $t, labels: ($l | split("\n") | map(select(. != "")))}]')
+          echo "prs-json=$prs" >> "$GITHUB_OUTPUT"
+
+      # Shared safe-type/label/breaking core predicate (single source of truth).
+      - name: Evaluate shared eligibility predicate
+        id: eligible
+        uses: SuxOS/.github/.github/actions/pr-eligibility@main
+        with:
+          prs-json: ${{ steps.payload.outputs.prs-json }}
+
       - name: Decide eligibility and enable auto-merge
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -167,6 +188,7 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
           DRAFT: ${{ github.event.pull_request.draft }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
         run: |
           set -euo pipefail
           echo "PR #$PR_NUM  title=$TITLE  draft=$DRAFT  labels=$LABELS"
@@ -180,21 +202,14 @@ jobs:
             exit 0
           }
 
+          # Caller-specific structural filters (kept here, not in the shared action).
           if [ "$DRAFT" = "true" ]; then ineligible "draft"; fi
           if has_label hold;    then ineligible "hold label"; fi
           if has_label feature; then ineligible "feature label (needs a human)"; fi
-          if printf '%s' "$TITLE" | grep -qiE '^[a-z]+(\([^)]*\))?!:'; then
-            ineligible "breaking-change (!) title"; fi
 
-          eligible=false
-          for l in automerge bug security chore-safe; do
-            if has_label "$l"; then eligible=true; fi
-          done
-          if printf '%s' "$TITLE" | grep -qiE '^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\([^)]*\))?:'; then
-            eligible=true; fi
-
-          if [ "$eligible" != "true" ]; then
-            ineligible "feature or unlabeled PR"; fi
+          # Shared core predicate (safe-type/label/breaking) via pr-eligibility.
+          if ! printf ' %s ' "$ELIGIBLE_NUMBERS" | grep -qw "$PR_NUM"; then
+            ineligible "feature, breaking-change, or unlabeled PR"; fi
 
           echo "eligible → enabling native auto-merge (squash)"
           gh pr merge --auto --squash "$PR_URL" || {
