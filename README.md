@@ -8,9 +8,12 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 ## The two groups
 
 **Gates** (required checks that block merge):
-`ci.yml` · `security-review.yml` · `audit.yml` · `health.yml` — secret scanning is
+`ci.yml` · `security-review.yml` · `audit.yml` — secret scanning is
 GitHub's native secret-scanning + push-protection (repo Settings → Security), not
 a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
+
+**Scheduled monitoring** (runs on the caller's schedule/dispatch, opens a tracking issue on failure — does not block merge):
+`health.yml`
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
