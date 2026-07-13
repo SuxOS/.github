@@ -52,8 +52,16 @@ jobs:
         run: |
           set -uo pipefail
 
-          prs=$(gh pr list --state open --limit 100 \
-            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation,updatedAt)
+          if ! [[ "$STALE_DAYS" =~ ^[0-9]+$ ]]; then
+            echo "::error::invalid stale-days input '${STALE_DAYS}' — expected a non-negative integer"
+            exit 1
+          fi
+
+          if ! prs=$(gh pr list --state open --limit 100 \
+            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation,updatedAt); then
+            echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
+            exit 1
+          fi
 
           now=$(date -u +%s)
           stale=$(( STALE_DAYS * 86400 ))
@@ -71,7 +79,7 @@ jobs:
           for n in $to_close; do
             echo "::group::close-stale PR #$n"
             gh pr comment "$n" --body "🧹 Closing as stale — no activity in ${STALE_DAYS}+ days. This was a bot/needs-human PR; reopen it, or add \`keep\`/\`hold\` to retain it next time." 2>/dev/null || true
-            gh pr close "$n" 2>/dev/null && echo "closed #$n" || echo "::warning::could not close #$n (skipping)"
+            gh pr close "$n" && echo "closed #$n" || echo "::warning::could not close #$n (see gh error above)"
             echo "::endgroup::"
             sleep 2
           done
@@ -94,7 +102,7 @@ jobs:
             | .number')
           for n in $to_arm; do
             echo "::group::reconcile PR #$n (arm auto-merge)"
-            gh pr merge --auto --squash "$n" 2>/dev/null && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (branch protection unmet / already merging)"
+            gh pr merge --auto --squash "$n" && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (see gh error above)"
             echo "::endgroup::"
             sleep 2
           done
