@@ -1,0 +1,118 @@
+name: Claude mention + review (reusable)
+
+# Two hands-off assists (both inert until ANTHROPIC_API_KEY is set):
+#   1. @claude — mention the bot in any PR/issue comment or review and it responds.
+#   2. Review on open — a review pass on every non-draft PR.
+# Cost-bounded: concurrency cancel-in-progress, --max-turns, review only on
+# opened/ready (not every push). Gated on the repo variable ACTIONS_BUDGET_PAUSED.
+#
+# Caller (needs its own comment/review/pull_request triggers):
+#   uses: SuxOS/.github/.github/workflows/claude.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      mention-model:
+        type: string
+        default: "sonnet"
+      mention-max-turns:
+        type: number
+        default: 12
+      review-model:
+        type: string
+        default: "sonnet"
+      review-max-turns:
+        type: number
+        default: 12
+      review-prompt:
+        type: string
+        default: |
+          Review this PR for correctness bugs and reuse/simplification/efficiency
+          issues (use the repo's /code-review skill if present). Post concise, concrete
+          inline findings; don't rewrite the PR. If it looks clean, say so in one line.
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+  id-token: write
+
+concurrency:
+  group: claude-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mention:
+    if: >
+      vars.ACTIONS_BUDGET_PAUSED != 'true' &&
+      github.event.sender.type != 'Bot' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association) && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Preflight — need the key
+        id: pre
+        run: |
+          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
+            echo "ANTHROPIC_API_KEY not set → inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      # Push with the App identity, not GITHUB_TOKEN — see automerge.yml comment;
+      # GITHUB_TOKEN pushes never re-fire required CI checks.
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Claude respond
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          trigger_phrase: "@claude"
+          claude_args: "--max-turns ${{ inputs.mention-max-turns }} --model ${{ inputs.mention-model }}"
+
+  review:
+    if: >
+      vars.ACTIONS_BUDGET_PAUSED != 'true' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.event.sender.type != 'Bot' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Preflight — need the key
+        id: pre
+        run: |
+          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
+            echo "ANTHROPIC_API_KEY not set → inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+      - name: Claude review
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ inputs.review-prompt }}
+          claude_args: "--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }}"

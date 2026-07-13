@@ -1,0 +1,82 @@
+name: CI (reusable)
+
+# Reusable "Type-check & build" gate. Caller invokes this with:
+#   uses: SuxOS/.github/.github/workflows/ci.yml@main
+#   with: { ... }
+#   secrets: inherit
+# Defaults match sux-mcp's layout; override `with:` for a different repo shape.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+      type-check-script:
+        description: "npm script that type-checks (tsc --noEmit etc.)"
+        type: string
+        default: "type-check"
+      test-script:
+        description: "npm script that runs the test suite"
+        type: string
+        default: "test"
+      extra-checks-script:
+        description: "Optional npm script for repo-specific invariant checks (e.g. check:node). Empty to skip."
+        type: string
+        default: "check:node"
+      gen-index-script:
+        description: "Optional npm script that regenerates a committed generated file, verified via git diff. Empty to skip."
+        type: string
+        default: "gen:index"
+      gen-index-path:
+        description: "Path to the generated file gen-index-script produces, checked with git diff --exit-code."
+        type: string
+        default: "sux/src/fns/index.ts"
+      wrangler-config:
+        description: "Path to wrangler config for a dry-run deploy validation. Empty to skip."
+        type: string
+        default: "sux/wrangler.jsonc"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Type-check & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        if: inputs.type-check-script != ''
+        run: npm run ${{ inputs.type-check-script }}
+
+      - name: Test
+        if: inputs.test-script != ''
+        run: npm run ${{ inputs.test-script }}
+
+      - name: Extra invariant check
+        if: inputs.extra-checks-script != ''
+        run: npm run ${{ inputs.extra-checks-script }}
+
+      - name: Generated file in sync
+        if: inputs.gen-index-script != ''
+        run: |
+          npm run ${{ inputs.gen-index-script }}
+          git diff --exit-code ${{ inputs.gen-index-path }}
+
+      - name: Build (dry-run deploy)
+        if: inputs.wrangler-config != ''
+        run: npx wrangler deploy --dry-run --config ${{ inputs.wrangler-config }}

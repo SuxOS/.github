@@ -1,0 +1,124 @@
+name: Security review (reusable)
+
+# Focused Claude security review, gating merge on high/critical findings via `hold`.
+# Verdict is read from claude-code-action's `structured_output` (--json-schema), NEVER
+# a written file — the action's sandbox cwd is not the checkout the gate would read
+# from, so a file-write verdict silently disappears. See SuxOS/.github README /
+# docs for the "structured_output, not a file" gotcha.
+#
+# Caller:
+#   uses: SuxOS/.github/.github/workflows/security-review.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: "opus"
+      max-turns:
+        type: number
+        default: 14
+      job-name:
+        description: "Distinct check-run name so branch protection can require it separately from a plain 'review' job."
+        type: string
+        default: "security-review"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+concurrency:
+  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security-review:
+    name: ${{ inputs.job-name }}
+    # Trusted authors only; draft PRs skipped. Also runs for a `self-improve`-labelled
+    # bot PR (that label is addable only by trusted write access) so a HIGH-confidence
+    # self-improve PR opened by a bot identity still gets reviewed before it can arm
+    # auto-merge.
+    if: >
+      github.event.pull_request.draft == false &&
+      (
+        (
+          github.event.sender.type != 'Bot' &&
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+        ) ||
+        contains(github.event.pull_request.labels.*.name, 'self-improve')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Preflight — need the key
+        id: pre
+        run: |
+          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
+            echo "ANTHROPIC_API_KEY not set → security review inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Checkout
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+      - name: Claude security review
+        id: claude
+        if: steps.pre.outputs.go == 'true'
+        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
+            exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
+            `${{ github.event.* }}` in workflows), GitHub Actions abuse (pull_request_target +
+            untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
+            blast radius, and any autonomous-bot action that could touch prod or user data
+            unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
+
+            Your FINAL message MUST be the machine-readable verdict object matching the provided
+            JSON schema: {"critical":N,"high":N,"note":"..."} — the counts of CONFIRMED
+            critical/high issues (zeros if the diff is clean). Do NOT write any file; the verdict
+            is captured from your structured output, not the filesystem.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools Read,Grep,Glob,Bash
+            --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
+      - name: Gate — scoped fail-closed on missing verdict; block on high/critical
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          verdict="${VERDICT:-}"
+          if [ -z "$verdict" ]; then
+            changed=$(gh pr diff "$PR" --name-only 2>/dev/null || true)
+            if [ -z "$changed" ]; then
+              echo "::error::security review produced no verdict AND the changed-file list is unreadable — failing closed (cannot rule out a high-blast diff)"
+              gh pr edit "$PR" --add-label hold 2>/dev/null || true
+              gh pr comment "$PR" --body "🛑 security review did not finish and the diff was unreadable — applied \`hold\` (fail-closed). Re-run the review, then remove \`hold\`." 2>/dev/null || true
+              exit 1
+            fi
+            if printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|auth|secret'; then
+              echo "::error::security review produced no verdict AND the diff touches high-blast paths (workflows/auth/secrets) — failing closed"
+              printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /'
+              gh pr edit "$PR" --add-label hold 2>/dev/null || true
+              gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets — applied \`hold\` (fail-closed). Re-run the review or justify, then remove \`hold\`." 2>/dev/null || true
+              exit 1
+            fi
+            echo "::warning::security review produced no verdict (reviewer did not finish) and the diff is not high-blast — advisory pass"
+            gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) and this diff doesn't touch workflows/auth/secrets — advisory pass, not blocking. Deterministic gates still apply." 2>/dev/null || true
+            exit 0; fi
+          crit=$(printf '%s' "$verdict" | jq -r '.critical // 0'); high=$(printf '%s' "$verdict" | jq -r '.high // 0')
+          echo "security verdict: critical=$crit high=$high"
+          if [ "${crit:-0}" -gt 0 ] || [ "${high:-0}" -gt 0 ]; then
+            gh pr edit "$PR" --add-label hold 2>/dev/null || true
+            gh pr comment "$PR" --body "🛑 **security review**: found $crit critical / $high high security issue(s). Applied \`hold\` (blocks auto-merge). Resolve or justify, then remove \`hold\`." 2>/dev/null || true
+            echo "::error::security review blocked this PR ($crit critical, $high high)"; exit 1
+          fi
+          echo "✓ no high/critical security findings"

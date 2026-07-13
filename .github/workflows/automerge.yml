@@ -1,0 +1,137 @@
+name: Auto-merge (reusable)
+
+# Enable GitHub NATIVE auto-merge on eligible PRs. GitHub then merges the PR by
+# itself the moment branch protection is satisfied — so nothing red ever reaches
+# an auto-deploying main. This job only *enables* auto-merge; it never force-merges.
+# Merge method: squash.
+#
+# Eligibility (the safe, hands-off subset):
+#   - a conventional-commit "safe type" title: fix|security|perf|refactor|chore|docs|test|build|ci|revert
+#     OR an explicit eligible label: automerge | bug | security | chore-safe
+#   - AND not a draft, not labelled `hold`, not labelled `feature`, not a breaking `!` title.
+#
+# Uses pull_request_target (base-repo context, write token) but never checks out PR
+# code — it only reads the event payload and calls the API.
+#
+# Pushed/enabled with a GitHub App token (create-github-app-token), NOT GITHUB_TOKEN:
+# GitHub suppresses workflow runs for GITHUB_TOKEN-attributed pushes/merges, so a
+# GITHUB_TOKEN-enabled auto-merge fires neither CI nor a deploy workflow on main.
+#
+# Caller:
+#   uses: SuxOS/.github/.github/workflows/automerge.yml@main
+#   with: { app-id-secret-name: ..., ... }  # see inputs below
+#   secrets: inherit
+#
+# NOTE: this workflow needs the caller's GitHub App id/key secret names, which
+# reusable workflows can't read dynamically — so the caller passes them as inputs
+# and this workflow reads them via `secrets: inherit` + the fixed names
+# SUX_BOT_APP_ID / SUX_BOT_PRIVATE_KEY (rename in the caller repo's secrets, or
+# fork this file, if a different bot identity is needed).
+
+on:
+  workflow_call:
+    inputs:
+      required-gates:
+        description: "Newline-separated check-run names that main branch protection must require before auto-merge is trusted to be gated (job `name`s, one per line)."
+        type: string
+        default: |
+          Type-check & build
+          security-review
+          gitleaks
+          npm audit & SBOM
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: automerge-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enable-automerge:
+    runs-on: ubuntu-latest
+    # PUBLIC REPO: only auto-merge PRs from trusted authors, or a Bot-authored PR
+    # carrying `self-improve` (addable only by trusted write access).
+    if: >
+      github.event.pull_request.state == 'open' &&
+      (
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
+        (github.event.pull_request.user.type == 'Bot' && contains(github.event.pull_request.labels.*.name, 'self-improve'))
+      )
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # Refuse to enable auto-merge unless every required gate is present in main's
+      # required_status_checks — native auto-merge completes the instant REQUIRED
+      # checks go green, so a slow security review only guards the merge if it's
+      # actually required. If the gates aren't required, this degrades to a no-op.
+      - name: Assert main branch protection requires the security gates
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REQUIRED_GATES: ${{ inputs.required-gates }}
+        run: |
+          set -euo pipefail
+          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+            required=$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | unique[]')
+            missing=""
+            while IFS= read -r gate; do
+              [ -z "$gate" ] && continue
+              if ! printf '%s\n' "$required" | grep -qxF "$gate"; then
+                missing="${missing:+$missing, }$gate"
+              fi
+            done <<< "$REQUIRED_GATES"
+            if [ -n "$missing" ]; then
+              echo "::error::main branch protection does NOT require these gates: $missing — refusing to enable auto-merge (they'd stay advisory and lose the race to fast CI). Add them to main's required_status_checks to re-arm auto-merge."
+              exit 1
+            fi
+            echo "branch protection OK: main requires all security gates"
+          else
+            echo "::warning::could not READ main branch protection (token perms / 404 / network) — cannot determine protection state, so continuing WITHOUT blocking; a token blip must not jam the merge queue. If the checks are required, GitHub still gates the actual merge."
+          fi
+
+      - name: Decide eligibility and enable auto-merge
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          echo "PR #$PR_NUM  title=$TITLE  draft=$DRAFT  labels=$LABELS"
+
+          has_label() { echo ",$LABELS," | grep -qi ",$1,"; }
+
+          ineligible() {
+            echo "$1 → not auto-merge-eligible; disabling any pending auto-merge"
+            gh pr merge --disable-auto "$PR_URL" 2>/dev/null || true
+            exit 0
+          }
+
+          if [ "$DRAFT" = "true" ]; then ineligible "draft"; fi
+          if has_label hold;    then ineligible "hold label"; fi
+          if has_label feature; then ineligible "feature label (needs a human)"; fi
+          if printf '%s' "$TITLE" | grep -qiE '^[a-z]+(\([^)]*\))?!:'; then
+            ineligible "breaking-change (!) title"; fi
+
+          eligible=false
+          for l in automerge bug security chore-safe; do
+            if has_label "$l"; then eligible=true; fi
+          done
+          if printf '%s' "$TITLE" | grep -qiE '^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\([^)]*\))?:'; then
+            eligible=true; fi
+
+          if [ "$eligible" != "true" ]; then
+            ineligible "feature or unlabeled PR"; fi
+
+          echo "eligible → enabling native auto-merge (squash)"
+          gh pr merge --auto --squash "$PR_URL" || {
+            echo "::warning::could not enable auto-merge (branch protection unmet or already merging)"; exit 0; }
+          gh pr edit "$PR_URL" --add-label automerge 2>/dev/null || true

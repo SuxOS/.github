@@ -1,0 +1,164 @@
+name: Audit & SBOM (reusable)
+
+# Dependency vulnerability audit + CycloneDX SBOM. Fails the build on genuine
+# high/critical advisories; stays advisory when npm can't reach the registry.
+# Opens/updates a tracking issue on a genuine failure so a scheduled trip isn't
+# silently red with nobody watching.
+#
+# Caller:
+#   uses: SuxOS/.github/.github/workflows/audit.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: npm audit & SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: npm audit (fail on high/critical)
+        id: audit
+        run: |
+          npm audit --audit-level=high --json > audit-report.json || true
+          node -e '
+            const fs = require("fs");
+            let r;
+            try {
+              r = JSON.parse(fs.readFileSync("audit-report.json", "utf8"));
+            } catch (e) {
+              console.log("::warning::Could not parse npm audit output; treating as advisory.");
+              process.exit(0);
+            }
+            if (r.error) {
+              const code = (r.error && r.error.code) || "unknown";
+              console.log("::warning::npm audit could not reach the registry (" + code + "); treating as advisory.");
+              process.exit(0);
+            }
+            const v = (r.metadata && r.metadata.vulnerabilities) || {};
+            const critical = v.critical || 0, high = v.high || 0;
+            console.log("Vulnerabilities: critical=" + critical + " high=" + high + " moderate=" + (v.moderate || 0) + " low=" + (v.low || 0));
+            if (critical + high > 0) {
+              console.log("::error::Found " + critical + " critical and " + high + " high severity vulnerabilities (see audit-report.json).");
+              process.exit(1);
+            }
+            console.log("No high or critical vulnerabilities.");
+          '
+
+      - name: Generate SBOM (CycloneDX)
+        run: npm sbom --sbom-format cyclonedx > sbom.cyclonedx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cyclonedx.json
+          if-no-files-found: error
+
+      - name: Open or update audit-failure issue on failure
+        if: failure() && steps.audit.outcome == 'failure'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const fs = require("fs");
+            const title = "npm audit: high/critical advisory";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            let advisories = [];
+            let counts = "";
+            try {
+              const r = JSON.parse(fs.readFileSync("audit-report.json", "utf8"));
+              const v = (r.metadata && r.metadata.vulnerabilities) || {};
+              counts = `critical=${v.critical || 0} high=${v.high || 0} moderate=${v.moderate || 0} low=${v.low || 0}`;
+              const seen = new Set();
+              for (const pkg of Object.values(r.vulnerabilities || {})) {
+                for (const via of pkg.via || []) {
+                  if (typeof via !== "object") continue;
+                  if (!["high", "critical"].includes(via.severity)) continue;
+                  const key = via.url || via.title;
+                  if (seen.has(key)) continue;
+                  seen.add(key);
+                  advisories.push(via);
+                }
+              }
+            } catch (e) {
+              core.warning(`Could not parse audit-report.json: ${e.message}`);
+            }
+
+            const advisoryLines = advisories.length
+              ? advisories.map(
+                  (a) =>
+                    `- **${a.severity}** ${a.title || a.name}${a.url ? ` (${a.url})` : ""}` +
+                    `${a.name ? ` — pkg \`${a.name}\`` : ""}${a.range ? ` \`${a.range}\`` : ""}`,
+                )
+              : ["- (advisory details unavailable — see audit-report.json in the run logs)"];
+
+            const body = [
+              `The dependency audit tripped on a high/critical advisory on ${new Date().toISOString()}.`,
+              "",
+              `- Workflow run: ${runUrl}`,
+              `- Commit: ${context.sha}`,
+              counts ? `- Counts: ${counts}` : "",
+              "",
+              "### Advisories",
+              ...advisoryLines,
+              "",
+              "Run `npm audit` locally, then `npm audit fix` (or bump the offending",
+              "dependency) and open a PR. This issue is updated on each subsequent",
+              "failing run and can be closed once the audit is green.",
+            ]
+              .filter((l) => l !== "")
+              .join("\n");
+
+            try {
+              const existing = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: "open",
+                per_page: 100,
+              });
+              const hit = existing.data.find(
+                (i) => !i.pull_request && i.title === title,
+              );
+              if (hit) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: hit.number,
+                  body,
+                });
+                core.info(`Updated existing issue #${hit.number}.`);
+              } else {
+                const created = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+                core.info(`Opened issue #${created.data.number}.`);
+              }
+            } catch (e) {
+              core.warning(`Could not open/update audit issue: ${e.message}`);
+            }

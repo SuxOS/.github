@@ -1,0 +1,69 @@
+name: PR auto-update / self-drain (reusable)
+
+# Branch protection strict=true means a PR must be up-to-date with main to merge,
+# but nothing else re-bases open PRs when main moves — so every other
+# armed-auto-merge PR flips BEHIND and stalls until a human clicks "Update branch".
+# This runs `gh pr update-branch` on armed-but-BEHIND PRs so the queue self-drains.
+#
+# update-branch pushes to the PR branch (never main), so a push:main trigger
+# cannot self-loop. Only mutates armed PRs (auto-merge enabled) that are BEHIND
+# and not held.
+#
+# Push with the App token, NOT GITHUB_TOKEN — GitHub suppresses workflow runs for
+# GITHUB_TOKEN-attributed pushes (recursion prevention), so a GITHUB_TOKEN
+# update-branch changes the PR head SHA but never re-fires the required checks.
+#
+# Caller (needs its own push/schedule/dispatch triggers):
+#   uses: SuxOS/.github/.github/workflows/pr-auto-update.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pr-auto-update-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  update-behind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Update armed BEHIND PRs onto main
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          prs=$(gh pr list --state open --limit 100 \
+            --json number,mergeStateStatus,isDraft,autoMergeRequest,labels \
+            --jq '.[]
+              | select(.isDraft == false)
+              | select(.autoMergeRequest != null)
+              | select(.mergeStateStatus == "BEHIND")
+              | select(([.labels[].name] | index("hold")) | not)
+              | .number')
+          if [ -z "$prs" ]; then
+            echo "No armed BEHIND PRs to update."
+            exit 0
+          fi
+          for n in $prs; do
+            echo "::group::update-branch PR #$n"
+            if gh pr update-branch "$n"; then
+              echo "updated #$n onto main"
+            else
+              echo "::warning::update-branch failed for #$n (skipping, will retry next run)"
+            fi
+            echo "::endgroup::"
+            sleep 3
+          done
