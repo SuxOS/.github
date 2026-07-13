@@ -103,13 +103,13 @@ jobs:
           path: sbom.cyclonedx.json
           if-no-files-found: error
 
-      - name: Open or update audit-failure issue on failure
+      - name: Build audit-failure issue body
+        id: audit-issue
         if: failure() && steps.audit.outcome == 'failure'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require("fs");
-            const title = "npm audit: high/critical advisory";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
             let advisories = [];
@@ -158,33 +158,12 @@ jobs:
               .filter((l) => l !== "")
               .join("\n");
 
-            try {
-              const existing = await github.rest.issues.listForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: "open",
-                per_page: 100,
-              });
-              const hit = existing.data.find(
-                (i) => !i.pull_request && i.title === title,
-              );
-              if (hit) {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: hit.number,
-                  body,
-                });
-                core.info(`Updated existing issue #${hit.number}.`);
-              } else {
-                const created = await github.rest.issues.create({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  title,
-                  body,
-                });
-                core.info(`Opened issue #${created.data.number}.`);
-              }
-            } catch (e) {
-              core.warning(`Could not open/update audit issue: ${e.message}`);
-            }
+            core.setOutput("body", body);
+
+      - name: Open or update audit-failure issue on failure
+        if: failure() && steps.audit.outcome == 'failure'
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ github.token }}
+          title: "npm audit: high/critical advisory"
+          body: ${{ steps.audit-issue.outputs.body }}
