@@ -36,16 +36,24 @@ jobs:
 ```
 
 ```yaml
-# .github/workflows/issue-build.yml in a SuxOS caller repo — event-based:
-# fires when a human labels an issue queued-for-build. workflow_call can't
-# re-expose the issues: event, so the caller owns this trigger.
+# .github/workflows/issue-build.yml in a SuxOS caller repo — event-triggered
+# (fires when a human labels an issue queued-for-build; workflow_call can't
+# re-expose the issues: event, so the caller owns this trigger) PLUS a daily
+# drain + workflow_dispatch, since the cluster job lists every open
+# queued-for-build issue by label regardless of trigger — the drain catches
+# anything the label event missed (e.g. it fired while budget-guard had this
+# workflow paused) and picks up issues a human labeled queued-for-build
+# themselves, not just ones fixer.yml filed.
 name: Issue build
 on:
   issues:
     types: [labeled]
+  schedule:
+    - cron: "44 7 * * *" # daily drain, offset minute to dodge the top-of-hour rush
+  workflow_dispatch:
 jobs:
   issue-build:
-    if: github.event.label.name == 'queued-for-build'
+    if: github.event_name != 'issues' || github.event.label.name == 'queued-for-build'
     uses: SuxOS/.github/.github/workflows/issue-build.yml@main
     with:
       gates-summary: "npm run type-check · npm test · npm run lint"
