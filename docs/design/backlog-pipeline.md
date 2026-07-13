@@ -123,12 +123,15 @@ so any caller can override.
   (independent of the proposer) and re-read from the issues' *actual labels* by `issue-build`
   (never from the AI-authored PR title — that would be circular). Calibrate the triage prompt
   against reality over time; `hold` and manual `confidence:high` removal are the escape hatches.
-- **PUBLIC-REPO PREREQUISITE.** Both SuxOS repos are currently **private**, so every issue
-  author already has repo access — no external-injection surface. **If a repo goes public,
-  add a trusted-author gate before enabling this pipeline on it:** `triage` must refuse to
-  auto-queue issues from non-members (an external issue body would otherwise reach the
-  code-writing build session as if it were instructions). Until then it's intentionally
-  omitted rather than built as dead code.
+- **Actor gate (built in).** `triage.yml`'s job gates on `author_association ∈
+  {OWNER,MEMBER,COLLABORATOR}` whenever it's triggered by an `issues` event — so an
+  untrusted user can't drive the autonomous triage→build→automerge chain (or run up spend)
+  by opening an issue. It lives in the *reusable* workflow, so no caller can forget it, and
+  callers add a matching visible `if:` too. `workflow_dispatch`/`schedule` runs are already
+  driven by someone with write access, so they pass. On today's **private** repos every
+  issue author is already trusted (the gate is a no-op there); it's what makes going public
+  safe. Issue title/body is only ever read by the agent as *data* via `gh issue view` —
+  never interpolated into the prompt or a shell command — so it can't inject the YAML.
 
 ## Interactive counterpart (skills)
 

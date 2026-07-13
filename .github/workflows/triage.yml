@@ -64,7 +64,19 @@ concurrency:
 
 jobs:
   triage:
-    if: vars.ACTIONS_BUDGET_PAUSED != 'true'
+    # ACTOR GATE (central, can't be forgotten by a caller): when triggered by an `issues`
+    # event, only run for a TRUSTED author. This job forwards the full secret set into an
+    # autonomous agent that reads attacker-controllable issue title/body and can opt-out-queue
+    # the issue → issue-build → automerge. On a private repo every issue author already has
+    # access, but this closes the hole preemptively for any repo that goes public (mirrors
+    # claude.yml's author_association gate). Non-issues triggers (workflow_dispatch/schedule
+    # from the caller) are driven by someone with repo write access already, so they pass.
+    # github.event_name / github.event propagate from the caller into this reusable workflow.
+    if: >-
+      vars.ACTIONS_BUDGET_PAUSED != 'true' && (
+        github.event_name != 'issues' ||
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
