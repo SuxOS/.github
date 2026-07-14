@@ -22,7 +22,7 @@ on:
     inputs:
       max-attempts:
         type: string
-        default: "4"
+        default: "6"
       gates-summary:
         description: "Human-readable list of the gates the fix must pass, injected into the prompt."
         type: string
@@ -35,7 +35,7 @@ on:
         default: "sonnet"
       max-turns:
         type: number
-        default: 10
+        default: 16
 
 permissions:
   contents: write

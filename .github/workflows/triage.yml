@@ -47,18 +47,18 @@ on:
         default: "opus"
       max-turns:
         type: number
-        default: 30
+        default: 45
       max-issues:
         description: "Cap issues investigated per run — a burst of proposals can't run up an unbounded bill."
         type: number
-        default: 20
+        default: 35
 
 permissions:
   contents: read
   issues: write
 
 concurrency:
-  group: triage-${{ github.workflow }}
+  group: triage-${{ github.workflow }}-${{ github.event.issue.number || 'bulk' }}
   cancel-in-progress: false
 
 jobs:

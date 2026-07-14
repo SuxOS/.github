@@ -42,7 +42,7 @@ on:
         default: "sonnet" # a bulk scan whose every proposal is re-verified by triage — bulk tier
       max-turns:
         type: number
-        default: 25
+        default: 40
       auto-assign-agent:
         description: >-
           After filing, assign each freshly-created issue to a coding agent via GitHub's
