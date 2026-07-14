@@ -73,7 +73,7 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
       - name: Claude respond
@@ -85,6 +85,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: "@claude"
+          # MENTION job: gated to trusted (non-bot OWNER/MEMBER/COLLABORATOR) actors above and
+          # can legitimately be asked to make changes and push commits, so tools stay broad
+          # (no --allowedTools restriction) by design.
           claude_args: "--max-turns ${{ inputs.mention-max-turns }} --model ${{ inputs.mention-model }}"
 
   review:
@@ -104,7 +107,7 @@ jobs:
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
       - name: Claude review
         if: steps.pre.outputs.go == 'true'
@@ -114,4 +117,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ inputs.review-prompt }}
-          claude_args: "--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }}"
+          # Review is advisory only — it posts inline findings, never edits or pushes.
+          # Restrict to read tools + git/gh-pr reads (the /code-review skill needs `git diff`
+          # to see the change); the job holds only a read-only GITHUB_TOKEN so push is
+          # impossible regardless. NO Write/Edit. (The mention job below can be asked to make
+          # changes and keeps broad tools.)
+          claude_args: '--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }} --allowedTools "Read,Grep,Glob,Bash(git:*),Bash(gh pr:*)"'

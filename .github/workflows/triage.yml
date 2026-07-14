@@ -132,7 +132,7 @@ jobs:
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
 
       - name: Claude — investigate and decide
@@ -183,8 +183,13 @@ jobs:
 
             Do NOT modify any issue or write any code here — just return the plan via the
             structured output schema, one entry per issue number you were given.
+          # Investigator reads code + does focused open-web research, then returns a plan;
+          # the labeling is a separate shell step, so Claude here never labels or writes code.
+          # Allow read + WebSearch/WebFetch (the research contract) + `gh issue`/`gh label`
+          # bash (issue inspection); NO Write/Edit to code.
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools "Read,Grep,Glob,WebSearch,WebFetch,Bash(gh issue:*),Bash(gh label:*)"
             --json-schema '{"type":"object","properties":{"decisions":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"type":{"type":"string","enum":["bug","enhancement","security","documentation"]},"confidence":{"type":"string","enum":["high","medium","low"]},"buildable":{"type":"boolean"},"reason":{"type":"string"},"research_note":{"type":"string"}},"required":["number","type","confidence","buildable","reason","research_note"],"additionalProperties":false}}},"required":["decisions"],"additionalProperties":false}'
 
       - name: Apply triage labels

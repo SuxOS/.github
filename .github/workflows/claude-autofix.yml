@@ -113,7 +113,7 @@ jobs:
 
       - name: Checkout PR branch
         if: steps.pre.outputs.go == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
           fetch-depth: 0
@@ -161,4 +161,7 @@ jobs:
             to this PR branch. Do NOT touch secrets, do NOT weaken a test to make it pass, and
             do NOT change unrelated code. If the failure is a genuine design problem you can't
             safely fix, leave a comment explaining it instead of forcing a change.
+          # Autofix legitimately writes code and pushes to the PR branch (gated above to a
+          # trusted author's same-repo, non-fork branch by the RCE guard), so tools stay broad
+          # (no --allowedTools restriction) by design.
           claude_args: "--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}"
