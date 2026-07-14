@@ -1,0 +1,29 @@
+name: Mint app token
+description: >-
+  Mint a short-lived GitHub App installation token for the SUX bot identity.
+  Pushes/merges must use this token, never GITHUB_TOKEN, so that CI and deploy
+  workflows fire on the resulting commit. Pinned version and secret wiring live
+  here so a token-action bump or bot-secret rename is a one-file edit.
+
+inputs:
+  app-id:
+    description: GitHub App ID (pass secrets.SUX_BOT_APP_ID).
+    required: true
+  private-key:
+    description: GitHub App private key (pass secrets.SUX_BOT_PRIVATE_KEY).
+    required: true
+
+outputs:
+  token:
+    description: Short-lived GitHub App installation token.
+    value: ${{ steps.app-token.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mint app token
+      id: app-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
