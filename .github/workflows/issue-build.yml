@@ -44,7 +44,7 @@ on:
     inputs:
       max-clusters:
         type: number
-        default: 5
+        default: 10
       cluster-model:
         type: string
         default: "sonnet" # clustering is mechanical grouping — bulk tier is right
@@ -56,7 +56,7 @@ on:
         default: "opus"
       build-max-turns:
         type: number
-        default: 20
+        default: 30
       gates-summary:
         description: "Human-readable list of gates each build session's change must pass before it pushes."
         type: string

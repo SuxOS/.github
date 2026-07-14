@@ -33,7 +33,7 @@ on:
         default: "opus"
       max-turns:
         type: number
-        default: 14
+        default: 22
       job-name:
         description: "Distinct check-run name so branch protection can require it separately from a plain 'review' job."
         type: string
