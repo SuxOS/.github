@@ -22,7 +22,7 @@ on:
     inputs:
       node-version:
         type: string
-        default: "24"
+        default: "22"
       check-script:
         type: string
         default: "scripts/check-skill-sync.mjs"
@@ -91,14 +91,14 @@ jobs:
           MIRROR_PATH: ${{ inputs.mirror-path }}
           PR_BRANCH: ${{ inputs.pr-branch }}
         run: |
-          if [ -z "$(git status --porcelain "$MIRROR_PATH")" ]; then
+          if [ -z "$(git status --porcelain)" ]; then
             echo "Plugin skill mirror already up to date." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$PR_BRANCH"
-          git add "$MIRROR_PATH"
+          git add -A
           git commit -m "docs: re-mirror plugin skill"
           git push -f origin "$PR_BRANCH"
           existing=$(gh pr list --state open --head "$PR_BRANCH" --json number --jq '.[0].number // empty')
