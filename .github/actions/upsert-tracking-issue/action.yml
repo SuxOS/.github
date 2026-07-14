@@ -28,6 +28,13 @@ inputs:
   github-token:
     description: Token with issues:write used for the gh calls.
     required: true
+  list-limit:
+    description: >-
+      Max open issues to page through when looking for the existing tracking
+      issue by title. Raise on repos with more open issues than this so an
+      existing tracking issue past the first page isn't missed and duplicated.
+    required: false
+    default: "100"
 
 outputs:
   issue-number:
@@ -47,10 +54,11 @@ runs:
         BODY: ${{ inputs.body }}
         MODE: ${{ inputs.mode }}
         UPDATE_MODE: ${{ inputs.update-mode }}
+        LIST_LIMIT: ${{ inputs.list-limit }}
       run: |
         set -uo pipefail
 
-        existing=$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+        existing=$(gh issue list --repo "$REPO" --state open --limit "$LIST_LIMIT" --json number,title \
           | jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
 
         case "$MODE" in

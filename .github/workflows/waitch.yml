@@ -41,11 +41,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Scan merge queue, issues, and actions
+        id: scan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_TITLE: ${{ inputs.issue-title }}
           PR_LIMIT: ${{ inputs.pr-limit }}
-          ISSUE_LIMIT: ${{ inputs.issue-limit }}
         run: |
           set -euo pipefail
 
@@ -119,14 +118,18 @@ jobs:
             "$run_rows" \
             "")
 
-          # Find or create tracking issue
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit "$ISSUE_LIMIT" --json number,title \
-            | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+          {
+            echo "body<<EOF_WAITCH_BODY"
+            printf '%s\n' "$body"
+            echo "EOF_WAITCH_BODY"
+          } >> "$GITHUB_OUTPUT"
 
-          if [ -n "$existing" ]; then
-            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
-            echo "refreshed tracking issue #$existing"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body"
-            echo "opened tracking issue"
-          fi
+      - name: Refresh the tracking issue
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: open
+          update-mode: replace
+          list-limit: ${{ inputs.issue-limit }}
+          title: ${{ inputs.issue-title }}
+          body: ${{ steps.scan.outputs.body }}
