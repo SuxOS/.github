@@ -78,6 +78,11 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
       - name: Claude respond
         if: steps.pre.outputs.go == 'true'
+        # The action can hard-fail (e.g. error_max_turns) even when nothing is actually
+        # wrong with the PR/comment — just a model that didn't wrap up in time. Advisory-
+        # only job (posts a reply, no downstream gate reads its result), so let it fail
+        # visibly in the log without turning into a hard red X on the trigger event.
+        continue-on-error: true
         uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -111,6 +116,10 @@ jobs:
         with: { fetch-depth: 0 }
       - name: Claude review
         if: steps.pre.outputs.go == 'true'
+        # Same rationale as the mention job above: review is advisory-only (posts inline
+        # findings, never blocks merge), so a reviewer that hits error_max_turns or another
+        # non-content failure shouldn't paint the PR with a hard red X.
+        continue-on-error: true
         uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
