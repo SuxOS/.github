@@ -1,0 +1,39 @@
+# Self-CI: fail if any third-party action is SHA-pinned to more than one commit
+# across .github/workflows/**. Third-party actions are pinned by full commit SHA
+# (supply-chain hygiene); this guard catches the drift where one action ends up
+# maintained at two SHAs by hand (as actions/checkout did across v4/v7). Runs
+# directly on this repo — it is NOT a reusable workflow_call file.
+name: pin-consistency
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Assert each SHA-pinned action resolves to a single SHA
+        run: |
+          set -euo pipefail
+          # Collect "owner/action<TAB>sha" for every SHA-pinned `uses:` line.
+          pairs="$(grep -rhoE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-fA-F]{40}' .github/workflows/ \
+            | sed -E 's/uses:[[:space:]]*//' \
+            | awk -F@ '{print $1"\t"$2}' \
+            | sort -u)"
+          # Actions appearing with more than one distinct SHA.
+          dupes="$(printf '%s\n' "$pairs" | cut -f1 | sort | uniq -d || true)"
+          if [ -n "$dupes" ]; then
+            echo "::error::Inconsistent action pins — the same action is pinned to multiple SHAs:"
+            while IFS= read -r action; do
+              [ -z "$action" ] && continue
+              echo "  $action:"
+              printf '%s\n' "$pairs" | awk -F'\t' -v a="$action" '$1==a{print "    "$2}'
+            done <<< "$dupes"
+            exit 1
+          fi
+          echo "OK: every SHA-pinned action resolves to a single SHA."
