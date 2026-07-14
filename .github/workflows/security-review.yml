@@ -51,6 +51,12 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  # claude-code-action fetches a GitHub OIDC token. A reusable workflow's own permissions
+  # block is the ceiling for its jobs, so a caller that grants `id-token: write` has it
+  # silently dropped unless it's ALSO listed here. Its absence left the OIDC fetch ungranted
+  # — intermittently failing ("Could not fetch an OIDC token") → no verdict → a spurious
+  # fail-closed `hold` on legitimate PRs. Listing it here makes the caller's grant effective.
+  id-token: write
 
 concurrency:
   group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
@@ -124,12 +130,46 @@ jobs:
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools Read,Grep,Glob
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
+      - name: Claude security review (retry — first attempt produced no verdict)
+        id: claude_retry
+        # Only fires when the first attempt emitted no structured_output — a transient OIDC/API
+        # blip or a mid-review model error, NOT a clean review. One retry turns the common
+        # seconds-long infra hiccup into an auto-recovery instead of a fail-closed `hold` that
+        # needs a human to re-run. A genuinely broken/refusing review still yields no verdict
+        # after this and the Gate below fails closed exactly as before. Guarded on go so it
+        # never runs when the review was intentionally inert (missing key).
+        if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: ${{ inputs.allowed-bots }}
+          prompt: |
+            ${{ inputs.prompt-context }}
+            Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
+            exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
+            `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
+            untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
+            blast radius, and any autonomous-bot action that could touch prod or user data
+            unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
+
+            Your FINAL message MUST be the machine-readable verdict object matching the provided
+            JSON schema: {"critical":N,"high":N,"note":"..."} — the counts of CONFIRMED
+            critical/high issues (zeros if the diff is clean). Do NOT write any file; the verdict
+            is captured from your structured output, not the filesystem.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools Read,Grep,Glob
+            --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
       - name: Gate — scoped fail-closed on missing verdict; block on high/critical
         if: steps.pre.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          # Read the verdict from whichever attempt produced one (retry only ran if the first was empty).
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
