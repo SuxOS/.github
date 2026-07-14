@@ -38,6 +38,10 @@ on:
         description: "Distinct check-run name so branch protection can require it separately from a plain 'review' job."
         type: string
         default: "security-review"
+      prompt-context:
+        description: "Optional repo-specific context prepended to the review prompt (e.g. deployment shape, blast radius). Empty to skip."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -95,6 +99,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
+            ${{ inputs.prompt-context }}
             Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
             exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
             `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
