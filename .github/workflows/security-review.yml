@@ -88,8 +88,9 @@ jobs:
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
+        # Default (shallow) depth: allowedTools below is Read,Grep,Glob only — no Bash,
+        # so the review never runs git log/diff/blame and doesn't need history.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: { fetch-depth: 0 }
       - name: Claude security review
         id: claude
         if: steps.pre.outputs.go == 'true'
