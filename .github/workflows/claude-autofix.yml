@@ -72,7 +72,7 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → autofix inert. Run 'claude setup-token' and add it to arm."; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
           if ! prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open \
-                 --json number,labels,title,isDraft,authorAssociation,isCrossRepository,headRefName,baseRefName); then
+                 --json number,labels,title,isDraft,isCrossRepository,headRefName,baseRefName); then
             echo "::warning::gh pr list failed for head=$HEAD_BRANCH base=$BASE_BRANCH → cannot determine PR state, skipping (this is NOT a genuine 'no open PR')"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           matches=$(echo "$prs" | jq -c --arg h "$HEAD_BRANCH" --arg b "$BASE_BRANCH" '[.[] | select(.headRefName==$h and .baseRefName==$b)]')
           count=$(echo "$matches" | jq 'length')
@@ -83,7 +83,8 @@ jobs:
           title=$(echo "$pr" | jq -r .title)
           draft=$(echo "$pr" | jq -r .isDraft)
           labels=$(echo "$pr" | jq -r '[.labels[].name] | join(",")')
-          assoc=$(echo "$pr" | jq -r .authorAssociation)
+          # gh's --json flag has no authorAssociation field for PRs; the REST API does.
+          assoc=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$num" -q '.author_association' 2>/dev/null || echo "NONE")
           fork=$(echo "$pr" | jq -r .isCrossRepository)
           echo "PR #$num  title=$title  labels=$labels  draft=$draft  author=$assoc  fork=$fork"
 

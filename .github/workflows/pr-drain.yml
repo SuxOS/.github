@@ -80,10 +80,21 @@ jobs:
           fi
 
           if ! prs=$(gh pr list --state open --limit 100 \
-            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation,updatedAt); then
+            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt); then
             echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
             exit 1
           fi
+
+          # gh's --json flag has no authorAssociation field for PRs (it does for
+          # issues, but not pulls) — the REST API does, so fetch it per PR and merge
+          # it in rather than dropping the trust check downstream relies on.
+          assoc=$(printf '%s' "$prs" | jq -r '.[].number' | while read -r n; do
+            gh api "repos/${GH_REPO}/pulls/$n" -q '{number: .number, authorAssociation: .author_association}' 2>/dev/null
+          done | jq -s '.')
+          prs=$(jq -c --argjson assoc "$assoc" '
+            ($assoc | INDEX(.number)) as $idx
+            | map(. + {authorAssociation: ($idx[.number|tostring].authorAssociation // "NONE")})
+          ' <<<"$prs")
 
           stale=$(( STALE_DAYS * 86400 ))
 
@@ -172,8 +183,13 @@ jobs:
             # Re-read this PR's live state; skip if it no longer structurally qualifies
             # (the safe-type/label/breaking predicate was already checked above; only
             # the fast-changing structural fields are worth re-reading here).
-            if ! gh pr view "$n" --json number,isDraft,labels,mergeStateStatus,autoMergeRequest,authorAssociation 2>/dev/null \
-              | jq -e "$structural_filter" >/dev/null; then
+            if ! pr_json=$(gh pr view "$n" --json number,isDraft,labels,mergeStateStatus,autoMergeRequest 2>/dev/null); then
+              echo "#$n no longer arm-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            assoc=$(gh api "repos/${GH_REPO}/pulls/$n" -q '.author_association' 2>/dev/null || echo "NONE")
+            if ! printf '%s' "$pr_json" | jq -e --arg assoc "$assoc" '. + {authorAssociation: $assoc} | '"$structural_filter" >/dev/null; then
               echo "#$n no longer arm-eligible (state changed) — skipping"
               echo "::endgroup::"
               continue
