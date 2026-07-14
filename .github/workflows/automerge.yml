@@ -138,7 +138,16 @@ jobs:
             missing=""
             while IFS= read -r gate; do
               [ -z "$gate" ] && continue
-              if ! printf '%s\n' "$required" | grep -qxF "$gate"; then
+              # Substring, not exact-line, match. REQUIRED_GATES (this workflow's input
+              # default) and the live ruleset/branch-protection context names are two
+              # independently-edited lists — a required-checks job-name prefix (e.g. CI
+              # grouping a job as "audit / npm audit & SBOM") drifts them apart even
+              # though the gate is still genuinely required. Bit us live: fixing a
+              # ruleset context name to match reality broke this exact-match check
+              # against the still-bare REQUIRED_GATES default. Suffix/substring
+              # containment tolerates that drift without needing both lists kept in
+              # lockstep, while still catching an actually-missing gate.
+              if ! printf '%s\n' "$required" | grep -qF "$gate"; then
                 missing="${missing:+$missing, }$gate"
               fi
             done <<< "$REQUIRED_GATES"
