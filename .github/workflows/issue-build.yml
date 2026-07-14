@@ -227,9 +227,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Create branch
-        env:
-          BRANCH: ${{ matrix.branch }}
-        run: git checkout -B "$BRANCH"
+        run: git checkout -B "${{ matrix.branch }}"
 
       - name: Claude — implement the cluster
         id: claude
