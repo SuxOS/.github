@@ -73,7 +73,7 @@ jobs:
     # from the caller) are driven by someone with repo write access already, so they pass.
     # github.event_name / github.event propagate from the caller into this reusable workflow.
     if: >-
-      vars.ACTIONS_BUDGET_PAUSED != 'true' && (
+      (
         github.event_name != 'issues' ||
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
       )

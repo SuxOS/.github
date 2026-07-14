@@ -5,7 +5,7 @@ name: Claude mention + review (reusable)
 #   1. @claude — mention the bot in any PR/issue comment or review and it responds.
 #   2. Review on open — a review pass on every non-draft PR.
 # Cost-bounded: concurrency cancel-in-progress, --max-turns, review only on
-# opened/ready (not every push). Gated on the repo variable ACTIONS_BUDGET_PAUSED.
+# opened/ready (not every push).
 #
 # Caller (needs its own comment/review/pull_request triggers):
 #   uses: SuxOS/.github/.github/workflows/claude.yml@main
@@ -47,7 +47,6 @@ concurrency:
 jobs:
   mention:
     if: >
-      vars.ACTIONS_BUDGET_PAUSED != 'true' &&
       github.event.sender.type != 'Bot' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association) && (
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -90,7 +89,6 @@ jobs:
 
   review:
     if: >
-      vars.ACTIONS_BUDGET_PAUSED != 'true' &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.draft == false &&
       github.event.sender.type != 'Bot' &&
