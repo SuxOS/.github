@@ -58,6 +58,11 @@ jobs:
           prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
             --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt)
 
+          if ! [[ "$STALE_HOURS" =~ ^[0-9]+$ ]]; then
+            echo "::error::stale-hours must be a non-negative integer, got '${STALE_HOURS}'"
+            exit 1
+          fi
+
           now=$(date -u +%s)
           stale=$(( STALE_HOURS * 3600 ))
 
