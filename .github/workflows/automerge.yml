@@ -101,6 +101,11 @@ jobs:
           # step failed with only "exit code 1", no ::error:: text ever printed,
           # because it died here). `|| true` on each jq call so a bad parse just
           # yields an empty contribution instead of aborting.
+          prot_http=$(curl -s -o /tmp/prot.json -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection")
+          echo "::group::DEBUG prot read"
+          echo "http_code=$prot_http"
+          cat /tmp/prot.json
+          echo "::endgroup::"
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
             read_ok=true
             prot_gates="$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]' 2>/dev/null || true)"
