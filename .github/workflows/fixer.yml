@@ -169,10 +169,14 @@ jobs:
             exit 0
           fi
 
-          echo "Looking for issues filed since $SINCE to assign to $ASSIGNEE..."
+          echo "Looking for issues fixer filed since $SINCE to assign to $ASSIGNEE..."
+          # Scope to suxbot[bot]-authored issues, not just the time window: a human or another
+          # workflow can file an issue in the same window this run is scanning, and a
+          # created:>=SINCE search alone would sweep it in and auto-assign it too.
           mapfile -t issue_numbers < <(
             gh issue list --repo "${{ github.repository }}" --state open \
-              --search "created:>=${SINCE}" --json number --jq '.[].number'
+              --search "created:>=${SINCE}" --json number,author \
+              --jq '.[] | select(.author.login == "suxbot[bot]") | .number'
           )
 
           if [ "${#issue_numbers[@]}" -eq 0 ]; then
