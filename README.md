@@ -12,8 +12,9 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 GitHub's native secret-scanning + push-protection (repo Settings → Security), not
 a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 
-**Scheduled monitoring** (runs on the caller's schedule/dispatch, opens a tracking issue on failure — does not block merge):
-`health.yml`
+**Scheduled monitoring** (runs on the caller's schedule/dispatch, opens/refreshes a tracking issue — does not block merge):
+`health.yml` (app health) · `pipeline-utilization.yml` (autonomy-pipeline run volume/duration —
+a proxy for spend/waste, since actual Claude token usage isn't queryable via the GitHub API)
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
