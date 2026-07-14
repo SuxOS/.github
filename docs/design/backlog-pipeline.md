@@ -155,3 +155,51 @@ yourself, workflows for unattended runs. Neither hardcodes repo paths.
 - A repo joins the pipeline by adding the three caller stubs + the label set
   (`queued-for-build`, `building`, `triaged`, `confidence:high|medium|low`, plus the usual
   `automerge`/`needs-review`/`needs-human`/`hold`). No central repo list to maintain.
+
+## Optional: auto-assigning a coding agent to freshly filed issues (2026-07 research)
+
+`fixer.yml` can, opt-in (`auto-assign-agent: true`), assign each issue it files to a coding
+agent — separately from and in addition to our own `triage`/`issue-build` pipeline, which
+still runs regardless (an agent assignment is a bonus signal to whatever external automation
+watches assignees, not a dependency of this repo's pipeline).
+
+**Why this needed its own research pass** (SuxOS/.github#79 covers the broader gh-aw
+migration question; this is narrower and was verified against GitHub's current docs, not
+assumed):
+
+- **GitHub-native agent assignment exists only for Copilot today.** The login
+  `copilot-swe-agent[bot]` is a real "assignable actor" GitHub itself hosts. You can point at
+  it two ways:
+  - **REST** (what we use — simpler): `POST /repos/{owner}/{repo}/issues/{issue_number}/assignees`
+    with `{"assignees": ["copilot-swe-agent[bot]"]}` — plain assignment, no extra parameters
+    (confirmed against the REST reference; there is no `agent_assignment` body field on this
+    endpoint, despite that being mentioned in some secondary sources).
+  - **GraphQL** `replaceActorsForAssignable` — needed only if you want to pass
+    `agentAssignment` extras (`baseRef`, `customInstructions`, `model`). Discover the actor id
+    first via `suggestedActors(capabilities: [CAN_BE_ASSIGNED])`.
+  - Either way assigning the login is what triggers Copilot's own automation to pick up the
+    issue and (eventually) open a PR — that happens entirely on GitHub's/Copilot's side, not
+    ours.
+- **This categorically requires a PAT — the default `GITHUB_TOKEN` and GitHub App
+  installation tokens (like our `SUX_BOT` App token) do not work.** GitHub's own docs state
+  the agent-assignment path "only supports user-to-server tokens" because Copilot billing is
+  tied to an individual user's seat — a classic PAT (`repo` scope) or fine-grained PAT
+  (read/write on actions+contents+issues+pull-requests) belonging to a user with Copilot
+  coding agent enabled on the repo. Hence the new `AGENT_ASSIGN_PAT` secret — **a human
+  (Colin) must create and add this manually; no agent can mint a PAT on someone's behalf.**
+  Until it's set, `fixer.yml`'s assignment step logs a warning and no-ops.
+- **Current API version:** `X-GitHub-Api-Version: 2026-03-10` (released 2026-03-10; requests
+  omitting the header default to the older `2022-11-28`). We call `gh api`/`gh issue list`
+  via the `gh` CLI, which pins its own supported version internally, so no header is set by
+  hand in the workflow — noted here so a future direct-`curl` implementation gets this right.
+- **Gap: Claude Code has no equivalent GitHub-native assignable agent actor as of 2026-07.**
+  `claude-code-action` (what `fixer`/`triage`/`issue-build` all run on) is triggered by GitHub
+  Actions events — `@claude` mentions, comments, or an `assignee_trigger` input matched
+  against a **real GitHub user login** you configure in the caller workflow's `on: issues:
+  types: [assigned]` — not by a special bot actor GitHub spins up a cloud session for the way
+  Copilot's is. In other words: assigning an issue to some human/bot account named e.g.
+  `claude` only does something if the *target* repo's own workflow is separately watching for
+  assignment to that exact login. There's no `claude-code-agent[bot]`-equivalent actor to
+  target via `suggestedActors`/`replaceActorsForAssignable` today. `agent-assignee` is
+  therefore a plain string input (default `copilot-swe-agent[bot]`) so this can be repointed
+  the moment that changes, but for now Copilot is the only "assign and it just works" option.
