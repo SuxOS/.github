@@ -11,7 +11,7 @@ name: Actions budget guard (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/budget-guard.yml@main
-#   with: { budget: "2500", resume-below: "2400", discretionary-workflows: "claude.yml claude-autofix.yml" }
+#   with: { budget: "6000", resume-below: "5800", discretionary-workflows: "claude.yml claude-autofix.yml" }
 #   secrets: inherit
 
 on:
@@ -19,10 +19,10 @@ on:
     inputs:
       budget:
         type: string
-        default: "2500"
+        default: "6000"
       resume-below:
         type: string
-        default: "2400"
+        default: "5800"
       discretionary-workflows:
         description: "Space-separated workflow filenames this guard is allowed to pause."
         type: string
@@ -66,8 +66,12 @@ jobs:
         run: |
           set -uo pipefail
 
-          billing=$(gh api "/users/${OWNER}/settings/billing/actions" 2>/dev/null || true)
-          used=$(printf '%s' "$billing" | jq -r '.total_minutes_used // empty' 2>/dev/null || true)
+          # The old /users/{owner}/settings/billing/actions endpoint is retired (410).
+          # Current API is per-org usage line items for the billing cycle to date; sum
+          # the Actions-minutes SKUs across every repo to get the account total.
+          billing=$(gh api "/orgs/${OWNER}/settings/billing/usage" 2>/dev/null || true)
+          used=$(printf '%s' "$billing" | jq -r '[.usageItems[]? | select(.product == "actions" and .unitType == "Minutes") | .quantity] | add // empty' 2>/dev/null || true)
+          used=${used%%.*}
           if ! printf '%s' "$used" | grep -qE '^[0-9]+$'; then
             echo "::warning::could not read used Actions minutes (billing API returned nothing usable) — no-op this run"
             exit 0
