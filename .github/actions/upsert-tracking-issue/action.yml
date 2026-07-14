@@ -1,0 +1,85 @@
+name: Upsert tracking issue
+description: >-
+  Maintain a single rolling tracking issue: find the open issue with an exact
+  title and comment on it (or replace its body), create it when missing, or
+  comment-and-close it on recovery. The shared upsert used by the scheduled
+  maintenance workflows so the list -> match-by-title -> comment/create/close
+  flow lives in one place.
+
+inputs:
+  title:
+    description: Exact issue title used to find (and, when creating, name) the tracking issue.
+    required: true
+  body:
+    description: >-
+      Issue body when creating or refreshing (mode=open); the comment posted
+      just before closing (mode=close).
+    required: true
+  mode:
+    description: "open (create/refresh the issue) or close (comment-and-close it if present)."
+    required: false
+    default: open
+  update-mode:
+    description: >-
+      How to update an existing issue when mode=open: comment (append a new
+      comment) or replace (overwrite the body).
+    required: false
+    default: comment
+  github-token:
+    description: Token with issues:write used for the gh calls.
+    required: true
+
+outputs:
+  issue-number:
+    description: Number of the created/updated/closed issue (empty when none).
+    value: ${{ steps.upsert.outputs.issue-number }}
+
+runs:
+  using: composite
+  steps:
+    - name: Upsert tracking issue
+      id: upsert
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        MODE: ${{ inputs.mode }}
+        UPDATE_MODE: ${{ inputs.update-mode }}
+      run: |
+        set -uo pipefail
+
+        existing=$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title \
+          | jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+
+        case "$MODE" in
+          close)
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$REPO" --body "$BODY" || true
+              gh issue close "$existing" --repo "$REPO" && echo "closed tracking issue #$existing"
+            else
+              echo "no open tracking issue to close"
+            fi
+            echo "issue-number=$existing" >>"$GITHUB_OUTPUT"
+            ;;
+          open)
+            if [ -n "$existing" ]; then
+              if [ "$UPDATE_MODE" = "replace" ]; then
+                gh issue edit "$existing" --repo "$REPO" --body "$BODY" && echo "refreshed tracking issue #$existing"
+              else
+                gh issue comment "$existing" --repo "$REPO" --body "$BODY" && echo "commented on tracking issue #$existing"
+              fi
+              echo "issue-number=$existing" >>"$GITHUB_OUTPUT"
+            else
+              url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
+              num=$(printf '%s' "$url" | grep -oE '[0-9]+$' || true)
+              echo "opened tracking issue #$num"
+              echo "issue-number=$num" >>"$GITHUB_OUTPUT"
+            fi
+            ;;
+          *)
+            echo "::error::unknown mode: $MODE"
+            exit 1
+            ;;
+        esac

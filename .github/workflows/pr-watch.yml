@@ -48,10 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Scan open PRs and upsert the tracking issue
+      - name: Scan open PRs for stalls
+        id: scan
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_TITLE: ${{ inputs.issue-title }}
           FLAG_BEHIND: ${{ inputs.flag-behind }}
         run: |
           set -euo pipefail
@@ -102,19 +102,9 @@ jobs:
           count=$(echo "$stuck" | jq 'length')
           echo "stuck PRs: $count"
           echo "$stuck" | jq .
-
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
-            | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+          echo "count=$count" >>"$GITHUB_OUTPUT"
 
           if [ "$count" -eq 0 ]; then
-            if [ -n "$existing" ]; then
-              gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
-                --body "All clear — no stuck PRs as of $(date -u '+%Y-%m-%d %H:%M UTC'). Closing."
-              gh issue close "$existing" --repo "$GITHUB_REPOSITORY"
-              echo "closed stale tracking issue #$existing"
-            else
-              echo "no stuck PRs, no tracking issue — nothing to do"
-            fi
             exit 0
           fi
 
@@ -134,10 +124,27 @@ jobs:
             "" \
             "$legend")
 
-          if [ -n "$existing" ]; then
-            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
-            echo "refreshed tracking issue #$existing"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body"
-            echo "opened tracking issue"
-          fi
+          {
+            echo "body<<PRWATCH_EOF"
+            printf '%s\n' "$body"
+            echo "PRWATCH_EOF"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Refresh the tracking issue
+        if: steps.scan.outputs.count != '0'
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: open
+          update-mode: replace
+          title: ${{ inputs.issue-title }}
+          body: ${{ steps.scan.outputs.body }}
+
+      - name: Close the tracking issue when all clear
+        if: steps.scan.outputs.count == '0'
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: close
+          title: ${{ inputs.issue-title }}
+          body: "All clear — no stuck PRs. Closing this rolling tracking issue."
