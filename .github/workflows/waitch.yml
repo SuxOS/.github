@@ -1,0 +1,123 @@
+name: Merge queue watcher (reusable)
+
+# Read-only monitoring of merge queue activity: PRs in queue, recent issues, and
+# Actions runs. Maintains a single rolling tracking issue with summary.
+#
+# Caller (needs its own schedule/dispatch triggers):
+#   uses: SuxOS/.github/.github/workflows/waitch.yml@main
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      issue-title:
+        type: string
+        default: "Merge queue activity — pipeline watcher"
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  checks: read
+  statuses: read
+  actions: read
+
+concurrency:
+  group: waitch-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: Monitor merge queue activity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan merge queue, issues, and actions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ inputs.issue-title }}
+        run: |
+          set -euo pipefail
+
+          # Get merge queue PRs
+          queue_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number,title,url,author,updatedAt,mergeStateStatus \
+            --search "is:in-merge-queue")
+
+          # Get recent issues
+          recent_issues=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 50 \
+            --json number,title,url,createdAt,updatedAt,labels \
+            --sort updated --order desc)
+
+          # Get recent workflow runs (last 20)
+          recent_runs=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 20 \
+            --json number,name,status,conclusion,url,updatedAt,workflowName)
+
+          now=$(date -u +%s)
+
+          # Format merge queue PRs
+          queue_count=$(echo "$queue_prs" | jq 'length')
+          queue_rows=""
+          if [ "$queue_count" -gt 0 ]; then
+            queue_rows=$(echo "$queue_prs" | jq -r '.[] | "| [#\(.number)](\(.url)) | \(.author.login) | \(.mergeStateStatus) | \(.title | gsub("\\|"; "\\|")) |"')
+          fi
+
+          # Format recent issues
+          issue_count=$(echo "$recent_issues" | jq 'length')
+          issue_rows=""
+          if [ "$issue_count" -gt 0 ]; then
+            issue_rows=$(echo "$recent_issues" | jq -r '.[:10] | .[] | "| [#\(.number)](\(.url)) | \(.labels | map(.name) | join(", ") | if . == "" then "—" else . end) | \(.title | gsub("\\|"; "\\|")) |"')
+          fi
+
+          # Format recent action runs
+          run_count=$(echo "$recent_runs" | jq 'length')
+          run_rows=""
+          if [ "$run_count" -gt 0 ]; then
+            run_rows=$(echo "$recent_runs" | jq -r '.[:10] | .[] | "| [\(.number)](\(.url)) | \(.conclusion // .status // "pending") | \(.workflowName) |"')
+          fi
+
+          # Build tracking issue body
+          body=$(printf '%s\n' \
+            "Auto-maintained by the merge queue watcher (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/waitch.yml). Last updated $(date -u '+%Y-%m-%d %H:%M UTC')." \
+            "" \
+            "## Merge Queue Summary" \
+            "**PRs in queue:** $queue_count" \
+            "")
+
+          if [ "$queue_count" -gt 0 ]; then
+            body=$(printf '%s\n' \
+              "$body" \
+              "| PR | Author | Status | Title |" \
+              "|----|----|--------|-------|" \
+              "$queue_rows" \
+              "")
+          else
+            body=$(printf '%s\n' \
+              "$body" \
+              "No PRs currently in merge queue." \
+              "")
+          fi
+
+          body=$(printf '%s\n' \
+            "$body" \
+            "## Recent Issues (latest 10)" \
+            "| Issue | Labels | Title |" \
+            "|-------|--------|-------|" \
+            "$issue_rows" \
+            "" \
+            "## Recent Workflow Runs (latest 10)" \
+            "| Run | Status | Workflow |" \
+            "|-----|--------|----------|" \
+            "$run_rows" \
+            "")
+
+          # Find or create tracking issue
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+            | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+            echo "refreshed tracking issue #$existing"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" --body "$body"
+            echo "opened tracking issue"
+          fi
