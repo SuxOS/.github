@@ -123,7 +123,7 @@ jobs:
             is captured from your structured output, not the filesystem.
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
-            --allowedTools Read,Grep,Glob,Bash
+            --allowedTools Read,Grep,Glob
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
       - name: Gate — scoped fail-closed on missing verdict; block on high/critical
         if: steps.pre.outputs.go == 'true'
