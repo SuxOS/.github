@@ -135,7 +135,7 @@ jobs:
               | select(.isDraft | not)
               | select(.mergeStateStatus == "CLEAN")
               | select(.autoMergeRequest == null)
-              | select(["OWNER","MEMBER","COLLABORATOR"] | index(.authorAssociation))
+              | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a))
               | ([.labels[].name]) as $l
               | select(($l | index("hold")) | not)
               | select(($l | index("feature")) | not)
@@ -173,7 +173,7 @@ jobs:
             select(.isDraft | not)
             | select(.mergeStateStatus == "CLEAN")
             | select(.autoMergeRequest == null)
-            | select(["OWNER","MEMBER","COLLABORATOR"] | index(.authorAssociation))
+            | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a))
             | ([.labels[].name]) as $l
             | select(($l | index("hold")) | not)
             | select(($l | index("feature")) | not)'
