@@ -62,7 +62,7 @@ jobs:
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
 
       - name: Claude — scan and propose issues
@@ -116,4 +116,7 @@ jobs:
             worse than silence (file a genuine hunch as `confidence:low`, don't invent one). When
             done, summarize: issues filed (with links + their confidence), how many you discarded
             as duplicates/baseless.
-          claude_args: "--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}"
+          # Proposer files issues only — never writes code, never opens PRs. Restrict tools
+          # to read + `gh issue` (its `gh issue list`/`gh issue create` contract); NO
+          # Write/Edit/WebFetch/WebSearch.
+          claude_args: '--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }} --allowedTools "Read,Grep,Glob,Bash(gh issue:*)"'

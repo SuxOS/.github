@@ -127,7 +127,7 @@ jobs:
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
 
       - name: Claude — cluster the backlog
@@ -164,8 +164,13 @@ jobs:
             covers, and the `issue_numbers` in it.
 
             Do not modify any issue and do not write any code in this step.
+          # Cluster step only reads issues and returns a grouping plan — it writes no code and
+          # modifies no issue (the claim/label swap is a separate shell step). Restrict to
+          # read + `gh` bash; NO Write/Edit. (The BUILD job below legitimately writes code and
+          # keeps broad tools.)
           claude_args: >-
             --max-turns 10 --model ${{ inputs.cluster-model }}
+            --allowedTools "Read,Grep,Glob,Bash(gh:*)"
             --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
 
       - name: Cap cluster count and claim issues
@@ -218,7 +223,7 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       - name: Checkout default branch, create cluster branch
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
@@ -254,6 +259,8 @@ jobs:
             normally. If you cannot get the gates passing (a genuine design problem, missing
             context, etc.), do NOT push a broken commit — say so clearly in your final
             response instead, explaining what's blocking it.
+          # BUILD job: legitimately writes code and pushes a branch, so tools stay broad
+          # (no --allowedTools restriction) by design — unlike the read-only cluster job above.
           claude_args: "--max-turns ${{ inputs.build-max-turns }} --model ${{ inputs.build-model }}"
 
       - name: Push and open PR, or comment + requeue on failure

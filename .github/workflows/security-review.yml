@@ -56,23 +56,20 @@ concurrency:
 jobs:
   security-review:
     name: ${{ inputs.job-name }}
-    # Trusted authors only; draft PRs skipped. Mirrors automerge.yml's own eligibility
-    # gate exactly (trusted author_association OR a `self-improve`-labelled bot PR) —
-    # NOT restricted to non-bot senders. A bot-authored PR (e.g. from issue-build.yml)
-    # can carry a trusted author_association and be automerge-eligible without ever
-    # carrying `self-improve`; excluding bot senders from the trusted-author branch
-    # here (as a prior version of this condition did) let exactly those PRs skip this
-    # required check via GitHub treating a skipped required check as passing —
-    # letting an unreviewed autonomous PR merge on CI alone.
+    # Runs on EVERY non-draft PR regardless of author_association — this is a REQUIRED
+    # merge gate, and GitHub treats a SKIPPED required check as PASSING. Any author-based
+    # skip (as a prior version had, gating on trusted author_association / a `self-improve`
+    # label) therefore let an untrusted or unlabelled PR bypass the security review entirely
+    # by being skipped — an unreviewed change merging on deterministic CI alone. The only
+    # skip conditions kept are the merge_group passthrough (the PR was already reviewed
+    # pre-queue) and draft PRs; self-improve PRs are non-draft so they still run here.
+    # NOTE: on a PR from a PUBLIC fork, GitHub withholds secrets, so
+    # CLAUDE_CODE_OAUTH_TOKEN may be absent and the Preflight step marks the review inert.
+    # That is a future concern for when repos go public; fork-secret handling is not solved
+    # here.
     if: >
       github.event_name == 'merge_group' ||
-      (
-        github.event.pull_request.draft == false &&
-        (
-          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
-          contains(github.event.pull_request.labels.*.name, 'self-improve')
-        )
-      )
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -88,7 +85,7 @@ jobs:
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
       - name: Claude security review
         id: claude
