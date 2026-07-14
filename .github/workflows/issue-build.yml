@@ -111,9 +111,7 @@ jobs:
           set -euo pipefail
           now=$(date -u +%s)
           gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
-            --json number,updatedAt --jq '.[]' 2>/dev/null | while read -r row; do
-            n=$(echo "$row" | jq -r .number)
-            upd=$(echo "$row" | jq -r .updatedAt)
+            --json number,updatedAt --jq '.[] | [.number,.updatedAt] | @tsv' 2>/dev/null | while IFS=$'\t' read -r n upd; do
             age_h=$(( (now - $(date -u -d "$upd" +%s 2>/dev/null || echo "$now")) / 3600 ))
             if [ "$age_h" -ge "$REAP_STALE_HOURS" ]; then
               echo "reaping orphaned building issue #$n (idle ${age_h}h)"
