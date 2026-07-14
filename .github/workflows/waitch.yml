@@ -38,6 +38,7 @@ jobs:
   watch:
     name: Monitor merge queue activity
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Scan merge queue, issues, and actions
         env:
