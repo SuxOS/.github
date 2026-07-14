@@ -116,7 +116,10 @@ jobs:
           # `gh issue list --json` has no author_association field, so this reads the REST
           # issues endpoint directly (it returns author_association per-issue) — and must
           # exclude entries carrying a `pull_request` key, since that endpoint lists PRs too.
-          all=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate 2>/dev/null || echo '[]')
+          if ! all=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate); then
+            echo "::error::gh api issues list failed — aborting instead of treating as zero untriaged issues"
+            exit 1
+          fi
           picked=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" '
             [ .[][]
               | select(has("pull_request") | not)

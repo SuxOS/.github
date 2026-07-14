@@ -110,15 +110,24 @@ jobs:
         run: |
           set -euo pipefail
           now=$(date -u +%s)
-          gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
-            --json number,updatedAt --jq '.[] | [.number,.updatedAt] | @tsv' 2>/dev/null | while IFS=$'\t' read -r n upd; do
-            age_h=$(( (now - $(date -u -d "$upd" +%s 2>/dev/null || echo "$now")) / 3600 ))
-            if [ "$age_h" -ge "$REAP_STALE_HOURS" ]; then
-              echo "reaping orphaned building issue #$n (idle ${age_h}h)"
-              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
-            fi
-          done
-          qcount=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label queued-for-build --json number --jq 'length' 2>/dev/null || echo 0)
+          if ! stale_rows=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
+              --json number,updatedAt --jq '.[] | [.number,.updatedAt] | @tsv'); then
+            echo "::error::gh issue list (label:building) failed — aborting instead of silently skipping the reap"
+            exit 1
+          fi
+          if [ -n "$stale_rows" ]; then
+            while IFS=$'\t' read -r n upd; do
+              age_h=$(( (now - $(date -u -d "$upd" +%s 2>/dev/null || echo "$now")) / 3600 ))
+              if [ "$age_h" -ge "$REAP_STALE_HOURS" ]; then
+                echo "reaping orphaned building issue #$n (idle ${age_h}h)"
+                gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
+              fi
+            done <<< "$stale_rows"
+          fi
+          if ! qcount=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label queued-for-build --json number --jq 'length'); then
+            echo "::error::gh issue list (label:queued-for-build) failed — aborting instead of treating as an empty queue"
+            exit 1
+          fi
           echo "queued-for-build issues: $qcount"
           echo "count=$qcount" >> "$GITHUB_OUTPUT"
 
