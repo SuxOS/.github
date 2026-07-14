@@ -53,7 +53,9 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Check (source-derived, offline)
-        run: node ${{ inputs.check-script }} --offline
+        env:
+          CHECK_SCRIPT: ${{ inputs.check-script }}
+        run: node "$CHECK_SCRIPT" --offline
 
   fix:
     name: Re-mirror plugin skill
@@ -84,7 +86,9 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Re-mirror plugin skill from source
-        run: node ${{ inputs.check-script }} --write
+        env:
+          CHECK_SCRIPT: ${{ inputs.check-script }}
+        run: node "$CHECK_SCRIPT" --write
 
       - name: Open or refresh PR if anything changed
         env:
