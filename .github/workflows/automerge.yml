@@ -68,7 +68,7 @@ jobs:
     steps:
       - name: Mint app token
         id: app-token
-        uses: ./.github/actions/mint-app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
