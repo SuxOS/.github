@@ -1,0 +1,46 @@
+name: PR auto-merge eligibility
+description: >-
+  Single source of truth for the "safe to auto-merge" CORE predicate shared by
+  automerge.yml, claude-autofix.yml and pr-drain.yml: a conventional-commit
+  safe-type title OR an eligible label, AND not a breaking-change (!) title.
+  Safe types: fix|security|perf|refactor|chore|docs|test|build|ci|revert.
+  Eligible labels: automerge|bug|security|chore-safe. Caller-specific structural
+  filters (draft / hold / feature / needs-human) stay with each caller; this
+  action only encodes the drift-prone regex + label list + breaking exclusion.
+
+inputs:
+  prs-json:
+    description: >-
+      JSON array of the PRs to test, each object shaped
+      { "number": <int>, "title": <string>, "labels": [<string>, ...] }.
+      Single-PR callers pass a one-element array.
+    required: true
+
+outputs:
+  eligible-numbers:
+    description: >-
+      Space-separated PR numbers (from the input) that satisfy the core
+      predicate. Empty when none qualify.
+    value: ${{ steps.evaluate.outputs.eligible-numbers }}
+
+runs:
+  using: composite
+  steps:
+    - id: evaluate
+      shell: bash
+      env:
+        PRS_JSON: ${{ inputs.prs-json }}
+      run: |
+        set -euo pipefail
+        eligible=$(printf '%s' "$PRS_JSON" | jq -r '
+          .[]
+          | (([.labels[]? ] | map(ascii_downcase))) as $l
+          | select(
+              (($l | index("automerge")) or ($l | index("bug")) or ($l | index("security")) or ($l | index("chore-safe")))
+              or (.title | test("^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\\([^)]*\\))?:"; "i"))
+            )
+          | select((.title | test("^[a-z]+(\\([^)]*\\))?!:"; "i")) | not)
+          | .number')
+        eligible=$(printf '%s' "$eligible" | tr '\n' ' ' | sed 's/  */ /g; s/^ *//; s/ *$//')
+        echo "eligible core predicate → PR numbers: ${eligible:-<none>}"
+        echo "eligible-numbers=$eligible" >> "$GITHUB_OUTPUT"

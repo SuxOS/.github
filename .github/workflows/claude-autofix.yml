@@ -96,16 +96,39 @@ jobs:
           has(){ echo ",$labels," | grep -qi ",$1,"; }
           if has hold || has needs-human; then echo "hold/needs-human → skip"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
-          elig=false
-          for l in bug security chore-safe automerge; do has "$l" && elig=true; done
-          if printf '%s' "$title" | grep -qiE '^(fix|security|perf|refactor|chore|docs|test|build|ci|revert)(\([^)]*\))?:'; then elig=true; fi
-          if [ "$elig" != "true" ]; then echo "not an auto-fix-eligible PR → skip (a human drives features)"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-
+          # Structural gate passed; the shared safe-type/label/breaking predicate is
+          # applied next via the pr-eligibility action (single source of truth).
           echo "go=true" >> "$GITHUB_OUTPUT"
           echo "pr=$num" >> "$GITHUB_OUTPUT"
+          jq -cn --argjson n "$num" --arg t "$title" --arg l "$labels" \
+            '[{number: $n, title: $t, labels: ($l | split(",") | map(select(. != "")))}]' \
+            > "$RUNNER_TEMP/pr-eligibility.json"
+          echo "prs-json=$(cat "$RUNNER_TEMP/pr-eligibility.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate shared eligibility predicate
+        if: steps.pre.outputs.go == 'true'
+        id: eligible
+        uses: SuxOS/.github/.github/actions/pr-eligibility@main
+        with:
+          prs-json: ${{ steps.pre.outputs.prs-json }}
+
+      - name: Gate on shared eligibility predicate
+        if: steps.pre.outputs.go == 'true'
+        id: gate
+        env:
+          PR_NUM: ${{ steps.pre.outputs.pr }}
+          ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
+        run: |
+          set -euo pipefail
+          if printf ' %s ' "$ELIGIBLE_NUMBERS" | grep -qw "$PR_NUM"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "not an auto-fix-eligible PR → skip (a human drives features)"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Mint app token
-        if: steps.pre.outputs.go == 'true'
+        if: steps.gate.outputs.go == 'true'
         id: app-token
         uses: ./.github/actions/mint-app-token
         with:
@@ -113,7 +136,7 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       - name: Checkout PR branch
-        if: steps.pre.outputs.go == 'true'
+        if: steps.gate.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.workflow_run.head_branch }}
@@ -121,7 +144,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Attempt cap — stop looping after MAX_ATTEMPTS bot commits
-        if: steps.pre.outputs.go == 'true'
+        if: steps.gate.outputs.go == 'true'
         id: cap
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -146,7 +169,7 @@ jobs:
           fi
 
       - name: Claude — fix the CI failure
-        if: steps.pre.outputs.go == 'true' && steps.cap.outputs.go == 'true'
+        if: steps.gate.outputs.go == 'true' && steps.cap.outputs.go == 'true'
         uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
         env:
           CI_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
