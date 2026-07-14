@@ -20,8 +20,8 @@ on:
         description: "npm script that runs the test suite"
         type: string
         default: "test"
-      extra-checks-script:
-        description: "Optional npm script for repo-specific invariant checks (e.g. check:node). Empty to skip."
+      extra-checks-scripts:
+        description: "Space-separated npm scripts for repo-specific invariant checks (e.g. check:node lint:dispatcher-docs), run in order. Empty to skip."
         type: string
         default: "check:node"
       gen-index-script:
@@ -67,9 +67,12 @@ jobs:
         if: inputs.test-script != ''
         run: npm run ${{ inputs.test-script }}
 
-      - name: Extra invariant check
-        if: inputs.extra-checks-script != ''
-        run: npm run ${{ inputs.extra-checks-script }}
+      - name: Extra invariant checks
+        if: inputs.extra-checks-scripts != ''
+        run: |
+          for script in ${{ inputs.extra-checks-scripts }}; do
+            npm run "$script"
+          done
 
       - name: Generated file in sync
         if: inputs.gen-index-script != ''

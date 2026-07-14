@@ -17,6 +17,13 @@ name: Security review (reusable)
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/security-review.yml@main
 #   secrets: inherit
+#
+# Under a merge queue, the caller should also trigger `on: merge_group` (branch protection
+# requires this check report on the queue's speculative ref, or the queue stalls forever).
+# The job below short-circuits to a green passthrough on merge_group: the real review is a
+# PR-stage gate (a high/critical finding applies `hold`, keeping the PR out of the queue
+# entirely), so by the time a PR is queued it has already been reviewed and there is no PR
+# left to review on the merge_group ref.
 
 on:
   workflow_call:
@@ -39,7 +46,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
   cancel-in-progress: true
 
 jobs:
@@ -54,16 +61,23 @@ jobs:
     # required check via GitHub treating a skipped required check as passing —
     # letting an unreviewed autonomous PR merge on CI alone.
     if: >
-      github.event.pull_request.draft == false &&
+      github.event_name == 'merge_group' ||
       (
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
-        contains(github.event.pull_request.labels.*.name, 'self-improve')
+        github.event.pull_request.draft == false &&
+        (
+          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
+          contains(github.event.pull_request.labels.*.name, 'self-improve')
+        )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Merge queue — security review satisfied by the pre-queue PR review
+        if: github.event_name == 'merge_group'
+        run: echo "merge_group event - security-review already performed on the PR before queueing"
       - name: Preflight — need the key
         id: pre
+        if: github.event_name == 'pull_request'
         run: |
           if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → security review inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
