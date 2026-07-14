@@ -31,13 +31,18 @@ permissions:
   contents: read
   issues: write
 
-# Scoped to the workflow (not github.ref) so the tracking-issue dedup
-# read-modify-write in the failure handler is serialized across all PRs — a
-# per-ref group would let two PRs both see "no existing issue" and each create
-# one. cancel-in-progress is false so concurrent audits queue instead of
-# cancelling each other's issue bookkeeping.
+# Scoped per-repo-per-ref: a bare `${{ github.workflow }}` group is identical
+# across every caller repo (the reusable workflow's own name), so all repos'
+# audit runs shared one org-wide queue lane. GitHub Actions keeps at most one
+# *pending* run per concurrency group — when a newer run queues into that
+# lane, the older queued run is evicted (cancelled) regardless of
+# cancel-in-progress, which is what caused the org-wide spurious "failed"
+# checks. Scoping the group to repo+ref keeps queueing/dedup behavior within
+# a single PR/branch instead of colliding across unrelated repos.
+# cancel-in-progress stays false so concurrent audits on the same ref queue
+# instead of cancelling each other's issue bookkeeping.
 concurrency:
-  group: audit-issue-${{ github.workflow }}
+  group: audit-issue-${{ github.workflow }}-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

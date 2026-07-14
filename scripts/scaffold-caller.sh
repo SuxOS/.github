@@ -158,6 +158,28 @@ jobs:
     secrets: inherit
 YAML
 
+emit waitch <<YAML
+name: Waitch
+on:
+  schedule: [{ cron: "0 */6 * * *" }]
+  workflow_dispatch:
+jobs:
+  waitch:
+    uses: $REPO/.github/workflows/waitch.yml@$REF
+    secrets: inherit
+YAML
+
+emit pipeline-utilization <<YAML
+name: Pipeline utilization
+on:
+  schedule: [{ cron: "0 9 * * 1" }]
+  workflow_dispatch:
+jobs:
+  pipeline-utilization:
+    uses: $REPO/.github/workflows/pipeline-utilization.yml@$REF
+    secrets: inherit
+YAML
+
 emit claude <<YAML
 name: Claude
 on:
@@ -188,17 +210,6 @@ jobs:
     uses: $REPO/.github/workflows/claude-autofix.yml@$REF
     with:
       gates-summary: "npm run type-check · npm test · npm run lint"
-    secrets: inherit
-YAML
-
-emit budget-guard <<YAML
-name: Budget guard
-on:
-  schedule: [{ cron: "*/30 * * * *" }]
-  workflow_dispatch:
-jobs:
-  budget-guard:
-    uses: $REPO/.github/workflows/budget-guard.yml@$REF
     secrets: inherit
 YAML
 
@@ -257,10 +268,13 @@ YAML
 cat <<'DONE'
 
 Caller stubs scaffolded. Remaining manual steps (see README):
-  - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY,
-    SUX_BOT_APP_ID, SUX_BOT_PRIVATE_KEY.
+  - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, SUX_BOT_APP_ID,
+    SUX_BOT_PRIVATE_KEY. (CI billing is subscription-based via
+    CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
   - Create labels: queued-for-build, building, triaged, confidence:high|medium|low,
     automerge, needs-review, needs-human, hold.
   - Turn on strict branch protection on main (Type-check & build, security-review,
-    gitleaks, npm audit & SBOM) before relying on automerge.
+    npm audit & SBOM) before relying on automerge. Secret scanning is GitHub's
+    native secret-scanning + push-protection (repo Settings → Security), not a
+    status check — enable it there, not as a required gate.
 DONE
