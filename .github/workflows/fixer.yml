@@ -17,9 +17,22 @@ name: Fixer — propose work as issues (reusable)
 # Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`),
 # not a metered ANTHROPIC_API_KEY — inert until that secret is set.
 #
+# Optional: auto-assign a coding agent to freshly filed issues (`auto-assign-agent: true`).
+# This is a DIFFERENT auth path than the rest of the pipeline — GitHub's agent-assignment API
+# only accepts user-to-server tokens (a PAT), never a GitHub App installation token or the
+# default GITHUB_TOKEN (confirmed against GitHub's coding-agent API docs, 2026-07). So this
+# needs its own secret, `AGENT_ASSIGN_PAT` — a classic PAT with `repo` scope, or a fine-grained
+# PAT with read/write on actions+contents+issues+pull-requests — belonging to a user who has
+# the target agent enabled on this repo. Add it as an org/repo secret; inert (skipped, logged)
+# until it exists. See docs/design/backlog-pipeline.md for the researched API details and the
+# known gap (only `copilot-swe-agent[bot]` supports this today — Claude Code has no equivalent
+# GitHub-native assignable agent actor as of 2026-07).
+#
 # Caller (workflow_dispatch — manual for now; add a schedule: later if desired):
 #   uses: SuxOS/.github/.github/workflows/fixer.yml@main
 #   secrets: inherit
+#   with:
+#     auto-assign-agent: true   # optional, default false
 
 on:
   workflow_call:
@@ -30,6 +43,21 @@ on:
       max-turns:
         type: number
         default: 25
+      auto-assign-agent:
+        description: >-
+          After filing, assign each freshly-created issue to a coding agent via GitHub's
+          agent-assignment API. Requires the AGENT_ASSIGN_PAT secret (a PAT, not the App
+          token) — see the comment block above. No-ops with a log line if the secret is
+          unset, so it's safe to flip on before the secret exists.
+        type: boolean
+        default: false
+      agent-assignee:
+        description: >-
+          Login to assign to. Only `copilot-swe-agent[bot]` is known to work today (GitHub's
+          Copilot coding agent) — see docs/design/backlog-pipeline.md for why Claude Code
+          has no equivalent as of 2026-07.
+        type: string
+        default: "copilot-swe-agent[bot]"
 
 permissions:
   contents: read
@@ -64,6 +92,11 @@ jobs:
         if: steps.pre.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
+
+      - name: Record scan-start time
+        if: steps.pre.outputs.go == 'true' && inputs.auto-assign-agent == true
+        id: scan-start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
 
       - name: Claude — scan and propose issues
         if: steps.pre.outputs.go == 'true'
@@ -121,3 +154,40 @@ jobs:
           # `gh issue list`/`gh issue create` contract); NO Write/Edit/WebFetch/WebSearch/push.
           # (Read-only git subcommands are enumerated so the write-scoped App token can't push.)
           claude_args: '--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }} --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue:*)"'
+
+      # Deterministic on purpose (cardinal rule: script over model call whenever exact) —
+      # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped
+      # to this run's time window. See the workflow-level comment for why this needs a PAT.
+      - name: Auto-assign freshly filed issues to a coding agent
+        if: steps.pre.outputs.go == 'true' && inputs.auto-assign-agent == true
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_ASSIGN_PAT }}
+          ASSIGNEE: ${{ inputs.agent-assignee }}
+          SINCE: ${{ steps.scan-start.outputs.at }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::auto-assign-agent is true but AGENT_ASSIGN_PAT is not set — skipping assignment. Add it as an org/repo secret (a PAT, not the App token; see the workflow-level comment) to arm this."
+            exit 0
+          fi
+
+          echo "Looking for issues filed since $SINCE to assign to $ASSIGNEE..."
+          mapfile -t issue_numbers < <(
+            gh issue list --repo "${{ github.repository }}" --state open \
+              --search "created:>=${SINCE}" --json number --jq '.[].number'
+          )
+
+          if [ "${#issue_numbers[@]}" -eq 0 ]; then
+            echo "No issues created since $SINCE — nothing to assign."
+            exit 0
+          fi
+
+          for n in "${issue_numbers[@]}"; do
+            echo "Assigning #$n to $ASSIGNEE..."
+            if ! gh api "repos/${{ github.repository }}/issues/${n}/assignees" \
+                   -f "assignees[]=${ASSIGNEE}" >/dev/null; then
+              echo "::warning::Failed to assign #$n to $ASSIGNEE — likely means the agent isn't enabled on this repo, or AGENT_ASSIGN_PAT's owner doesn't have it enabled. Leaving the issue unassigned; the normal triage/build pipeline still picks it up."
+            fi
+          done
+
+          # Never fail the run over this — assignment is a bonus, not the pipeline's job.
+          exit 0
