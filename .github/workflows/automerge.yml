@@ -95,15 +95,23 @@ jobs:
           set -uo pipefail
           read_ok=false
           required=""
+          # jq output is captured into a plain (non-if-guarded) assignment below, so
+          # under the runner's `bash -e` a jq parse hiccup on unexpected JSON shape
+          # would silently kill the whole script with no message (bit us live: a
+          # step failed with only "exit code 1", no ::error:: text ever printed,
+          # because it died here). `|| true` on each jq call so a bad parse just
+          # yields an empty contribution instead of aborting.
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
             read_ok=true
+            prot_gates="$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]' 2>/dev/null || true)"
             required="$required
-          $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
+$prot_gates"
           fi
           if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
             read_ok=true
+            rule_gates="$(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null || true)"
             required="$required
-          $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
+$rule_gates"
           fi
           if [ "$read_ok" != "true" ]; then
             echo "::warning::could not READ main branch protection OR rulesets (token perms / network) — cannot determine protection state, so continuing WITHOUT blocking; a token/API blip must not jam the queue. If the checks are required, GitHub still gates the actual merge."
