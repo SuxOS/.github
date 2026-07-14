@@ -1,0 +1,107 @@
+name: Assert main branch protection requires the security gates
+description: >-
+  Fail closed unless every required gate is present in main's required checks —
+  native auto-merge completes the instant REQUIRED checks go green, so a slow
+  security review only guards the merge if it's actually required. Reads BOTH
+  governance surfaces (classic branch protection AND repository rulesets — a
+  merge-queue is typically ruleset-gated, and its required checks don't appear in
+  the classic-protection payload) and unions them; a gate need only be present in
+  EITHER. Distinguishes a positive "not required" finding from a merely unreadable
+  one:
+    • at least one surface reads OK but a required gate is still missing →
+      ::error:: + exit 1 (fail closed, LOUD) — this also covers a fully
+      unprotected branch (404 on both surfaces reads as "required = none"), which
+      used to warn-and-continue and let an ungated merge through.
+    • BOTH surfaces fail to read (403 / network — can't determine state at all) →
+      ::warning:: + continue: a perms blip must not jam every auto-merge, and
+      GitHub still won't complete the merge if a check is actually required.
+
+inputs:
+  github-token:
+    description: Token with repo read access to branch protection and rulesets.
+    required: true
+  required-gates:
+    description: >-
+      Newline-separated check-run names that main branch protection (or a
+      ruleset) must require before auto-merge is trusted to be gated (job
+      `name`s, one per line).
+    required: true
+  base-branch:
+    description: >-
+      Branch to check. Defaults to the repo's default branch — hardcoding "main"
+      here broke for any caller whose default branch isn't literally main: the
+      read 404s, which resolves to rules_ok=false, which takes the "can't
+      determine, continue WITHOUT blocking" path, silently disabling this
+      fail-closed gate instead of erroring loudly.
+    required: false
+    default: ${{ github.event.repository.default_branch }}
+
+runs:
+  using: composite
+  steps:
+    # jq output is captured into a plain (non-if-guarded) assignment below, so under
+    # the runner's `bash -e` a jq parse hiccup on unexpected JSON shape would
+    # silently kill the whole script with no message (bit us live: a step failed
+    # with only "exit code 1", no ::error:: text ever printed, because it died
+    # here). `|| true` on each jq call so a bad parse just yields an empty
+    # contribution instead of aborting.
+    #
+    # Confirmed live: GET .../branches/main/protection is a hard 403 "Resource not
+    # accessible by integration" for a GitHub App installation token — same
+    # platform wall as org billing (not fixable by any permission grant). Since
+    # this action only ever runs with the App token, that read can NEVER succeed
+    # here — so it must not gate read_ok. rules_ok (rulesets) is the only surface
+    # this token can actually read, so it alone is authoritative for read_ok. The
+    # protection read is still attempted and its gates still unioned in when it
+    # happens to succeed (e.g. if a future token swap grants access), but its
+    # failure is expected steady-state, not a reason to warn-and-skip.
+    - name: Assert base branch protection requires the security gates
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REQUIRED_GATES: ${{ inputs.required-gates }}
+        BASE_BRANCH: ${{ inputs.base-branch }}
+      run: |
+        set -uo pipefail
+        required=""
+        rules_ok=false
+        if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/${BASE_BRANCH}/protection" 2>/dev/null); then
+          prot_gates="$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]' 2>/dev/null || true)"
+          required="$(printf '%s\n%s' "$required" "$prot_gates")"
+        fi
+        if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" 2>/dev/null); then
+          rules_ok=true
+          rule_gates="$(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null || true)"
+          required="$(printf '%s\n%s' "$required" "$rule_gates")"
+        fi
+        read_ok="$rules_ok"
+        if [ "$read_ok" != "true" ]; then
+          echo "::warning::could not READ ${BASE_BRANCH} branch protection OR rulesets (token perms / network) — cannot determine protection state, so continuing WITHOUT blocking; a token/API blip must not jam the queue. If the checks are required, GitHub still gates the actual merge."
+        else
+          # grep -v exits 1 when required ends up empty (no gates found on either
+          # surface) — under pipefail + the runner's bash -e, that silently killed
+          # the whole script with no message. || true: empty is a valid state here,
+          # handled below by the normal missing-gates comparison.
+          required=$(printf '%s\n' "$required" | sed 's/^ *//' | grep -v '^$' | sort -u || true)
+          missing=""
+          while IFS= read -r gate; do
+            [ -z "$gate" ] && continue
+            # Substring, not exact-line, match. REQUIRED_GATES (the caller's input
+            # default) and the live ruleset/branch-protection context names are two
+            # independently-edited lists — a required-checks job-name prefix (e.g. CI
+            # grouping a job as "audit / npm audit & SBOM") drifts them apart even
+            # though the gate is still genuinely required. Bit us live: fixing a
+            # ruleset context name to match reality broke this exact-match check
+            # against the still-bare REQUIRED_GATES default. Suffix/substring
+            # containment tolerates that drift without needing both lists kept in
+            # lockstep, while still catching an actually-missing gate.
+            if ! printf '%s\n' "$required" | grep -qF "$gate"; then
+              missing="${missing:+$missing, }$gate"
+            fi
+          done <<< "$REQUIRED_GATES"
+          if [ -n "$missing" ]; then
+            echo "::error::${BASE_BRANCH} does NOT require these gates (checked classic protection + rulesets): $missing — refusing to enable auto-merge (they'd stay advisory and lose the race to fast CI). Add them to ${BASE_BRANCH}'s required_status_checks (branch protection or a ruleset) to re-arm auto-merge."
+            exit 1
+          fi
+          echo "branch protection/ruleset OK: ${BASE_BRANCH} requires all security gates"
+        fi
