@@ -60,11 +60,13 @@ jobs:
       - name: npm audit (fail at configured severity)
         id: audit
         if: inputs.enabled
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
         run: |
-          npm audit --audit-level=${{ inputs.audit-level }} --json > audit-report.json || true
+          npm audit --audit-level="$AUDIT_LEVEL" --json > audit-report.json || true
           node -e '
             const fs = require("fs");
-            const level = "${{ inputs.audit-level }}";
+            const level = process.env.AUDIT_LEVEL;
             const order = ["low", "moderate", "high", "critical"];
             const threshold = order.includes(level) ? order.indexOf(level) : order.indexOf("high");
             let r;

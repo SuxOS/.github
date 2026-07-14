@@ -76,6 +76,12 @@ jobs:
   cluster:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Narrower than the workflow-level grant above: this job only reads issues (via its own
+    # minted App token, see mint-app-token below) and checks out the repo read-only — it never
+    # uses the ambient GITHUB_TOKEN for a write. The build job below legitimately needs the
+    # broad workflow-level permissions and keeps them.
+    permissions:
+      contents: read
     outputs:
       plan: ${{ steps.plan.outputs.clusters }}
     steps:

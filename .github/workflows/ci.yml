@@ -62,25 +62,36 @@ jobs:
 
       - name: Type-check
         if: inputs.type-check-script != ''
-        run: npm run ${{ inputs.type-check-script }}
+        env:
+          TYPE_CHECK_SCRIPT: ${{ inputs.type-check-script }}
+        run: npm run "$TYPE_CHECK_SCRIPT"
 
       - name: Test
         if: inputs.test-script != ''
-        run: npm run ${{ inputs.test-script }}
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
+        run: npm run "$TEST_SCRIPT"
 
       - name: Extra invariant checks
         if: inputs.extra-checks-scripts != ''
+        env:
+          EXTRA_CHECKS_SCRIPTS: ${{ inputs.extra-checks-scripts }}
         run: |
-          for script in ${{ inputs.extra-checks-scripts }}; do
+          for script in $EXTRA_CHECKS_SCRIPTS; do
             npm run "$script"
           done
 
       - name: Generated file in sync
         if: inputs.gen-index-script != ''
+        env:
+          GEN_INDEX_SCRIPT: ${{ inputs.gen-index-script }}
+          GEN_INDEX_PATH: ${{ inputs.gen-index-path }}
         run: |
-          npm run ${{ inputs.gen-index-script }}
-          git diff --exit-code ${{ inputs.gen-index-path }}
+          npm run "$GEN_INDEX_SCRIPT"
+          git diff --exit-code "$GEN_INDEX_PATH"
 
       - name: Build (dry-run deploy)
         if: inputs.wrangler-config != ''
-        run: npx wrangler deploy --dry-run --config ${{ inputs.wrangler-config }}
+        env:
+          WRANGLER_CONFIG: ${{ inputs.wrangler-config }}
+        run: npx wrangler deploy --dry-run --config "$WRANGLER_CONFIG"

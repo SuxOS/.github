@@ -69,7 +69,9 @@ jobs:
 
       - name: Test
         if: inputs.enabled && inputs.test-script != ''
-        run: npm run ${{ inputs.test-script }}
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
+        run: npm run "$TEST_SCRIPT"
 
       - name: Smoke check
         if: inputs.smoke-url != '' || inputs.smoke-checks != ''
