@@ -114,7 +114,11 @@ jobs:
           if [ "$read_ok" != "true" ]; then
             echo "::warning::could not READ main branch protection OR rulesets (token perms / network) — cannot determine protection state, so continuing WITHOUT blocking; a token/API blip must not jam the queue. If the checks are required, GitHub still gates the actual merge."
           else
-            required=$(printf '%s\n' "$required" | sed 's/^ *//' | grep -v '^$' | sort -u)
+            # grep -v exits 1 when required ends up empty (no gates found on either
+            # surface) — under pipefail + the runner's bash -e, that silently killed
+            # the whole script with no message. || true: empty is a valid state here,
+            # handled below by the normal missing-gates comparison.
+            required=$(printf '%s\n' "$required" | sed 's/^ *//' | grep -v '^$' | sort -u || true)
             missing=""
             while IFS= read -r gate; do
               [ -z "$gate" ] && continue
