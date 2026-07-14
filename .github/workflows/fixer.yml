@@ -98,6 +98,7 @@ jobs:
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
 
       - name: Claude — scan and propose issues
+        id: claude
         if: steps.pre.outputs.go == 'true'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
@@ -123,36 +124,78 @@ jobs:
               - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
                 newer part of the repo already replaced.
 
-            Before filing: `gh issue list --limit 300 --state all` and skip anything an existing
-            issue already covers (don't even comment, unless you found materially new
+            Before proposing: `gh issue list --limit 300 --state all` and skip anything an
+            existing issue already covers (don't even comment, unless you found materially new
             information). Batch candidates first, then dedupe against each other — one root
             cause showing up in three files is ONE issue, not three.
 
-            File each surviving candidate with `gh issue create`, applying exactly two kinds of
-            label — a TYPE and a CONFIDENCE:
+            Do NOT file issues yourself — you have no write access. Return each surviving
+            candidate via the structured output schema instead; a separate step files them
+            with exactly two kinds of label, a TYPE and a CONFIDENCE:
               - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
-                docs; add `security` if it's a security issue. (These already exist as repo
-                labels.)
+                docs; set `security: true` in addition if it's a security issue.
               - Confidence — YOUR honest self-assessment, since the investigator will re-judge
                 it anyway:
-                  * `confidence:high`   — you read the code and are sure it's real, and the fix
-                                          is narrow, unambiguous, and low-risk.
-                  * `confidence:medium` — likely real but you didn't fully confirm, or the fix
-                                          has some judgment/scope to it.
-                  * `confidence:low`    — a hunch, a big/ambiguous idea, or anything you couldn't
-                                          verify.
+                  * `high`   — you read the code and are sure it's real, and the fix is narrow,
+                               unambiguous, and low-risk.
+                  * `medium` — likely real but you didn't fully confirm, or the fix has some
+                               judgment/scope to it.
+                  * `low`    — a hunch, a big/ambiguous idea, or anything you couldn't verify.
               - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
                 references, a suggested fix direction if you have one. A paragraph, not a report.
 
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
-            worse than silence (file a genuine hunch as `confidence:low`, don't invent one). When
-            done, summarize: issues filed (with links + their confidence), how many you discarded
-            as duplicates/baseless.
-          # Proposer files issues only — never writes code, never opens PRs. Restrict tools
-          # to read + read-only git (its `git log --since` churn scan) + `gh issue` (its
-          # `gh issue list`/`gh issue create` contract); NO Write/Edit/WebFetch/WebSearch/push.
-          # (Read-only git subcommands are enumerated so the write-scoped App token can't push.)
-          claude_args: '--max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }} --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue:*)"'
+            worse than silence (propose a genuine hunch as confidence low, don't invent one).
+            Set discarded_count to how many candidates you dropped as duplicates/baseless.
+          # Proposer only READS (code + `gh issue list` for dedup) and returns a structured
+          # proposal list — it has no `gh issue create`/write access at all. A separate
+          # deterministic step below is the only thing that ever calls `gh issue create`,
+          # validating each proposal's type/confidence against an allowlist first (Safe
+          # Outputs pattern: agent proposes, a least-privileged step disposes — see
+          # docs/design/backlog-pipeline.md and issue #79's recommendation). Read-only git
+          # subcommands are enumerated so the write-scoped App token can't push, and
+          # `gh issue list` is the only gh subcommand granted (view/create/edit/close/etc are
+          # all withheld).
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","type","security","confidence"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+
+      # The ONLY step that ever calls `gh issue create` — the agent above has no gh-write
+      # access at all. Re-validates type/confidence against an allowlist even though the
+      # JSON schema already constrains them (belt-and-suspenders: a schema is the model's
+      # contract, this is the pipeline's own gate on what it will actually write).
+      - name: File proposed issues
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
+          count=$(echo "$VERDICT" | jq '.proposals | length')
+          discarded=$(echo "$VERDICT" | jq -r '.discarded_count // 0')
+          echo "proposals: $count (discarded as duplicate/baseless: $discarded)"
+          echo "$VERDICT" | jq -c '.proposals[]' | while read -r p; do
+            title=$(echo "$p" | jq -r '.title')
+            body=$(echo "$p" | jq -r '.body')
+            type=$(echo "$p" | jq -r '.type')
+            security=$(echo "$p" | jq -r '.security')
+            conf=$(echo "$p" | jq -r '.confidence')
+
+            case "$type" in bug|enhancement|documentation) ;; *)
+              echo "::warning::skipping proposal with unexpected type '$type': $title"; continue ;;
+            esac
+            case "$conf" in high|medium|low) ;; *)
+              echo "::warning::skipping proposal with unexpected confidence '$conf': $title"; continue ;;
+            esac
+
+            label_args=(--label "$type" --label "confidence:$conf")
+            [ "$security" = "true" ] && label_args+=(--label security)
+
+            url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}")
+            echo "filed: $url"
+          done
 
       # Deterministic on purpose (cardinal rule: script over model call whenever exact) —
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped
