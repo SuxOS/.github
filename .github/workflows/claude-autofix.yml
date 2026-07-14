@@ -42,7 +42,6 @@ permissions:
   pull-requests: write
   issues: write
   actions: read
-  id-token: write
 
 concurrency:
   group: autofix-${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
