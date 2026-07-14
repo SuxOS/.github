@@ -16,6 +16,10 @@ on:
       stale-hours:
         type: string
         default: "6"
+      pr-limit:
+        description: "Max open PRs to list per run. Raise on repos with a busy queue (>100 open PRs) so stuck PRs past the first page don't go unflagged."
+        type: string
+        default: "100"
       issue-title:
         type: string
         default: "Stuck PRs — pipeline watcher"
@@ -41,6 +45,7 @@ concurrency:
 
 env:
   STALE_HOURS: ${{ inputs.stale-hours }}
+  PR_LIMIT: ${{ inputs.pr-limit }}
 
 jobs:
   watch:
@@ -56,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
             --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt)
 
           if ! [[ "$STALE_HOURS" =~ ^[0-9]+$ ]]; then
