@@ -26,13 +26,21 @@ on:
         type: string
         default: "test"
       smoke-url:
-        description: "URL to smoke-check. Empty to skip the smoke check entirely."
+        description: "URL to smoke-check. Empty to skip the single-endpoint check entirely."
         type: string
         default: "https://sux.colinxs.workers.dev/mcp"
       expected-status:
         description: "Expected HTTP status code from smoke-url (the healthy signal)."
         type: string
         default: "401"
+      smoke-checks:
+        description: >-
+          Newline-separated `url=expected-status` pairs to smoke-check, for
+          services with multiple health-relevant endpoints (e.g. `/mcp` expecting
+          401 plus a public `/health` expecting 200). Checked in addition to
+          `smoke-url`/`expected-status`; the check fails if any endpoint mismatches.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -63,20 +71,39 @@ jobs:
         run: npm run ${{ inputs.test-script }}
 
       - name: Smoke check
-        if: inputs.smoke-url != ''
+        if: inputs.smoke-url != '' || inputs.smoke-checks != ''
         env:
           SMOKE_URL: ${{ inputs.smoke-url }}
           EXPECTED_STATUS: ${{ inputs.expected-status }}
+          SMOKE_CHECKS: ${{ inputs.smoke-checks }}
         run: |
           set -euo pipefail
-          code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SMOKE_URL")" || true
-          code="${code:-000}"
-          echo "GET $SMOKE_URL -> HTTP ${code}"
-          if [ "${code}" != "${EXPECTED_STATUS}" ]; then
-            echo "::error::Expected HTTP ${EXPECTED_STATUS} from ${SMOKE_URL}, got ${code}"
+          checks=""
+          if [ -n "${SMOKE_URL}" ]; then
+            checks="${SMOKE_URL}=${EXPECTED_STATUS}"
+          fi
+          if [ -n "${SMOKE_CHECKS}" ]; then
+            checks="${checks}
+          ${SMOKE_CHECKS}"
+          fi
+          failed=0
+          while IFS= read -r pair; do
+            pair="$(printf '%s' "$pair" | tr -d '[:space:]')"
+            [ -z "$pair" ] && continue
+            url="${pair%=*}"
+            expected="${pair##*=}"
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$url" || echo 000)"
+            echo "GET $url -> HTTP ${code}"
+            if [ "${code}" != "${expected}" ]; then
+              echo "::error::Expected HTTP ${expected} from ${url}, got ${code}"
+              failed=1
+            else
+              echo "Service is up (${code} as expected)."
+            fi
+          done <<< "$checks"
+          if [ "$failed" != "0" ]; then
             exit 1
           fi
-          echo "Service is up (${code} as expected)."
 
       - name: Open or update health-check issue on failure
         if: failure()
