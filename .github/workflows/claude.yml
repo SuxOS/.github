@@ -83,7 +83,7 @@ jobs:
         # only job (posts a reply, no downstream gate reads its result), so let it fail
         # visibly in the log without turning into a hard red X on the trigger event.
         continue-on-error: true
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
@@ -120,7 +120,7 @@ jobs:
         # findings, never blocks merge), so a reviewer that hits error_max_turns or another
         # non-content failure shouldn't paint the PR with a hard red X.
         continue-on-error: true
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
