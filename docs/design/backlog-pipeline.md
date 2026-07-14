@@ -55,12 +55,18 @@ draws from the same Pro/Max limits as interactive Claude Code / claude.ai use.
    before the merge queue lands it. The confidence bar only decides whether a *human* also
    looks; the *machine* gates always run. That is the safety floor.
 
-## Auth split (deliberate, do not "unify")
+## Auth: unified on the subscription token (2026-07, formerly split)
 
-| Workflow | Auth | Why |
-|---|---|---|
-| `security-review.yml` | **`ANTHROPIC_API_KEY`** (metered) | It's a REQUIRED merge gate. On the subscription, an exhausted pool would stop it running → the merge queue jams → **nothing merges, including human PRs.** Metered API has no pool to exhaust; low volume, small cost. |
-| everything else (`fixer`/`triage`/`issue-build`/`claude`/`claude-autofix`) | **`CLAUDE_CODE_OAUTH_TOKEN`** (subscription) | This is the high-volume automation — where subscription billing saves real money. A pool blip here only delays discretionary work, never jams a merge. |
+All Claude workflows — `fixer`/`triage`/`issue-build`/`claude`/`claude-autofix`/
+`security-review` — now authenticate with **`CLAUDE_CODE_OAUTH_TOKEN`** (subscription).
+
+`security-review.yml` was previously held on a metered `ANTHROPIC_API_KEY` on purpose: it's
+a **required merge gate**, and on the subscription an exhausted pool would stop it running →
+the merge queue jams → **nothing merges, including human PRs**. That risk was accepted by
+explicit decision in order to consolidate on one token and stop metered spend. If merge-queue
+jams from pool exhaustion become a real problem, revert `security-review.yml`'s
+`claude_code_oauth_token` input back to `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`
+and restore the `ANTHROPIC_API_KEY` org secret.
 
 Both secrets live at the **org** level so every repo inherits them via `secrets: inherit`.
 
