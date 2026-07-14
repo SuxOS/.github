@@ -19,6 +19,10 @@ on:
       issue-title:
         type: string
         default: "Stuck PRs — pipeline watcher"
+      flag-behind:
+        description: "Flag BEHIND-main PRs as stuck. Set false under a merge queue, where the queue rebases each PR onto the queue head itself — BEHIND is then expected, not stuck."
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -43,6 +47,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_TITLE: ${{ inputs.issue-title }}
+          FLAG_BEHIND: ${{ inputs.flag-behind }}
         run: |
           set -euo pipefail
 
@@ -52,14 +57,14 @@ jobs:
           now=$(date -u +%s)
           stale=$(( STALE_HOURS * 3600 ))
 
-          stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" '
+          stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" --argjson flagBehind "$FLAG_BEHIND" '
             [ .[]
               | select(.isDraft | not)
               | select([.labels[].name] | index("hold") | not)
               | ([.statusCheckRollup[]? | (.conclusion // .state // "" | ascii_upcase)]) as $st
               | (($st | map(select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")) | length) > 0) as $failing
               | (($now - (.updatedAt | fromdateiso8601)) >= $stale) as $isStale
-              | ( if .mergeStateStatus == "BEHIND" then "behind main — needs rebase/update"
+              | ( if ($flagBehind and .mergeStateStatus == "BEHIND") then "behind main — needs rebase/update"
                   elif $failing then "failing required check"
                   elif (.mergeStateStatus == "CLEAN" and (.autoMergeRequest == null) and $isStale) then "green + mergeable but auto-merge not armed"
                   else null end ) as $reason
@@ -87,6 +92,10 @@ jobs:
           fi
 
           rows=$(echo "$stuck" | jq -r '.[] | "| [#\(.number)](\(.url)) | \(.state) | \(.reason) | \(.title | gsub("\\|"; "\\|")) |"')
+          legend=$'- **failing required check** → fix CI (or the autofix bot handles it, if eligible).\n- **auto-merge not armed** → add an eligible label / conventional title, or enable auto-merge.'
+          if [ "$FLAG_BEHIND" = "true" ]; then
+            legend=$'- **behind main** → rebase/update the branch onto main.\n'"$legend"
+          fi
           body=$(printf '%s\n' \
             "Auto-maintained by the stuck-PR watcher (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/pr-watch.yml). Refreshed $(date -u '+%Y-%m-%d %H:%M UTC'); auto-closes when all clear." \
             "" \
@@ -96,9 +105,7 @@ jobs:
             "|----|-------------|----------------|-------|" \
             "$rows" \
             "" \
-            "- **behind main** → rebase/update the branch onto main." \
-            "- **failing required check** → fix CI (or the autofix bot handles it, if eligible)." \
-            "- **auto-merge not armed** → add an eligible label / conventional title, or enable auto-merge.")
+            "$legend")
 
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
