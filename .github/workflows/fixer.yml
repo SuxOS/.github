@@ -62,7 +62,6 @@ on:
 permissions:
   contents: read
   issues: write
-  id-token: write
 
 concurrency:
   group: fixer-${{ github.workflow }}

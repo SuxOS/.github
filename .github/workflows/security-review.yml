@@ -51,7 +51,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 concurrency:
   group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
