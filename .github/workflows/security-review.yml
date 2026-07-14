@@ -42,6 +42,10 @@ on:
         description: "Optional repo-specific context prepended to the review prompt (e.g. deployment shape, blast radius). Empty to skip."
         type: string
         default: ""
+      allowed-bots:
+        description: "Comma-separated bot usernames (without [bot] suffix) allowed to trigger this review, e.g. a repo's own automerge/issue-build App. Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -95,6 +99,7 @@ jobs:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
             Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
