@@ -31,6 +31,10 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: health-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   health:
     name: Regression canary + smoke check
