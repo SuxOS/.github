@@ -40,10 +40,6 @@ permissions:
   actions: read
   id-token: write
 
-concurrency:
-  group: claude-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   mention:
     if: >
@@ -55,6 +51,13 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Own concurrency group (distinct from `review` below) so a fresh @claude mention
+    # only supersedes a stale mention on the same PR/issue, not an in-progress review —
+    # sharing one workflow-level group meant either job type could cancel the other,
+    # silently dropping the advisory review. See #96.
+    concurrency:
+      group: claude-mention-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Preflight — need the key
         id: pre
@@ -103,6 +106,10 @@ jobs:
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Own concurrency group (distinct from `mention` above) — see comment there.
+    concurrency:
+      group: claude-review-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Preflight — need the key
         id: pre
