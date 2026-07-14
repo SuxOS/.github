@@ -124,10 +124,11 @@ jobs:
         id: cap
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          git fetch origin main --quiet
-          base=$(git merge-base origin/main HEAD)
+          git fetch origin "$BASE_BRANCH" --quiet
+          base=$(git merge-base "origin/$BASE_BRANCH" HEAD)
           attempts=$(git log --format='%an' "$base"..HEAD | grep -c -iE 'claude|github-actions|sux-bot|\[bot\]' || true)
           echo "bot fix attempts so far: $attempts (cap $MAX_ATTEMPTS)"
           if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then

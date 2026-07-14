@@ -8,11 +8,14 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 ## The two groups
 
 **Gates** (required checks that block merge):
-`ci.yml` · `security-review.yml` · `audit.yml` · `secret-scan.yml` · `health.yml`
+`ci.yml` · `security-review.yml` · `audit.yml` · `health.yml` — secret scanning is
+GitHub's native secret-scanning + push-protection (repo Settings → Security), not
+a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
-`claude.yml` · `claude-autofix.yml` · `budget-guard.yml` · `skill-sync.yml`
+`claude.yml` · `claude-autofix.yml` · `skill-sync.yml` — the org-wide
+`budget-guard.yml` gate was retired; there's no `ACTIONS_BUDGET_PAUSED` var to set.
 
 **Backlog pipeline** (turns latent work into merged/staged PRs — propose → investigate → build):
 `fixer.yml` (propose issues w/ confidence) · `triage.yml` (independently verify + opt-out-queue
@@ -118,12 +121,13 @@ Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
   Every Claude job preflights on its token being set and is otherwise inert.
 - `SUX_BOT_APP_ID` / `SUX_BOT_PRIVATE_KEY` — a GitHub App installed on the
   caller repo, used by every workflow that pushes or arms auto-merge.
-- Repo variable `ACTIONS_BUDGET_PAUSED` — set/read by `budget-guard.yml`; you
-  don't need to create it yourself, the guard creates it on first trip.
-- Branch protection on `main` (strict, requiring at minimum `Type-check &
-  build`, `security-review`, `gitleaks`, `npm audit & SBOM`) — `automerge.yml`
-  refuses to arm auto-merge unless it can verify these are actually required,
-  so set this up before wiring the caller stub for `automerge.yml`.
+- Branch protection or a ruleset on the default branch (strict, requiring at
+  minimum `Type-check & build`, `security-review`, `npm audit & SBOM`) —
+  `automerge.yml` refuses to arm auto-merge unless it can verify these are
+  actually required, so set this up before wiring the caller stub for
+  `automerge.yml`. Note it can only read rulesets with the App token (the
+  classic branch-protection API 403s for an App installation token), so a
+  ruleset — not classic branch protection — is what it actually verifies.
 
 ### `workflow_run` — the one trigger that can't cross the `workflow_call` boundary
 
@@ -142,7 +146,7 @@ reusable file for the job body. Same idea applies to any other event trigger
    so a bot push/rebase/merge done with the default token silently never
    re-fires downstream CI — the PR looks stuck green with a required check
    permanently missing. Every workflow here that pushes or merges (autofix,
-   mention, auto-update, drain, automerge, budget-guard) mints a
+   mention, auto-update, drain, automerge, skill-sync) mints a
    `SUX_BOT`-style App token via `actions/create-github-app-token` first.
 
 2. **Read verdicts from `structured_output`, never a written file.**

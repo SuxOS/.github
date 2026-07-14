@@ -64,14 +64,14 @@ concurrency:
 
 jobs:
   triage:
-    # ACTOR GATE (central, can't be forgotten by a caller): when triggered by an `issues`
-    # event, only run for a TRUSTED author. This job forwards the full secret set into an
-    # autonomous agent that reads attacker-controllable issue title/body and can opt-out-queue
-    # the issue → issue-build → automerge. On a private repo every issue author already has
-    # access, but this closes the hole preemptively for any repo that goes public (mirrors
-    # claude.yml's author_association gate). Non-issues triggers (workflow_dispatch/schedule
-    # from the caller) are driven by someone with repo write access already, so they pass.
-    # github.event_name / github.event propagate from the caller into this reusable workflow.
+    # FAST-PATH actor gate for the `issues` trigger only — the real, authoritative gate is
+    # per-issue in the "Select untriaged issues" step below (see its comment), because on a
+    # schedule/workflow_dispatch run this job investigates a BATCH of issues filed by
+    # whoever, not one issue from a trusted trigger. This job forwards the full secret set
+    # into an autonomous agent that reads attacker-controllable issue title/body and can
+    # opt-out-queue an issue → issue-build → automerge, on a repo this org runs PUBLIC
+    # (see automerge.yml) — so "someone with write access triggered the schedule" does NOT
+    # make an arbitrary open issue's body safe to feed to that agent.
     if: >-
       (
         github.event_name != 'issues' ||
@@ -103,17 +103,27 @@ jobs:
           MAX_ISSUES: ${{ inputs.max-issues }}
         run: |
           set -euo pipefail
-          # Untriaged = open and carrying NONE of the exclusion labels (queued-for-build /
-          # building / hold / triaged). Pull all open issues with their labels and filter in
-          # jq — a label-set predicate is more robust than composing a GitHub search string.
-          # Cap to MAX_ISSUES oldest-first so a proposal burst can't blow the budget in one
-          # run; the rest wait for the next run.
-          all=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
-            --json number,labels 2>/dev/null || echo '[]')
-          picked=$(echo "$all" | jq -c --argjson n "$MAX_ISSUES" '
-            [ .[]
+          # Untriaged = open, carrying NONE of the exclusion labels (queued-for-build /
+          # building / hold / triaged), AND filed by a TRUSTED author (or the bot itself,
+          # e.g. fixer.yml's proposals) — the actual actor gate for this job, since a
+          # schedule/dispatch run reaches every open issue regardless of who filed it (the
+          # job-level `if:` only covers the `issues`-event fast path). An untrusted issue
+          # is attacker-controlled input into an autonomous agent that can opt-out-queue it
+          # straight into an unattended build; excluding it here means it's simply never
+          # selected, not silently trusted. Pull all open issues with their labels and
+          # filter in jq — a label-set predicate is more robust than composing a GitHub
+          # search string. Cap to MAX_ISSUES oldest-first so a proposal burst can't blow the
+          # budget in one run; the rest wait for the next run.
+          # `gh issue list --json` has no author_association field, so this reads the REST
+          # issues endpoint directly (it returns author_association per-issue) — and must
+          # exclude entries carrying a `pull_request` key, since that endpoint lists PRs too.
+          all=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate 2>/dev/null || echo '[]')
+          picked=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" '
+            [ .[][]
+              | select(has("pull_request") | not)
               | (.labels | map(.name)) as $l
               | select(([ "queued-for-build","building","hold","triaged" ] - $l) | length == 4)
+              | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))
             ] | sort_by(.number) | .[0:$n] | map(.number)')
           count=$(echo "$picked" | jq 'length')
           echo "untriaged issues to investigate ($count): $picked"

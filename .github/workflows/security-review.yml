@@ -45,17 +45,18 @@ concurrency:
 jobs:
   security-review:
     name: ${{ inputs.job-name }}
-    # Trusted authors only; draft PRs skipped. Also runs for a `self-improve`-labelled
-    # bot PR (that label is addable only by trusted write access) so a HIGH-confidence
-    # self-improve PR opened by a bot identity still gets reviewed before it can arm
-    # auto-merge.
+    # Trusted authors only; draft PRs skipped. Mirrors automerge.yml's own eligibility
+    # gate exactly (trusted author_association OR a `self-improve`-labelled bot PR) —
+    # NOT restricted to non-bot senders. A bot-authored PR (e.g. from issue-build.yml)
+    # can carry a trusted author_association and be automerge-eligible without ever
+    # carrying `self-improve`; excluding bot senders from the trusted-author branch
+    # here (as a prior version of this condition did) let exactly those PRs skip this
+    # required check via GitHub treating a skipped required check as passing —
+    # letting an unreviewed autonomous PR merge on CI alone.
     if: >
       github.event.pull_request.draft == false &&
       (
-        (
-          github.event.sender.type != 'Bot' &&
-          contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
-        ) ||
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
         contains(github.event.pull_request.labels.*.name, 'self-improve')
       )
     runs-on: ubuntu-latest

@@ -116,10 +116,10 @@ so any caller can override.
 - **`building`-reaper.** An issue stuck in `building` with no activity for >2h is an orphan
   from a build run that died after claiming but before opening its PR. `issue-build`'s
   cluster job re-queues such issues at the start of each run — self-healing, no separate cron.
-- **`budget-guard.yml`** pauses all discretionary spenders (including these three) when the
-  monthly GitHub **Actions-minutes** budget trips, via `vars.ACTIONS_BUDGET_PAUSED`. NB this
-  guards *Actions minutes*, a different pool from the Claude *subscription* — the subscription
-  pool is bounded only by the structural caps above and by your trigger cadence.
+- **No Actions-minutes budget guard.** The org-wide `budget-guard.yml`/`ACTIONS_BUDGET_PAUSED`
+  gate was retired; the structural caps above (max-issues, max-clusters, attempt caps) plus
+  your trigger cadence are what bound spend now — there's no separate Actions-minutes circuit
+  breaker. The Claude *subscription* pool is unaffected either way (see § auth split).
 
 ## Safety model
 

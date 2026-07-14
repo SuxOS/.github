@@ -87,10 +87,15 @@ jobs:
       #     all) → ::warning:: + continue: a perms blip must not jam every
       #     auto-merge, and GitHub still won't complete the merge if a check is
       #     actually required.
-      - name: Assert main branch protection requires the security gates
+      - name: Assert base branch protection requires the security gates
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REQUIRED_GATES: ${{ inputs.required-gates }}
+          # Hardcoding "main" here broke for any caller whose default branch isn't
+          # literally main: the read 404s, which resolves to rules_ok=false, which
+          # takes the "can't determine, continue WITHOUT blocking" path — silently
+          # disabling this fail-closed gate instead of erroring loudly.
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
         run: |
           set -uo pipefail
           required=""
@@ -112,11 +117,11 @@ jobs:
           # it happens to succeed (e.g. if a future token swap grants access), but
           # its failure is expected steady-state, not a reason to warn-and-skip.
           rules_ok=false
-          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/${BASE_BRANCH}/protection" 2>/dev/null); then
             prot_gates="$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]' 2>/dev/null || true)"
             required="$(printf '%s\n%s' "$required" "$prot_gates")"
           fi
-          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${BASE_BRANCH}" 2>/dev/null); then
             rules_ok=true
             rule_gates="$(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null || true)"
             required="$(printf '%s\n%s' "$required" "$rule_gates")"

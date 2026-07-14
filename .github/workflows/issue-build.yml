@@ -217,7 +217,7 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
-      - name: Checkout main, create cluster branch
+      - name: Checkout default branch, create cluster branch
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
@@ -264,13 +264,18 @@ jobs:
           SUMMARY: ${{ matrix.summary }}
           ISSUE_NUMBERS_JSON: ${{ toJSON(matrix.issue_numbers) }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Checkout above checked out the caller's actual default branch (not necessarily
+          # "main") before the cluster branch was created from it — hardcoding "main" here
+          # broke both the ahead-of-base check and PR creation for any caller whose default
+          # branch is named something else.
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           nums=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')
 
-          # The only reliable success signal is a real commit ahead of main — a dirty,
-          # uncommitted working tree is ALSO a failure (Claude didn't finish committing).
-          if [ -z "$(git log origin/main..HEAD 2>/dev/null)" ]; then
+          # The only reliable success signal is a real commit ahead of the base branch — a
+          # dirty, uncommitted working tree is ALSO a failure (Claude didn't finish committing).
+          if [ -z "$(git log "origin/${BASE_BRANCH}"..HEAD 2>/dev/null)" ]; then
             echo "no commits produced for this cluster → build session reported it couldn't finish"
             for n in $nums; do
               gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building --add-label queued-for-build 2>/dev/null || true
@@ -303,7 +308,7 @@ jobs:
           [ "$eligible" = "true" ] && labels="automerge"
           echo "cluster automerge-eligible: $eligible → label $labels"
 
-          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" \
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" \
             --title "$TITLE" --body "$body" --label "$labels"
 
           for n in $nums; do
