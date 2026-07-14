@@ -170,7 +170,7 @@ jobs:
 
       - name: Claude — fix the CI failure
         if: steps.gate.outputs.go == 'true' && steps.cap.outputs.go == 'true'
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           CI_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           CI_RUN_URL: ${{ github.event.workflow_run.html_url }}

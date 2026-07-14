@@ -133,7 +133,7 @@ jobs:
       - name: Claude — cluster the backlog
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
@@ -233,7 +233,7 @@ jobs:
 
       - name: Claude — implement the cluster
         id: claude
-        uses: anthropics/claude-code-action@e90deca47693f9457b72f2b53c17d7c445a87342 # v1
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ISSUE_NUMBERS: ${{ join(matrix.issue_numbers, ', ') }}
           CLUSTER_SUMMARY: ${{ matrix.summary }}
