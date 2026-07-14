@@ -21,19 +21,20 @@ for build) · `issue-build.yml` (cluster n issues → m PRs, one build session p
 state machine + auth split: [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
 Caller-stub examples below.
 
-## Auth: subscription vs metered API
+## Auth: unified on the subscription token
 
-Every Claude workflow authenticates one of two ways:
+Every Claude workflow, including `security-review.yml`, authenticates with
+**`CLAUDE_CODE_OAUTH_TOKEN`** (Pro/Max subscription, from `claude setup-token`).
+`claude-code-action` runs Claude Code billed to your subscription, not per-token API.
 
-- **`CLAUDE_CODE_OAUTH_TOKEN`** (Pro/Max subscription, from `claude setup-token`) — used by
-  `fixer` / `triage` / `issue-build` / `claude` / `claude-autofix`. `claude-code-action` runs
-  Claude Code billed to your subscription, not per-token API. This is the high-volume
-  automation.
-- **`ANTHROPIC_API_KEY`** (metered) — used ONLY by `security-review.yml`, on purpose: it's a
-  required merge gate, and if it ran on the subscription an exhausted pool would jam the merge
-  queue for everyone. See the design doc § auth split — do not "unify" it to OAuth.
+`security-review.yml` was previously kept on a metered `ANTHROPIC_API_KEY` on purpose: it's
+a required merge gate, and an exhausted subscription pool would jam the merge queue for
+everyone. That split was dropped by explicit decision to consolidate on one token —
+**accepted risk:** if the OAuth pool exhausts, the gate can't run and nothing merges. See
+the design doc § auth split for the revert path if that becomes a problem in practice.
 
-Set both as **org-level** secrets so every repo inherits them via `secrets: inherit`.
+Set `CLAUDE_CODE_OAUTH_TOKEN` as an **org-level** secret so every repo inherits it via
+`secrets: inherit`.
 
 ## Caller-stub pattern
 
@@ -112,8 +113,8 @@ Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
 ### Required secrets/vars in the caller repo
 
 - `CLAUDE_CODE_OAUTH_TOKEN` — Pro/Max subscription token (`claude setup-token`);
-  arms `fixer`/`triage`/`issue-build`/`claude`/`claude-autofix`. Org-level secret.
-- `ANTHROPIC_API_KEY` — metered; arms `security-review.yml` ONLY (see § auth split).
+  arms every Claude workflow, including `security-review.yml` (see § auth split for
+  the accepted-risk tradeoff on the required gate). Org-level secret.
   Every Claude job preflights on its token being set and is otherwise inert.
 - `SUX_BOT_APP_ID` / `SUX_BOT_PRIVATE_KEY` — a GitHub App installed on the
   caller repo, used by every workflow that pushes or arms auto-merge.

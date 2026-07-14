@@ -6,13 +6,13 @@ name: Security review (reusable)
 # from, so a file-write verdict silently disappears. See SuxOS/.github README /
 # docs for the "structured_output, not a file" gotcha.
 #
-# AUTH: this one DELIBERATELY stays on the metered ANTHROPIC_API_KEY, while every other
-# Claude workflow moved to the Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN). Reason:
-# security-review is a REQUIRED merge gate. If it ran on the subscription and that pool
-# exhausted, this check could not run → the merge queue would jam and NOTHING could merge,
-# including humans' PRs. Metered API has no shared pool to exhaust, so the gate always runs.
-# It's low-volume (one review per PR), so the metered cost is small. Do NOT "unify" this to
-# OAuth — see docs/design/backlog-pipeline.md § auth split.
+# AUTH: unified onto the Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), same as every other
+# Claude workflow. ACCEPTED RISK: security-review is a REQUIRED merge gate, so if the shared
+# subscription pool exhausts, this check cannot run → the merge queue jams and NOTHING can
+# merge, including humans' PRs. This was previously kept on the metered ANTHROPIC_API_KEY
+# specifically to avoid that failure mode; the split was dropped by explicit decision to
+# consolidate on one token. If merge-queue jams become a problem, revert this file to
+# anthropic_api_key — see docs/design/backlog-pipeline.md § auth split.
 #
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/security-review.yml@main
@@ -64,8 +64,8 @@ jobs:
       - name: Preflight — need the key
         id: pre
         run: |
-          if [ "${{ secrets.ANTHROPIC_API_KEY != '' }}" != "true" ]; then
-            echo "ANTHROPIC_API_KEY not set → security review inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → security review inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
@@ -78,11 +78,11 @@ jobs:
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
             exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
-            `${{ github.event.* }}` in workflows), GitHub Actions abuse (pull_request_target +
+            `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
             untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
             blast radius, and any autonomous-bot action that could touch prod or user data
             unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
