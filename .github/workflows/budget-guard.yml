@@ -1,13 +1,16 @@
 name: Actions budget guard (reusable)
 
-# Hourly (and on demand), reads the account's used Actions minutes and, if it
-# crosses a soft cap, PAUSES only the DISCRETIONARY spenders (the @claude
+# Hourly (and on demand), sums THIS REPO's billable Actions minutes this
+# calendar month (via the runs-timing API — org billing endpoints are
+# unreachable by a GitHub App token, so this deliberately avoids them) and, if
+# it crosses a soft cap, PAUSES only the DISCRETIONARY spenders (the @claude
 # review/mention bot and the CI autofix bot) — leaving every safety/deploy gate
 # untouched. Two brakes: (1) sets repo variable ACTIONS_BUDGET_PAUSED=true, a
 # race-free fast-path the discretionary jobs gate their `if:` on, and (2)
 # `gh workflow disable`s them. Never touches ci/deploy/security-review/audit/
 # secret-scan. Hysteresis (resume-below < soft-cap) avoids flapping at the
-# boundary. If the billing read fails, it does NOTHING.
+# boundary. If the runs listing comes back empty (API/perms issue), it does
+# NOTHING — a blind guard must never brake.
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/budget-guard.yml@main
@@ -66,17 +69,30 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The old /users/{owner}/settings/billing/actions endpoint is retired (410).
-          # Current API is per-org usage line items for the billing cycle to date; sum
-          # the Actions-minutes SKUs across every repo to get the account total.
-          billing=$(gh api "/orgs/${OWNER}/settings/billing/usage" 2>/dev/null || true)
-          used=$(printf '%s' "$billing" | jq -r '[.usageItems[]? | select(.product == "actions" and .unitType == "Minutes") | .quantity] | add // empty' 2>/dev/null || true)
-          used=${used%%.*}
-          if ! printf '%s' "$used" | grep -qE '^[0-9]+$'; then
-            echo "::warning::could not read used Actions minutes (billing API returned nothing usable) — no-op this run"
+          # Org billing endpoints (old /users/.../billing/actions, current
+          # /orgs/.../settings/billing/usage) are BOTH unreachable by a GitHub App
+          # installation token — billing is PAT/OAuth-user-only at the platform level,
+          # no permission grant changes that. So don't use billing APIs at all: sum
+          # this REPO's billable Actions minutes straight from the runs-timing API
+          # (needs only `actions: read`, which this App already has), for runs created
+          # since the 1st of the current UTC month. Per-repo, not org-wide — matches
+          # how each caller repo runs its own guard instance anyway.
+          cycle_start="$(date -u +%Y-%m-01)"
+          total_ms=0
+          run_count=0
+          for run_id in $(gh api "/repos/${REPO}/actions/runs?created=%3E%3D${cycle_start}&per_page=100" --paginate \
+              --jq '.workflow_runs[]?.id' 2>/dev/null); do
+            run_count=$((run_count + 1))
+            ms=$(gh api "/repos/${REPO}/actions/runs/${run_id}/timing" --jq '.run_duration_ms // 0' 2>/dev/null || echo 0)
+            case "$ms" in ''|*[!0-9]*) ms=0 ;; esac
+            total_ms=$((total_ms + ms))
+          done
+          if [ "$run_count" -eq 0 ]; then
+            echo "::warning::could not list any Actions runs this cycle (API/perms issue) — no-op this run"
             exit 0
           fi
-          echo "used Actions minutes this cycle: $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
+          used=$((total_ms / 60000))
+          echo "used Actions minutes this cycle ($REPO, since $cycle_start, $run_count runs): $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
 
           set_var() {
             gh api --method PATCH "/repos/${REPO}/actions/variables/ACTIONS_BUDGET_PAUSED" \
