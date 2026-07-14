@@ -199,6 +199,7 @@ jobs:
           VERDICT: ${{ steps.claude.outputs.structured_output }}
         run: |
           set -euo pipefail
+          if [ -z "${VERDICT:-}" ]; then echo "no verdict → nothing to label"; exit 0; fi
           echo "$VERDICT" | jq -c '.decisions[]' | while read -r d; do
             n=$(echo "$d" | jq -r '.number')
             type=$(echo "$d" | jq -r '.type')
