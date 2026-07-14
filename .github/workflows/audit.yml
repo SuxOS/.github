@@ -20,9 +20,14 @@ permissions:
   contents: read
   issues: write
 
+# Scoped to the workflow (not github.ref) so the tracking-issue dedup
+# read-modify-write in the failure handler is serialized across all PRs — a
+# per-ref group would let two PRs both see "no existing issue" and each create
+# one. cancel-in-progress is false so concurrent audits queue instead of
+# cancelling each other's issue bookkeeping.
 concurrency:
-  group: audit-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: audit-issue-${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   audit:
