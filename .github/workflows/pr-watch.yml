@@ -46,6 +46,7 @@ jobs:
   watch:
     name: Flag stuck PRs
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Scan open PRs and upsert the tracking issue
         env:

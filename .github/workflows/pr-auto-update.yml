@@ -31,6 +31,7 @@ concurrency:
 jobs:
   update-behind:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Mint app token
         id: app-token
