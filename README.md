@@ -129,6 +129,41 @@ Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
   classic branch-protection API 403s for an App installation token), so a
   ruleset — not classic branch protection — is what it actually verifies.
 
+### Required labels
+
+Every `gh pr edit --add-label` / `has_label` check in these workflows is wrapped in
+`2>/dev/null || true`, so a caller repo that skips creating a label doesn't error —
+the label-gated behavior just silently no-ops instead. Create these once per caller
+repo (`bug` is a GitHub default label, so it needs no setup):
+
+- `automerge` — auto-merge-eligible (alongside `bug`/`security`/`chore-safe`, or a
+  safe-type commit title); `automerge.yml` also self-applies it once auto-merge is armed.
+- `hold` — blocks all automation on a PR: `automerge.yml` refuses to arm,
+  `pr-auto-update.yml` won't update-branch it, `pr-drain.yml`/`pr-watch.yml` skip it.
+  Auto-applied by `security-review.yml` on a critical/high finding, or fail-closed
+  when the verdict is missing/unreadable.
+- `needs-human` — not safe for unattended handling. `claude-autofix.yml` applies it
+  once its retry cap is hit; `triage.yml` applies it to issues it doesn't judge buildable.
+- `feature` — net-new feature work; `automerge.yml` and `pr-drain.yml`'s reconcile pass
+  both refuse to auto-merge a `feature`-labeled PR — a human always merges it.
+- `chore-safe` — safe refactor/cleanup/docs; one of the auto-merge-eligible labels.
+- `keep` — opts a PR out of `pr-drain.yml`'s close-stale sweep (alongside `hold`)
+  without blocking any other automation.
+- `security` — security fix; auto-merge-eligible like `chore-safe`/`bug`/`automerge`.
+- `self-improve` — lets a Bot-authored PR pass `automerge.yml`'s trusted-author check
+  (addable only by write access) and keeps bot PRs out of `pr-drain.yml`'s close-stale sweep.
+
+```bash
+gh label create automerge    -c 2da44e -d "Bot may auto-merge when green (bug/security/chore-safe/automerge only)" --force
+gh label create hold         -c e11d21 -d "Block all automation on this PR/issue" --force
+gh label create needs-human  -c d93f0b -d "Not safe for unattended handling — needs a human" --force
+gh label create feature      -c 1d76db -d "Net-new feature — needs a human, never auto-merged" --force
+gh label create chore-safe   -c 0e8a16 -d "Safe refactor/cleanup/docs — eligible for auto-merge when green" --force
+gh label create keep         -c c5def5 -d "Opt out of pr-drain's close-stale sweep" --force
+gh label create security     -c b60205 -d "Security fix — eligible for auto-merge when green" --force
+gh label create self-improve -c ededed -d "Bot-authored PR trusted for auto-merge (public-repo guard)" --force
+```
+
 ### `workflow_run` — the one trigger that can't cross the `workflow_call` boundary
 
 `claude-autofix.yml` needs a `workflow_run: workflows: ["CI"]` trigger, and
