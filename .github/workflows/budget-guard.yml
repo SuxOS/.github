@@ -15,7 +15,7 @@ name: Actions budget guard (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/budget-guard.yml@main
-#   with: { budget: "20000", resume-below: "19000", discretionary-workflows: "claude.yml claude-autofix.yml" }
+#   with: { budget: "50000", resume-below: "48000", discretionary-workflows: "claude.yml claude-autofix.yml" }
 #   secrets: inherit
 
 on:
@@ -23,10 +23,10 @@ on:
     inputs:
       budget:
         type: string
-        default: "20000"
+        default: "50000"
       resume-below:
         type: string
-        default: "19000"
+        default: "48000"
       discretionary-workflows:
         description: "Space-separated workflow filenames this guard is allowed to pause."
         type: string
