@@ -18,7 +18,12 @@ name: PR auto-update / self-drain (reusable)
 #   secrets: inherit
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      pr-limit:
+        description: "Max open PRs to list per run. Raise on repos with a busy queue (>100 open PRs) so armed-but-BEHIND PRs past the first page still get updated."
+        type: string
+        default: "100"
 
 permissions:
   contents: write
@@ -44,9 +49,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          PR_LIMIT: ${{ inputs.pr-limit }}
         run: |
           set -uo pipefail
-          if ! prs=$(gh pr list --state open --limit 100 \
+          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
             --json number,mergeStateStatus,isDraft,autoMergeRequest,labels \
             --jq '.[]
               | select(.isDraft == false)

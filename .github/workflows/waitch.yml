@@ -13,6 +13,14 @@ on:
       issue-title:
         type: string
         default: "Merge queue activity — pipeline watcher"
+      pr-limit:
+        description: "Max in-merge-queue PRs to list per run. Raise on repos with a busy queue (>100 in-queue PRs) so the summary doesn't silently drop entries."
+        type: string
+        default: "100"
+      issue-limit:
+        description: "Max open issues to list per run for the tracking-issue de-dup lookup. Raise on repos with >100 open issues so an existing tracking issue past the first page isn't missed and duplicated."
+        type: string
+        default: "100"
 
 permissions:
   contents: read
@@ -35,11 +43,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_TITLE: ${{ inputs.issue-title }}
+          PR_LIMIT: ${{ inputs.pr-limit }}
+          ISSUE_LIMIT: ${{ inputs.issue-limit }}
         run: |
           set -euo pipefail
 
           # Get merge queue PRs
-          queue_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+          queue_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
             --json number,title,url,author,updatedAt,mergeStateStatus \
             --search "is:in-merge-queue")
 
@@ -109,7 +119,7 @@ jobs:
             "")
 
           # Find or create tracking issue
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 100 --json number,title \
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit "$ISSUE_LIMIT" --json number,title \
             | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
 
           if [ -n "$existing" ]; then

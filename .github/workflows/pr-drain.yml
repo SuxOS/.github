@@ -26,6 +26,14 @@ on:
       stale-days:
         type: string
         default: "14"
+      pr-limit:
+        description: "Max open PRs to list per run. Raise on repos with a busy queue (>100 open PRs) so the sweep doesn't silently skip PRs past the first page."
+        type: string
+        default: "100"
+      dry-run:
+        description: "If true, log the computed close-set but skip the actual `gh pr close` mutation (and the heads-up comment that announces it). Read-only preview of CLOSE-STALE."
+        type: boolean
+        default: false
       required-gates:
         description: >-
           Newline-separated check-run names that main branch protection (or a
@@ -49,6 +57,8 @@ concurrency:
 
 env:
   STALE_DAYS: ${{ inputs.stale-days }}
+  PR_LIMIT: ${{ inputs.pr-limit }}
+  DRY_RUN: ${{ inputs.dry-run }}
 
 jobs:
   drain:
@@ -79,7 +89,7 @@ jobs:
             exit 1
           fi
 
-          if ! prs=$(gh pr list --state open --limit 100 \
+          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
             --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt); then
             echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
             exit 1
@@ -111,12 +121,19 @@ jobs:
           candidates=$(printf '%s' "$prs" \
             | jq -r --arg now "$(date -u +%s)" --arg stale "$stale" ".[] | $stale_filter")
 
+          echo "close-stale candidate set: $(printf '%s' "$candidates" | tr '\n' ' ')"
+
           for n in $candidates; do
             echo "::group::close-stale PR #$n"
             # Re-read this PR's live state; skip if it no longer qualifies.
             if ! gh pr view "$n" --json number,isDraft,labels,updatedAt 2>/dev/null \
               | jq -e --arg now "$(date -u +%s)" --arg stale "$stale" "$stale_filter" >/dev/null; then
               echo "#$n no longer stale-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would close #$n as stale (no activity in ${STALE_DAYS}+ days)"
               echo "::endgroup::"
               continue
             fi
