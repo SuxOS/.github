@@ -17,7 +17,7 @@ a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
-`claude.yml` · `claude-autofix.yml` · `skill-sync.yml` — the org-wide
+`waitch.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml` — the org-wide
 `budget-guard.yml` gate was retired; there's no `ACTIONS_BUDGET_PAUSED` var to set.
 
 **Backlog pipeline** (turns latent work into merged/staged PRs — propose → investigate → build):
