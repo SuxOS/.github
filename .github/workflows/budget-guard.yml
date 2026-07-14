@@ -1,8 +1,9 @@
 name: Actions budget guard (reusable)
 
-# Hourly (and on demand), sums THIS REPO's billable Actions minutes this
-# calendar month (via the runs-timing API — org billing endpoints are
-# unreachable by a GitHub App token, so this deliberately avoids them) and, if
+# Hourly (and on demand), counts THIS REPO's Actions runs this calendar month
+# (org billing endpoints are a hard 403 for GitHub App tokens — confirmed even
+# with an administration:write-scoped App, so this deliberately avoids them
+# and uses run COUNT as a soft proxy instead of exact billed minutes) and, if
 # it crosses a soft cap, PAUSES only the DISCRETIONARY spenders (the @claude
 # review/mention bot and the CI autofix bot) — leaving every safety/deploy gate
 # untouched. Two brakes: (1) sets repo variable ACTIONS_BUDGET_PAUSED=true, a
@@ -14,7 +15,7 @@ name: Actions budget guard (reusable)
 #
 # Caller (needs its own schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/budget-guard.yml@main
-#   with: { budget: "6000", resume-below: "5800", discretionary-workflows: "claude.yml claude-autofix.yml" }
+#   with: { budget: "20000", resume-below: "19000", discretionary-workflows: "claude.yml claude-autofix.yml" }
 #   secrets: inherit
 
 on:
@@ -22,10 +23,10 @@ on:
     inputs:
       budget:
         type: string
-        default: "6000"
+        default: "20000"
       resume-below:
         type: string
-        default: "5800"
+        default: "19000"
       discretionary-workflows:
         description: "Space-separated workflow filenames this guard is allowed to pause."
         type: string
@@ -69,20 +70,21 @@ jobs:
         run: |
           set -uo pipefail
 
-          # TEMP DIAGNOSTIC — re-testing org billing reachability now that the
-          # suxbot App was reinstalled with a broader permission set. Prints the
-          # raw response/HTTP status and exits before touching pause/resume.
-          echo "::group::billing endpoint diagnostic"
-          http_code=$(curl -s -o /tmp/billing_resp.json -w '%{http_code}' \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/orgs/${OWNER}/settings/billing/usage")
-          echo "HTTP status: $http_code"
-          echo "response body:"
-          cat /tmp/billing_resp.json
-          echo "::endgroup::"
-          exit 0
+          # Org billing (both the retired /users/.../billing/actions and the current
+          # /orgs/.../settings/billing/usage) is a hard 403 "Resource not accessible
+          # by integration" for GitHub App tokens, confirmed even with an
+          # administration:write-scoped App — not a permission gap, a platform block.
+          # Don't try to reconstruct precise billed minutes either (that needs a
+          # per-run timing call and this repo does 6000+ runs/month — not worth it
+          # for a soft heuristic). Just use run COUNT this cycle as the proxy: one
+          # API call, no loop, `total_count` is in the response already.
+          cycle_start="$(date -u +%Y-%m-01)"
+          used=$(gh api "/repos/${REPO}/actions/runs?created=%3E%3D${cycle_start}&per_page=1" --jq '.total_count' 2>/dev/null || true)
+          if ! printf '%s' "$used" | grep -qE '^[0-9]+$'; then
+            echo "::warning::could not read Actions run count this cycle (API/perms issue) — no-op this run"
+            exit 0
+          fi
+          echo "Actions runs this cycle ($REPO, since $cycle_start): $used (soft cap $BUDGET, resume-below $RESUME_BELOW)"
 
           set_var() {
             gh api --method PATCH "/repos/${REPO}/actions/variables/ACTIONS_BUDGET_PAUSED" \
