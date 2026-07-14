@@ -131,8 +131,9 @@ jobs:
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        # Default (shallow) depth: allowedTools below is gh/issue/label only — no git,
+        # so this job doesn't need history.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: { fetch-depth: 0 }
 
       - name: Claude — investigate and decide
         id: claude

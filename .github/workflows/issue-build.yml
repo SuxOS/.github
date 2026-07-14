@@ -124,8 +124,9 @@ jobs:
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        # Default (shallow) depth: this cluster job's allowedTools is gh/issue only — no
+        # git — unlike the build job below, which genuinely needs full history.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with: { fetch-depth: 0 }
 
       - name: Claude — cluster the backlog
         id: claude
