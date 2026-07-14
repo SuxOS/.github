@@ -187,12 +187,16 @@ jobs:
             Do NOT modify any issue or write any code here — just return the plan via the
             structured output schema, one entry per issue number you were given.
           # Investigator reads code + does focused open-web research, then returns a plan;
-          # the labeling is a separate shell step, so Claude here never labels or writes code.
-          # Allow read + WebSearch/WebFetch (the research contract) + `gh issue`/`gh label`
-          # bash (issue inspection); NO Write/Edit to code.
+          # the labeling is a separate shell step, so Claude here never labels or writes
+          # anything (Safe Outputs shape — see docs/design/backlog-pipeline.md and issue #79).
+          # Allow read + WebSearch/WebFetch (the research contract) + the one gh subcommand
+          # the prompt actually calls (`gh issue view`) — the prior blanket `Bash(gh issue:*)`
+          # plus an unused `Bash(gh label:*)` grant were both wider than anything this step
+          # does; a compromised turn could otherwise close/edit issues or mutate labels
+          # directly instead of going through the deterministic apply step below.
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
-            --allowedTools "Read,Grep,Glob,WebSearch,WebFetch,Bash(gh issue:*),Bash(gh label:*)"
+            --allowedTools "Read,Grep,Glob,WebSearch,WebFetch,Bash(gh issue view:*)"
             --json-schema '{"type":"object","properties":{"decisions":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"type":{"type":"string","enum":["bug","enhancement","security","documentation"]},"confidence":{"type":"string","enum":["high","medium","low"]},"buildable":{"type":"boolean"},"reason":{"type":"string"},"research_note":{"type":"string"}},"required":["number","type","confidence","buildable","reason","research_note"],"additionalProperties":false}}},"required":["decisions"],"additionalProperties":false}'
 
       - name: Apply triage labels
