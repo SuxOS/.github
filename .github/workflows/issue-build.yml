@@ -139,6 +139,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: suxbot[bot]
           prompt: |
             List every open issue labeled `queued-for-build` (with its labels:
             `gh issue list --state open --label queued-for-build --json number,title,body,labels`).
@@ -242,6 +243,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: suxbot[bot]
           prompt: |
             Implement GitHub issues #$ISSUE_NUMBERS in this repo (read each with
             `gh issue view <n>` for full detail). Summary of what this cluster covers:
