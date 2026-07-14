@@ -105,6 +105,14 @@ jobs:
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Job-level override: this is the only thing that actually makes the ambient
+    # GITHUB_TOKEN read-only. The workflow-level `permissions:` above grants
+    # contents: write for the mention job's benefit; without this override the
+    # review job would inherit that write scope despite being advisory-only.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     # Own concurrency group (distinct from `mention` above) — see comment there.
     concurrency:
       group: claude-review-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
@@ -133,8 +141,11 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ inputs.review-prompt }}
           # Review is advisory only — it posts inline findings, never edits or pushes.
-          # Restrict to read tools + git/gh-pr reads (the /code-review skill needs `git diff`
-          # to see the change); the job holds only a read-only GITHUB_TOKEN so push is
-          # impossible regardless. NO Write/Edit. (The mention job below can be asked to make
-          # changes and keeps broad tools.)
-          claude_args: '--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }} --allowedTools "Read,Grep,Glob,Bash(git:*),Bash(gh pr:*)"'
+          # Restrict to read tools + the specific git/gh-pr reads the /code-review skill
+          # needs to see the change (diff/log/show, PR view/diff) — not the blanket
+          # Bash(git:*)/Bash(gh pr:*) this used to grant, which included push/commit and
+          # gh pr merge/close/edit. The job-level `permissions:` above is what actually
+          # makes the ambient GITHUB_TOKEN read-only; this tool restriction is
+          # defense-in-depth on top of that. NO Write/Edit. (The mention job below can be
+          # asked to make changes and keeps broad tools.)
+          claude_args: '--max-turns ${{ inputs.review-max-turns }} --model ${{ inputs.review-model }} --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*)"'

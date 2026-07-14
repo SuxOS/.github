@@ -164,11 +164,15 @@ jobs:
             Do not modify any issue and do not write any code in this step.
           # Cluster step only reads issues and returns a grouping plan — it writes no code and
           # modifies no issue (the claim/label swap is a separate shell step). Restrict to
-          # read + `gh` bash; NO Write/Edit. (The BUILD job below legitimately writes code and
-          # keeps broad tools.)
+          # read + the specific `gh issue` read subcommands it needs — not the blanket
+          # Bash(gh:*) this used to grant, which included `gh issue edit/close` and
+          # `gh pr merge`. The step runs with the minted App token (github_token: above),
+          # so this tool restriction is the actual enforcement, not workflow permissions.
+          # NO Write/Edit. (The BUILD job below legitimately writes code and keeps broad
+          # tools.)
           claude_args: >-
             --max-turns 10 --model ${{ inputs.cluster-model }}
-            --allowedTools "Read,Grep,Glob,Bash(gh:*)"
+            --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*)"
             --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
 
       - name: Cap cluster count and claim issues
