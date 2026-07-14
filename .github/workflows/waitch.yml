@@ -52,8 +52,6 @@ jobs:
           recent_runs=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 20 \
             --json number,name,status,conclusion,url,updatedAt,workflowName)
 
-          now=$(date -u +%s)
-
           # Format merge queue PRs
           queue_count=$(echo "$queue_prs" | jq 'length')
           queue_rows=""
