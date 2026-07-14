@@ -104,14 +104,12 @@ jobs:
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
             read_ok=true
             prot_gates="$(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]' 2>/dev/null || true)"
-            required="$required
-$prot_gates"
+            required="$(printf '%s\n%s' "$required" "$prot_gates")"
           fi
           if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
             read_ok=true
             rule_gates="$(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]' 2>/dev/null || true)"
-            required="$required
-$rule_gates"
+            required="$(printf '%s\n%s' "$required" "$rule_gates")"
           fi
           if [ "$read_ok" != "true" ]; then
             echo "::warning::could not READ main branch protection OR rulesets (token perms / network) — cannot determine protection state, so continuing WITHOUT blocking; a token/API blip must not jam the queue. If the checks are required, GitHub still gates the actual merge."
