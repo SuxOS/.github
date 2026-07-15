@@ -122,6 +122,7 @@ jobs:
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
+          show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           # Inert here today (schedule/workflow_dispatch only, no bot-authored trigger event
@@ -197,6 +198,7 @@ jobs:
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
+          show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           # Inert here today (schedule/workflow_dispatch only, no bot-authored trigger event
