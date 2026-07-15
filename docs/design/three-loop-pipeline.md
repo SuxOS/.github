@@ -223,6 +223,33 @@ Rationale: maximize the rate of *meaningful* work — sonnet by default keeps th
 cost down for the common case, opus only spends more where the batch already signals it's
 worth it.
 
+**Adaptive settings per build (2026-07-15, extended).** The orchestrator now picks the whole
+runtime profile — main model, subagent model, and reasoning effort — deterministically from
+the tier, in one place (operator: "choose model and settings for agent and subagent for each
+build" automatically):
+
+| Tier / signal | main model | subagent model | effort |
+|---|---|---|---|
+| HIGH (`security`/`priority:high`) or any `effort:large` | opus | sonnet | high |
+| MED (`priority:med`) | sonnet | sonnet | medium |
+| LOW (floor) | sonnet | sonnet | low |
+
+Subagents are floored at **sonnet** — never haiku for code-writing fan-out, because a weaker
+subagent's bad code costs the main session more to fix than it saves (this is the reliable
+half of the "haiku-expand → opus-merge" idea; the parallel cheap work lives in in-session
+subagents, not a separate job). Effort tracks the model: opus always reasons deeply, the
+routine floor runs fast and shallow. Wired via `CLAUDE_CODE_SUBAGENT_MODEL` /
+`CLAUDE_CODE_EFFORT_LEVEL`. `model-hint` overrides the whole profile (effort falls back to
+`auto` so a manual override isn't second-guessed). Defaults recalibrated against live data:
+`max-issues` 40→24, `effort-budget` 80→48 (17–19-issue batches ran comfortably in 6–15 min).
+
+**Unattended resilience.** `CLAUDE_CODE_RETRY_WATCHDOG=1` on the build session makes it wait
+out a subscription usage-limit/capacity window and retry rather than fail — the
+pool-exhaustion jam, handled without a metered key. `BASH_DEFAULT_TIMEOUT_MS` /
+`BASH_MAX_TIMEOUT_MS` raised so a long gate command (test/build) isn't killed mid-build.
+Prompt caching is already on org-wide (`ENABLE_PROMPT_CACHING_1H`; subscription auth receives
+the 1-hour TTL automatically).
+
 Deliberately NOT built: per-issue file-overlap/parallelism prediction ("smart clustering").
 That's the exact fragile pass §3.1's opening paragraph documents as already ripped out —
 asked a read-only model session to judge file overlap across candidates in a few turns, it
