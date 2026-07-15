@@ -455,3 +455,34 @@ that makes this repo powerful makes the undo complete.
 - **Concept-clustering model call** — the one remaining place Loop 1 needs an LLM for
   grouping; keep it cheap (bulk tier), and if grouping quality is fine deterministically
   (tree/file/time only), drop even that.
+
+## 8. Levers considered and declined — with re-trigger conditions
+
+The north star: **saturate ~80% of a Max-20x subscription with *useful* work — always
+merging features and minor fixes, PR-ing majors — without spamming `main`, blowing load,
+jamming, hanging, or being forgotten.** Every lever below was weighed against that, and
+specifically against the failure this pipeline already learned once: the retired "clustering"
+pass, where a separate cheap session was asked to produce an artifact a downstream session
+depended on, couldn't in its turn budget, and the run built nothing. **Any "smart" addition
+must be truly reliable and deterministic-ish, or it's that mistake again.** These are logged
+so they're settled decisions with explicit re-open triggers, not ideas that get re-litigated
+every few weeks.
+
+| Lever | Call | Why | Re-trigger |
+|---|---|---|---|
+| **Anthropic prompt caching** | **Already on** | `ENABLE_PROMPT_CACHING_1H` is set on all Claude steps org-wide. The 1h TTL is well-matched to a 15-min build cadence — back-to-back runs reuse the cached prefix. | — (verify it stays set; `pin-consistency`-style check could assert it) |
+| **GitHub Actions npm cache on the builder** | **Minor, optional** | The build job's LSP setup (`npm ci` + global install) is ~11s and uncached, while `audit.yml`/`health.yml` already cache npm. The win is small *speed* but real *reliability* (a registry blip on `npm ci` fails the whole build). Worth doing only because it reuses an existing pattern. | Do it if npm-registry flakiness ever fails a build; otherwise not urgent. |
+| **Separate planner → builder (opus plans, sonnet builds)** | **Declined for now** | Appealing (opus decomposes better; sonnet executes cheaper), but a separate planner *job* has the exact clustering failure surface: a planning session that ends without a usable plan artifact = builder has nothing to consume = wasted cycle, plus a job boundary + artifact passing + 2× latency. The current builder already plans-then-builds **in one session** with full context, and sensed-opus-escalation already runs opus on the hard/security batches. | Build it only if we measure that opus builds are expensive **and** it's their *planning*, not their coding, that needs opus — then a cheap opus-plan → sonnet-build split earns its complexity. Do it as two sequential jobs (plan artifact → build), never as N speculative parallel plans. |
+| **N×M parallelism — M builders per repo** | **Declined** | Splitting N issues across M concurrent builder jobs requires partitioning into non-conflicting slices (the clustering trap), produces M concurrent PRs (spams `main`, merge contention), and runs M concurrent sessions (blows load — the 77-parallel-Opus incident, #140). The current shape is strictly better for our constraints: **one** session per repo shares context across issues (a stated preference), fans out to **in-session Task subagents** for the safe parallelism, and emits **one** PR / **one** squashed commit with no cross-slice conflict. Cross-repo we already get M = (number of repos) genuine parallelism. | The "more parallelism" knob, if ever needed, is subagent fan-out *width inside the session* (already the model's call, §3.1.5) — not more jobs. |
+| **Long-lived builder agent** | **Declined** | GitHub-hosted runners are ephemeral, which is a *feature*: every run has a hard timeout and dies clean, so the pipeline **can't hang** — directly serving the "no jamming/hanging" goal. A persistent agent trades that best-in-class reliability property for warm-context latency savings that **prompt caching already delivers** (1h TTL across the cadence). | Only if we move to self-hosted runners for some *other* reason and cold-start latency becomes the measured bottleneck. |
+| **Local models** | **Declined (no substrate)** | Hosted runners have no GPU; a local model cold-loads every ephemeral run. The subscription Claude *is* the model and everything is built on it. The genuinely deterministic-ish sub-tasks (effort estimate, dedup) are already label/heuristic-based, not model calls, so even a warm local model would offload little. | Only if a self-hosted GPU runner exists for other reasons — and even then, measure whether any real model call is worth moving. |
+| **Nix for CI tooling** | **Declined (non-problem)** | Could pin the LSP/tool versions reproducibly, but tool-drift isn't currently biting, and adding Nix to npm/ubuntu CI is real complexity for no current pain. | A concrete tool-version reproducibility failure. |
+| **GitHub-native coding agents (copilot-swe-agent)** | **Already assessed, parked** | Only `copilot-swe-agent[bot]` supports GitHub-native issue-assignment; Claude Code has no equivalent assignable actor (fixer.yml documents the researched gap). We drive `claude-code-action` directly instead — more capable, fully in our control. | If GitHub ships an assignable Claude agent, or Copilot-agent quality clears the bar. |
+
+**The throughline:** the reliable version of nearly every "smart" idea here is *already in
+the pipeline* (in-session plan+build, in-session subagent fan-out, sensed model escalation,
+ephemeral-and-can't-hang jobs, prompt caching, deterministic label-based selection). The
+declined versions are the ones that move work into a **separate cheap session or job whose
+output a later step depends on** — which is precisely the clustering anti-pattern. When in
+doubt, keep the judgment *inside the one session that has the context*, and keep the
+orchestrator deterministic.

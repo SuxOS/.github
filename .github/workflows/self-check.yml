@@ -8,8 +8,14 @@ on:
   push:
     branches: [main]
     paths: [".github/workflows/**", ".github/actions/**"]
+  # NO path filter on pull_request: `actionlint` is a REQUIRED status check in the branch
+  # ruleset, and a required check that is path-filtered creates a merge deadlock — a PR that
+  # touches no workflow file (a docs-only PR, or a bot `documentation`-type build) never
+  # produces the check, so the ruleset blocks it forever and even an admin merge is refused
+  # ("Required status check 'actionlint' is expected"). Running actionlint on every PR is
+  # ~7s and passes trivially when no workflow changed, so it always reports and the gate can
+  # be satisfied. (The push trigger keeps its filter — it's self-CI on main, not a merge gate.)
   pull_request:
-    paths: [".github/workflows/**", ".github/actions/**"]
 
 permissions:
   contents: read
