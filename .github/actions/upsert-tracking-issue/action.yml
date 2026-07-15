@@ -35,6 +35,15 @@ inputs:
       existing tracking issue past the first page isn't missed and duplicated.
     required: false
     default: "100"
+  labels:
+    description: >-
+      Comma-separated labels to guarantee on the tracking issue (create with
+      them; ensure on an existing one too, so an issue that predates this
+      input still gets tagged). Bookkeeping issues carry no other signal that
+      marks them as non-work, so callers like issue-build's backlog selector
+      can exclude them by label instead of misreading them as buildable work.
+    required: false
+    default: ""
 
 outputs:
   issue-number:
@@ -55,8 +64,18 @@ runs:
         MODE: ${{ inputs.mode }}
         UPDATE_MODE: ${{ inputs.update-mode }}
         LIST_LIMIT: ${{ inputs.list-limit }}
+        LABELS: ${{ inputs.labels }}
       run: |
         set -uo pipefail
+
+        # gh issue create/edit --label errors on a label the repo doesn't have yet —
+        # ensure each one exists first (idempotent; a repo that already has it no-ops).
+        if [ -n "$LABELS" ]; then
+          IFS=',' read -ra _labels <<<"$LABELS"
+          for l in "${_labels[@]}"; do
+            gh label create "$l" --repo "$REPO" --color ededed --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
+          done
+        fi
 
         existing=$(gh issue list --repo "$REPO" --state open --limit "$LIST_LIMIT" --json number,title \
           | jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
@@ -78,9 +97,16 @@ runs:
               else
                 gh issue comment "$existing" --repo "$REPO" --body "$BODY" && echo "commented on tracking issue #$existing"
               fi
+              if [ -n "$LABELS" ]; then
+                gh issue edit "$existing" --repo "$REPO" --add-label "$LABELS" || true
+              fi
               echo "issue-number=$existing" >>"$GITHUB_OUTPUT"
             else
-              url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
+              if [ -n "$LABELS" ]; then
+                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS")
+              else
+                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
+              fi
               num=$(printf '%s' "$url" | grep -oE '[0-9]+$' || true)
               echo "opened tracking issue #$num"
               echo "issue-number=$num" >>"$GITHUB_OUTPUT"

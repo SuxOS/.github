@@ -202,7 +202,12 @@ jobs:
             const buildable = all.filter((i) => {
               if (i.pull_request) return false;
               const labels = i.labels.map((l) => l.name);
-              if (["building", "hold", "needs-human"].some((l) => labels.includes(l))) return false;
+              // "tracking" = a bookkeeping issue upserted by automation (budget-governor's
+              // "Autonomy throttle" / "Autonomy budget report", etc.) — not real work. Without
+              // this exclusion it reads as ordinary buildable backlog and gets "built" as if
+              // it were a feature request (confirmed live: SuxOS/sux#499 was the ONLY issue
+              // this filter returned as buildable before the label existed).
+              if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
               // The suxbot App installation (SUX_BOT_APP_ID/SUX_BOT_PRIVATE_KEY, which mints
               // this step's token) has no org `members: read` permission — GitHub silently
               // resolves author_association to "NONE" for real org members when queried via a
@@ -614,4 +619,87 @@ jobs:
             // Never fail the run over observations — the build already shipped.
             if (filed.length > 0) {
               await core.summary.addHeading("issue-build: observations filed", 3).addList(filed).write();
+            }
+
+  # N -> K -> N=0: draining the existing backlog never waits on the clock — only NEW
+  # issues arriving is cron-paced (fixer). As long as buildable backlog remains and the
+  # governor isn't red, immediately re-dispatch the caller workflow instead of idling
+  # until the next scheduled slot. Self-terminates the moment backlog hits zero; the
+  # existing schedule trigger is the wake-up call once new work arrives (fixer / a human
+  # labeling an issue) or the governor clears back to green/yellow. The governor (red) is
+  # also the runaway backstop if a batch keeps failing without ever shrinking the
+  # backlog — this job just stops requeueing, the caller's own cron resumes it later.
+  requeue:
+    needs: [select, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "red"
+
+      - name: Mint app token
+        if: steps.throttle.outputs.go == 'true'
+        id: app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # A plain GITHUB_TOKEN cannot dispatch new workflow runs — GitHub blocks that
+      # specifically to prevent runaway self-triggering loops — hence the app token above,
+      # same as select/build already use to mutate issues/PRs across a run boundary.
+      - name: Requeue this workflow if buildable backlog remains
+        if: steps.throttle.outputs.go == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            // Same buildable predicate as the select step (kept in sync manually — both are
+            // short and a shared module isn't worth the indirection in a single-file reusable
+            // workflow); re-checked fresh rather than trusting select's now-stale output,
+            // since build may have just claimed/closed issues that change the count.
+            const ORG_OWNER_IDS = [18266472]; // colinxs
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            const buildable = all.filter((i) => {
+              if (i.pull_request) return false;
+              const labels = i.labels.map((l) => l.name);
+              if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
+              return ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association)
+                || i.user.login === "suxbot[bot]"
+                || ORG_OWNER_IDS.includes(i.user.id);
+            });
+
+            if (buildable.length === 0) {
+              core.info("no buildable backlog remains — idling until the next scheduled run or new issue");
+              return;
+            }
+
+            // workflow_ref looks like "OWNER/REPO/.github/workflows/FILE.yml@refs/heads/main"
+            // regardless of whether FILE.yml is this reusable's own definition or (as here,
+            // since workflow_call runs in the caller's context) the caller's stub — resolving
+            // it from the ref means this job needs no per-repo configuration to know what to
+            // re-dispatch.
+            const m = (process.env.WORKFLOW_REF || "").match(/\.github\/workflows\/([^@]+)/);
+            const workflowFile = m ? m[1] : "issue-build.yml";
+
+            core.info(`backlog=${buildable.length} remains → requeueing ${workflowFile}`);
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner, repo, workflow_id: workflowFile, ref: process.env.REF_NAME || "main",
+              });
+            } catch (e) {
+              core.warning(`requeue dispatch failed (non-fatal — the next scheduled run still picks up the backlog): ${e.message}`);
             }
