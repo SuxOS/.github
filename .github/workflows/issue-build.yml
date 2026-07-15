@@ -205,6 +205,12 @@ jobs:
             const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
             const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
 
+            // Keyed on the IMMUTABLE numeric user.id, not the mutable login — a login is
+            // renameable and a freed handle is reclaimable (security-review finding, #186).
+            const ORG_OWNER_IDS = [18266472]; // colinxs
+            const isTrusted = (u, assoc) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(assoc)
+              || u.login === "suxbot[bot]" || ORG_OWNER_IDS.includes(u.id);
+
             // 0. Issues already covered by an OPEN pull request. The `building` label is only
             //    the in-run claim (it covers select → PR-open); once a PR exists, IT is the
             //    durable "this issue is handled" marker, and the claim is intentionally NOT
@@ -216,12 +222,18 @@ jobs:
             //    it merges, producing duplicate PRs (observed live 2026-07-15 across sux-fileops
             //    and suxrouter; the whole reason this guard exists). It also protects issues
             //    whose `building` label was already stripped by the old release-at-PR-open code.
+            //    ONLY a trusted-author PR can suppress an issue this way (security-review finding
+            //    on the first version of this guard, #193): without the trust filter, any PR —
+            //    including from an untrusted/external author on a repo accepting outside PRs —
+            //    whose body merely contains "Closes #N" would indefinitely hide issue #N from
+            //    the builder, a decoy-PR DoS on the pipeline. Same trust bar as buildable issues.
             const openPrs = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", per_page: 100,
             });
             const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
+              if (!isTrusted(pr.user, pr.author_association)) continue;
               for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
             }
 
@@ -265,17 +277,11 @@ jobs:
               // resolves author_association to "NONE" for real org members when queried via a
               // token that can't verify org membership, not just for outside contributors. That
               // starved every human-authored issue (SuxOS/.github#185): buildable came back
-              // empty even with a backlog waiting. ORG_OWNER_IDS is a stopgap allowlist until
-              // the App is granted `members: read` (org admin action, github.com/organizations/
-              // SuxOS/settings/installations) makes association resolve correctly again.
-              // Keyed on the IMMUTABLE numeric user.id, not the mutable login — a login is
-              // renameable and a freed handle is reclaimable, so trusting a login string would
-              // be spoofable; the account id never changes (security-review finding, #186).
-              const ORG_OWNER_IDS = [18266472]; // colinxs
-              const trusted = ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association)
-                || i.user.login === "suxbot[bot]"
-                || ORG_OWNER_IDS.includes(i.user.id);
-              if (!trusted) return false;
+              // empty even with a backlog waiting. ORG_OWNER_IDS (defined above) is a stopgap
+              // allowlist until the App is granted `members: read` (org admin action,
+              // github.com/organizations/SuxOS/settings/installations) makes association
+              // resolve correctly again. See #186 for why it's keyed on immutable user.id.
+              if (!isTrusted(i.user, i.author_association)) return false;
               if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return true;
@@ -732,6 +738,8 @@ jobs:
             // dispatch for — counting it would spawn batches that find nothing to do. Re-read
             // fresh (not select's stale output): build/other concurrent runs just changed state.
             const ORG_OWNER_IDS = [18266472]; // colinxs
+            const isTrusted = (u, assoc) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(assoc)
+              || u.login === "suxbot[bot]" || ORG_OWNER_IDS.includes(u.id);
             const [all, openPrs] = await Promise.all([
               github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
               github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
@@ -739,6 +747,10 @@ jobs:
             const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
+              // Only a trusted-author PR's closing keywords count — an untrusted PR body
+              // claiming "Closes #N" must not be able to suppress issue #N from selection
+              // (decoy-PR DoS; security-review finding on the first version of this guard, #193).
+              if (!isTrusted(pr.user, pr.author_association)) continue;
               for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
             }
             const unclaimed = all.filter((i) => {
@@ -746,9 +758,7 @@ jobs:
               const labels = i.labels.map((l) => l.name);
               if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
               if (referencedByOpenPr.has(i.number)) return false;
-              return ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association)
-                || i.user.login === "suxbot[bot]"
-                || ORG_OWNER_IDS.includes(i.user.id);
+              return isTrusted(i.user, i.author_association);
             }).length;
 
             if (unclaimed === 0) {
