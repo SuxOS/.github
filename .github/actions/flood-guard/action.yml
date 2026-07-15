@@ -1,0 +1,60 @@
+name: Flood guard
+description: >-
+  Backpressure for autonomous FEATURE generation. Counts the org bot's open PRs
+  in this repo; when that queue is at/over `threshold`, feature proposals stand
+  down (bugs/security/docs still flow — the flood the operator fears is features,
+  not fixes). A deep bot-PR queue means the merge/rebase loops aren't keeping up,
+  so piling on more feature work just grows the pile. This is the deterministic
+  half of the operator's "if the bots flood with features, disable auto-feature"
+  rule (three-loop-pipeline.md). FAIL-OPEN: any lookup failure reads as ok=true —
+  a guard outage must never stall the pipeline.
+
+inputs:
+  github-token:
+    description: Token with pull-requests:read for this repo (the ambient GITHUB_TOKEN is fine).
+    required: true
+  threshold:
+    description: >-
+      Open bot-authored PR count at which feature generation stands down. The
+      queue depth the operator is willing to carry before applying backpressure.
+    required: false
+    default: "8"
+
+outputs:
+  features-ok:
+    description: '"true" when feature generation should run, "false" when the bot-PR queue is flooded.'
+    value: ${{ steps.check.outputs.features_ok }}
+  open-bot-prs:
+    description: Count of open bot-authored PRs observed (for logging/telemetry).
+    value: ${{ steps.check.outputs.open_bot_prs }}
+
+runs:
+  using: composite
+  steps:
+    - name: Count open bot PRs
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        THRESHOLD: ${{ inputs.threshold }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+
+        # Fail-open: a lookup failure leaves count=0 → features_ok=true. The org bot
+        # surfaces as "suxbot" in the PR author login in either the app/suxbot or
+        # suxbot[bot] form, so match the substring rather than an exact login.
+        count=$(gh pr list --repo "$REPO" --state open --limit 100 --json author 2>/dev/null \
+          | jq '[.[] | select(.author.login | test("suxbot"))] | length') || true
+        count=${count:-0}
+
+        features_ok=true
+        [ "$count" -ge "$THRESHOLD" ] && features_ok=false
+
+        if [ "$features_ok" = "false" ]; then
+          echo "::notice::flood guard tripped — ${count} open bot PRs (threshold ${THRESHOLD}). Feature generation stands down this run; bug/security/doc work still flows. Merge the queue to release backpressure."
+        else
+          echo "flood guard clear — ${count} open bot PRs (threshold ${THRESHOLD})."
+        fi
+        echo "open_bot_prs=$count" >> "$GITHUB_OUTPUT"
+        echo "features_ok=$features_ok" >> "$GITHUB_OUTPUT"

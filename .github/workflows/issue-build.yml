@@ -42,6 +42,15 @@ on:
       max-issues:
         description: "Batch-size max: issues pulled into one build/PR per run, oldest-first within the chosen tier."
         type: number
+        # Governor-as-ceiling (operator decision 2026-07-15): the budget-governor's weekly
+        # runner-minute cap is the real throttle, so this batch size is set for throughput,
+        # not spend-avoidance. Worktree/subagent isolation lets one builder carry a wide batch
+        # without file collisions; the governor stands the whole stage down at red before spend
+        # runs away. Was 8 (conservative); raised to drain backlogs in fewer, wider passes.
+        default: 20
+      flood-threshold:
+        description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
+        type: number
         default: 8
       include:
         description: "Comma-list of labels; if set, only issues carrying at least one are eligible (also does priority, e.g. `priority:high` or `bug,security`)."
@@ -315,6 +324,24 @@ jobs:
                Commit (conventional-commit message referencing the issues) and push to this
                branch. One coherent commit history for the batch is fine.
 
+            4. CAPTURE INSIGHT (secondary — only after the build is done and pushed; skip if you
+               couldn't finish the build). While working these issues you have the deepest view
+               of this code anyone will have today. Don't waste it. If you noticed something
+               genuinely worth a SEPARATE follow-up — a real bug OUT OF SCOPE of this batch, a
+               concrete feature/improvement the code is asking for, a durable lesson about how
+               this repo works that future work should know — record it so the pipeline can act
+               on it later. Write a JSON array to the file `${{ runner.temp }}/observations.json`
+               using the Write tool (absolute path, OUTSIDE the repo tree so it is never
+               committed). Each element: {"title": short imperative, "body": what/why with
+               file:line refs, "type": one of "bug"|"enhancement"|"documentation", "security":
+               true/false}. A lesson-worth-recording is a "documentation" observation. Rules:
+               at most 3 — the best ones, not a brain-dump; nothing already covered by an open
+               issue (check `gh issue list --state open --limit 300` first); nothing that is
+               just one of the issues you already built. If you have nothing that clears that
+               bar, write `[]` or skip the file entirely — an empty capture is correct and
+               better than noise. This is strictly secondary: never spend build turns you need
+               for the gates on it.
+
             If you get the gates passing, finish normally — a later step opens the PR. If you
             can't get them green (genuine design problem, missing context), do NOT push a broken
             commit — say so clearly in your final message and explain what's blocking it.
@@ -365,3 +392,65 @@ jobs:
           for n in $nums; do
             gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
           done
+
+      # Backpressure for the observations below: if the bot's PR queue is already deep, don't
+      # let the builder pile MORE feature work on top (bug/security/doc observations still flow).
+      - name: Flood guard
+        id: flood
+        if: always()
+        uses: SuxOS/.github/.github/actions/flood-guard@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          threshold: ${{ inputs.flood-threshold }}
+
+      # The builder may have written mid-build observations (a bug out of scope, a feature the
+      # code is asking for, a durable lesson) to a file OUTSIDE the repo tree. This is the ONLY
+      # step that files them — the model has no gh-write access to issues here. Model-authored
+      # content is parsed with jq and passed as argv (never interpolated into the shell), type is
+      # re-validated against an allowlist, enhancements are dropped under flood backpressure, and
+      # the whole thing is capped — the Safe Outputs pattern, identical in shape to fixer.yml.
+      # Best-effort: a missing/empty/malformed file is a green no-op (the build already shipped).
+      - name: File builder observations
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OBS_FILE: ${{ runner.temp }}/observations.json
+          FEATURES_OK: ${{ steps.flood.outputs.features-ok }}
+          MAX_OBS: "3"
+        run: |
+          set -uo pipefail
+          if [ ! -s "$OBS_FILE" ]; then echo "no observations file → nothing to file"; exit 0; fi
+          if ! jq -e 'type == "array"' "$OBS_FILE" >/dev/null 2>&1; then
+            echo "::warning::observations file is not a JSON array — ignoring"; exit 0
+          fi
+
+          # Cap first, then iterate. jq -c emits one compact object per line; read parses each.
+          jq -c ".[0:${MAX_OBS}][]" "$OBS_FILE" 2>/dev/null | while IFS= read -r p; do
+            title=$(echo "$p" | jq -r '.title // empty')
+            body=$(echo "$p" | jq -r '.body // empty')
+            type=$(echo "$p" | jq -r '.type // empty')
+            security=$(echo "$p" | jq -r '.security // false')
+            [ -z "$title" ] || [ -z "$body" ] && { echo "::warning::skipping observation with empty title/body"; continue; }
+
+            case "$type" in bug|enhancement|documentation) ;; *)
+              echo "::warning::skipping observation with unexpected type '$type': $title"; continue ;;
+            esac
+
+            # Flood backpressure applies to features only; fixes/docs always flow.
+            if [ "$type" = "enhancement" ] && [ "$FEATURES_OK" = "false" ]; then
+              echo "flood guard active → holding feature observation: $title"; continue
+            fi
+
+            # Only known-good labels (a non-existent label makes `gh issue create` fail and
+            # would silently drop the observation). Same label set fixer.yml files with.
+            label_args=(--label "$type")
+            [ "$security" = "true" ] && label_args+=(--label security)
+
+            if url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}" 2>/dev/null); then
+              echo "filed observation: $url"
+            else
+              echo "::warning::failed to file observation (non-fatal): $title"
+            fi
+          done
+          # Never fail the run over observations — the build already shipped.
+          exit 0
