@@ -7,12 +7,14 @@ name: Issue build — cluster related issues, one PR per cluster (reusable)
 # cluster — never one giant PR for the whole backlog.
 #
 # Auto-merge posture is OPT-OUT-BY-DEFAULT, keyed on the investigator's confidence label:
-#   - a cluster in which EVERY issue is `confidence:high` (and none is `hold`) → labeled
-#     `automerge`, flowing into the EXISTING automerge pipeline to merge unattended once the
-#     gates are green. `confidence:high` is triage.yml's high bar (narrow, verified, low-risk),
-#     so "merge high confidence" stays safe.
-#   - every other cluster → labeled `needs-review`: the PR still opens (most work gets built
-#     and drained), it just STAGES for a human instead of self-merging.
+#   - a CONFIDENCE-PURE cluster — EVERY issue `confidence:high`, OR EVERY issue
+#     `confidence:medium` (and none `hold`) → labeled `automerge`, flowing into the EXISTING
+#     automerge pipeline to merge unattended once the gates are green. Both high and medium
+#     are triage.yml's "real/worthwhile" tiers; the machine gates (CI + a confirmed
+#     security finding) still apply to every auto-merge, so this stays safe.
+#   - anything not confidence-pure (a low-confidence issue, or a cluster that somehow mixed
+#     tiers) → labeled `needs-review`: the PR still opens (most work gets built and drained),
+#     it just STAGES for a human instead of self-merging.
 # Eligibility is read from the SOURCE ISSUES' actual GitHub labels, never from the AI-authored
 # PR title — trusting the model's own title to gate unattended merge would be circular.
 #
@@ -44,7 +46,10 @@ on:
     inputs:
       max-clusters:
         type: number
-        default: 10
+        # Per-run visibility cap (truncation is logged; the rest stay queued-for-build for the
+        # next run). Raised 10→20 for throughput — surfaces more in-flight work per run and can
+        # only bound spend, never safety.
+        default: 20
       cluster-model:
         type: string
         default: "sonnet" # clustering is mechanical grouping — bulk tier is right
@@ -185,11 +190,18 @@ jobs:
             cluster. Never put every issue into one cluster — the whole point is n issues to
             m clusters, m > 1 whenever the backlog actually contains unrelated work.
 
-            CONFIDENCE-PURITY RULE: never put a `confidence:high` issue in the same cluster as
-            an issue that is NOT `confidence:high`. A pure all-high cluster is what lets its PR
-            auto-merge unattended (see the build job); mixing in a lower-confidence issue would
-            either drag an unverified change into an auto-merge or force the whole cluster to
-            stage. So split by confidence first, then group by relatedness within each tier.
+            Before making any issue a singleton, actively check it against the others for a
+            shared signal — same file/module, same root cause, same feature area, or a
+            dependency between them — and group it if one exists. Reserve singletons for issues
+            that genuinely share nothing; prefer a few well-formed multi-issue clusters over many
+            singletons (never at the cost of confidence-purity above).
+
+            CONFIDENCE-PURITY RULE: keep every cluster confidence-pure — never mix a
+            `confidence:high` issue with a non-high one, and likewise keep a `confidence:medium`
+            cluster all-medium. A confidence-pure cluster (ALL-high OR ALL-medium) is what lets
+            its PR auto-merge unattended (see the build job); mixing tiers would either drag a
+            lower-confidence change into an auto-merge or force the whole cluster to stage. So
+            split by confidence FIRST, then group by relatedness within each tier.
 
             Return your plan via the structured output schema. For each cluster: a short
             kebab-case `id`, a `branch` name like `bot/issue-build-<id>`, a conventional-commit
@@ -244,11 +256,18 @@ jobs:
             cluster. Never put every issue into one cluster — the whole point is n issues to
             m clusters, m > 1 whenever the backlog actually contains unrelated work.
 
-            CONFIDENCE-PURITY RULE: never put a `confidence:high` issue in the same cluster as
-            an issue that is NOT `confidence:high`. A pure all-high cluster is what lets its PR
-            auto-merge unattended (see the build job); mixing in a lower-confidence issue would
-            either drag an unverified change into an auto-merge or force the whole cluster to
-            stage. So split by confidence first, then group by relatedness within each tier.
+            Before making any issue a singleton, actively check it against the others for a
+            shared signal — same file/module, same root cause, same feature area, or a
+            dependency between them — and group it if one exists. Reserve singletons for issues
+            that genuinely share nothing; prefer a few well-formed multi-issue clusters over many
+            singletons (never at the cost of confidence-purity above).
+
+            CONFIDENCE-PURITY RULE: keep every cluster confidence-pure — never mix a
+            `confidence:high` issue with a non-high one, and likewise keep a `confidence:medium`
+            cluster all-medium. A confidence-pure cluster (ALL-high OR ALL-medium) is what lets
+            its PR auto-merge unattended (see the build job); mixing tiers would either drag a
+            lower-confidence change into an auto-merge or force the whole cluster to stage. So
+            split by confidence FIRST, then group by relatedness within each tier.
 
             Return your plan via the structured output schema. For each cluster: a short
             kebab-case `id`, a `branch` name like `bot/issue-build-<id>`, a conventional-commit
@@ -410,22 +429,24 @@ jobs:
           body=$(printf '%s\n\n%s\n\n%s\n\nRun: %s' "$SUMMARY" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
 
           # OPT-OUT-BY-DEFAULT eligibility, derived from the SOURCE ISSUES' actual labels
-          # (never the AI-authored title): automerge ONLY if every issue in the cluster is
-          # confidence:high and none is hold; otherwise stage as needs-review.
-          eligible=true
+          # (never the AI-authored title): automerge iff the cluster is CONFIDENCE-PURE —
+          # every issue confidence:high OR every issue confidence:medium — and none is hold;
+          # otherwise stage as needs-review. Purity is guaranteed by the cluster step (it never
+          # mixes tiers); all_high/all_medium just detect which pure tier this cluster is, and a
+          # cluster that somehow ISN'T pure falls through to needs-review (safe default).
+          all_high=true; all_medium=true; any_hold=false
           for n in $nums; do
             issue_labels=$(gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')
-            case ",$issue_labels," in
-              *,confidence:high,*) ;;
-              *) eligible=false ;;
-            esac
-            case ",$issue_labels," in
-              *,hold,*) eligible=false ;;
-            esac
+            case ",$issue_labels," in *,confidence:high,*) ;; *) all_high=false ;; esac
+            case ",$issue_labels," in *,confidence:medium,*) ;; *) all_medium=false ;; esac
+            case ",$issue_labels," in *,hold,*) any_hold=true ;; esac
           done
-          labels="needs-review"
-          [ "$eligible" = "true" ] && labels="automerge"
-          echo "cluster automerge-eligible: $eligible → label $labels"
+          if [ "$any_hold" = "false" ] && { [ "$all_high" = "true" ] || [ "$all_medium" = "true" ]; }; then
+            labels="automerge"
+          else
+            labels="needs-review"
+          fi
+          echo "cluster: all_high=$all_high all_medium=$all_medium any_hold=$any_hold → label $labels"
 
           gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" \
             --title "$TITLE" --body "$body" --label "$labels"

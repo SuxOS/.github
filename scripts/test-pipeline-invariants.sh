@@ -15,9 +15,11 @@ note() { echo "  ok: $*"; }
 bad()  { echo "  FAIL: $*" >&2; fail=1; }
 
 echo "[1/2] security-review.yml high-blast pattern covers .github/actions/"
-pattern=$(grep -oE "grep -qiE '[^']+'" .github/workflows/security-review.yml | head -1 | sed "s/^grep -qiE '//; s/'\$//")
+# The pattern now lives in a single HIGH_BLAST_RE='...' assignment (used by both the
+# classify grep and the offender-print grep, so they can't drift). Extract it from there.
+pattern=$(grep -oE "HIGH_BLAST_RE='[^']+'" .github/workflows/security-review.yml | head -1 | sed "s/^HIGH_BLAST_RE='//; s/'\$//")
 if [ -z "$pattern" ]; then
-  bad "could not extract the high-blast grep pattern from security-review.yml — has the line moved/changed shape?"
+  bad "could not extract HIGH_BLAST_RE from security-review.yml — has the assignment moved/changed shape?"
 else
   for probe in \
     ".github/actions/mint-app-token/action.yml" \
@@ -30,13 +32,29 @@ else
       bad "$probe should be high-blast (control-surface path) but the pattern misses it: /$pattern/"
     fi
   done
-  # negative control: an ordinary source file must NOT be high-blast (proves the
-  # pattern isn't just matching everything, which would defeat the point of it)
-  if printf '%s\n' "sux/src/fns/amazon.ts" | grep -qiE "$pattern"; then
-    bad "an ordinary source path matched the high-blast pattern — pattern is too broad: /$pattern/"
-  else
-    note "ordinary source path correctly NOT high-blast (pattern isn't overbroad)"
-  fi
+  # negative controls: ordinary source files must NOT be high-blast (proves the pattern
+  # isn't just matching everything). Includes the substring false-positives the pattern was
+  # tightened to exclude — auth|secret are delimiter-bounded tokens, so `author`/`secretary`/
+  # `oauthor` must NOT trip a spurious fail-closed hold.
+  for clean in \
+    "sux/src/fns/amazon.ts" \
+    "src/authors/list.ts" \
+    "docs/secretary-notes.md" \
+    "lib/oauthor.ts"; do
+    if printf '%s\n' "$clean" | grep -qiE "$pattern"; then
+      bad "ordinary path '$clean' matched the high-blast pattern — too broad: /$pattern/"
+    else
+      note "$clean correctly NOT high-blast"
+    fi
+  done
+  # positive control for the tightened token: real auth/secret files MUST still classify.
+  for sensitive in "src/auth/mw.ts" "config/secrets.yaml" "lib/oauth.ts"; do
+    if printf '%s\n' "$sensitive" | grep -qiE "$pattern"; then
+      note "$sensitive correctly high-blast"
+    else
+      bad "sensitive path '$sensitive' should be high-blast but the pattern misses it: /$pattern/"
+    fi
+  done
 fi
 
 echo "[2/2] scaffold-caller.sh's security-review template includes ready_for_review"
