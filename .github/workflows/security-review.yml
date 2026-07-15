@@ -81,6 +81,9 @@ jobs:
           if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → security review inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+          # Whether the metered break-glass is armed (secrets aren't allowed in a step `if:`,
+          # so surface presence as an output the break-glass step can gate on).
+          echo "apikey=${{ secrets.ANTHROPIC_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
         # fetch-depth 0 (was shallow): the review now gets read-only git diff/log/show
@@ -104,6 +107,9 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
+          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
@@ -146,6 +152,9 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
+          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
@@ -175,13 +184,60 @@ jobs:
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
+      # Break-glass: if BOTH subscription attempts produced no verdict AND a metered
+      # ANTHROPIC_API_KEY secret is present, fall back to the metered API so a subscription
+      # pool-exhaustion can never leave this REQUIRED gate un-runnable (the merge-queue-jam
+      # accepted-risk in CLAUDE.md § Auth). Inert until the operator adds ANTHROPIC_API_KEY —
+      # the `secrets.ANTHROPIC_API_KEY != ''` guard skips it cleanly when unset, so nothing
+      # changes for callers without the key. The retry-watchdog on the two subscription
+      # attempts above already waits out most transient exhaustion; this is the last resort,
+      # and it's the automatic version of the manual "revert to anthropic_api_key" this file's
+      # CLAUDE.md documents.
+      - name: Claude security review (break-glass — metered API fallback)
+        id: claude_apikey
+        if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == '' && steps.claude_retry.outputs.structured_output == '' && steps.pre.outputs.apikey == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          show_full_output: true
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_bots: ${{ inputs.allowed-bots }}
+          prompt: |
+            ${{ inputs.prompt-context }}
+            Do a SECURITY review of this PR's diff vs the base branch. FIRST run
+            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            try to infer what changed from reading post-change files alone, and do not spend
+            turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
+            context only where the diff alone is ambiguous.
+
+            Weigh: secret handling/exposure, auth-gate bypass, SSRF, injection (incl. shell
+            injection via `github.event.*` interpolation in workflows), GitHub Actions abuse
+            (pull_request_target + untrusted checkout, missing author gates, over-scoped
+            tokens), auto-merge/auto-deploy blast radius, and any autonomous-bot action that
+            could touch prod or user data unsafely. Use the repo's /security-review skill if
+            present. Post concise inline findings.
+
+            Your FINAL message MUST be the machine-readable verdict object matching the provided
+            JSON schema: {"critical":N,"high":N,"note":"..."} — the counts of CONFIRMED
+            critical/high issues (zeros if the diff is clean). Do NOT write any file; the verdict
+            is captured from your structured output, not the filesystem.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+            --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
       - name: Gate — advisory pass on missing verdict; block on high/critical
         if: steps.pre.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-          # Read the verdict from whichever attempt produced one (retry only ran if the first was empty).
-          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+          # Read the verdict from whichever attempt produced one (OAuth first, OAuth retry, then
+          # the metered break-glass — each only runs if the prior produced nothing).
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output || steps.claude_apikey.outputs.structured_output }}
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
