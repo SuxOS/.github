@@ -158,6 +158,13 @@ jobs:
       - name: Claude — cluster the backlog
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        # The action hard-fails (exit 1) when the model ends its turn without emitting
+        # --json-schema structured_output ("Result subtype: success" + no output). Without
+        # continue-on-error that aborts the job red — burning a session and building nothing
+        # — instead of letting "Cap cluster count and claim issues" below treat an empty
+        # verdict as clusters=[] (which skips the build job cleanly, as it already does).
+        # Same shape as security-review.yml (#139).
+        continue-on-error: true
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -190,6 +197,12 @@ jobs:
             covers, and the `issue_numbers` in it.
 
             Do not modify any issue and do not write any code in this step.
+
+            Your FINAL message MUST be the machine-readable object matching the provided JSON
+            schema: {"clusters":[...]} — an empty `clusters` array if there is genuinely nothing
+            to group. Emit it as your structured output; do NOT end with a prose summary instead,
+            and do NOT write any file — the plan is captured from your structured output, not the
+            filesystem. A run that ends without this object builds nothing and wastes the session.
           # Cluster step only reads issues and returns a grouping plan — it writes no code and
           # modifies no issue (the claim/label swap is a separate shell step). Restrict to
           # read + the specific `gh issue` read subcommands it needs — not the blanket
@@ -203,12 +216,64 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*)"
             --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
 
+      - name: Claude — cluster the backlog (retry — first attempt produced no output)
+        id: claude_retry
+        # Only fires when the first attempt emitted no structured_output — a transient API/OIDC
+        # blip or a model that ended without the tool call. One retry auto-recovers the common
+        # hiccup; a genuinely empty backlog still yields no output and the Cap step below sets
+        # clusters=[] (build job skips cleanly). Mirrors security-review.yml (#139).
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0' && steps.claude.outputs.structured_output == ''
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          allowed_bots: suxbot[bot]
+          prompt: |
+            List every open issue labeled `queued-for-build` (with its labels:
+            `gh issue list --state open --label queued-for-build --json number,title,body,labels`).
+
+            Group RELATED issues together — same root cause, same feature area, or issues
+            that would touch the same files — into clusters. Two issues that are unrelated
+            and would touch different parts of the codebase must NOT share a cluster (keep
+            each resulting PR small and reviewable). Two issues that WOULD touch the same
+            files must share a cluster (two concurrent sessions editing the same lines would
+            just collide). An issue with no relation to any other is its own single-issue
+            cluster. Never put every issue into one cluster — the whole point is n issues to
+            m clusters, m > 1 whenever the backlog actually contains unrelated work.
+
+            CONFIDENCE-PURITY RULE: never put a `confidence:high` issue in the same cluster as
+            an issue that is NOT `confidence:high`. A pure all-high cluster is what lets its PR
+            auto-merge unattended (see the build job); mixing in a lower-confidence issue would
+            either drag an unverified change into an auto-merge or force the whole cluster to
+            stage. So split by confidence first, then group by relatedness within each tier.
+
+            Return your plan via the structured output schema. For each cluster: a short
+            kebab-case `id`, a `branch` name like `bot/issue-build-<id>`, a conventional-commit
+            style `title` for the eventual PR, a one-paragraph `summary` of what the cluster
+            covers, and the `issue_numbers` in it.
+
+            Do not modify any issue and do not write any code in this step.
+
+            Your FINAL message MUST be the machine-readable object matching the provided JSON
+            schema: {"clusters":[...]} — an empty `clusters` array if there is genuinely nothing
+            to group. Emit it as your structured output; do NOT end with a prose summary instead,
+            and do NOT write any file — the plan is captured from your structured output, not the
+            filesystem. A run that ends without this object builds nothing and wastes the session.
+          claude_args: >-
+            --max-turns 10 --model ${{ inputs.cluster-model }}
+            --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*)"
+            --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}}},"required":["clusters"],"additionalProperties":false}'
+
       - name: Cap cluster count and claim issues
         id: plan
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          # Read from whichever attempt produced output (retry only ran if the first was empty).
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
           MAX_CLUSTERS: ${{ inputs.max-clusters }}
         run: |
           set -euo pipefail

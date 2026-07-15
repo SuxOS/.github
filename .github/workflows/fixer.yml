@@ -110,6 +110,14 @@ jobs:
       - name: Claude — scan and propose issues
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        # The action hard-fails (exit 1) when the model runs fine but ends its turn without
+        # emitting --json-schema structured_output ("Result subtype: success" + no output —
+        # a proposer that wrote a prose summary instead of the tool call, a flaky/refusing
+        # model, or a mid-run API blip). Without continue-on-error that aborts the whole job
+        # red — burning a full subscription session AND filing nothing — instead of letting
+        # the "File proposed issues" step below treat an empty verdict as "found nothing this
+        # pass" (green no-op), which it already does. Same shape as security-review.yml (#139).
+        continue-on-error: true
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -157,6 +165,13 @@ jobs:
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
             worse than silence (propose a genuine hunch as confidence low, don't invent one).
             Set discarded_count to how many candidates you dropped as duplicates/baseless.
+
+            Your FINAL message MUST be the machine-readable object matching the provided JSON
+            schema: {"proposals":[...],"discarded_count":N} — an empty `proposals` array (with
+            discarded_count) if you found nothing worth filing. Emit it as your structured
+            output; do NOT end with a prose summary instead, and do NOT write any file — the
+            proposals are captured from your structured output, not the filesystem. A run that
+            ends without this object files nothing and wastes the whole session.
           # Proposer only READS (code + `gh issue list` for dedup) and returns a structured
           # proposal list — it has no `gh issue create`/write access at all. A separate
           # deterministic step below is the only thing that ever calls `gh issue create`,
@@ -171,6 +186,74 @@ jobs:
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
             --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","type","security","confidence"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
+      - name: Claude — scan and propose issues (retry — first attempt produced no output)
+        id: claude_retry
+        # Only fires when the first attempt emitted no structured_output — a transient API/OIDC
+        # blip or a model that ended without the tool call. One retry turns the common hiccup
+        # into an auto-recovery instead of a silently-empty pass; a genuinely fruitless scan
+        # still yields no output after this and the File step below simply files nothing (green).
+        # Mirrors security-review.yml's claude/claude_retry pair (#139).
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the proposer. Find work worth doing in this repo and file it as issues —
+            do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
+            investigator decides what actually gets built).
+
+            What to look for:
+              - Correctness bugs: read code in areas of recent churn
+                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
+                point at — don't cold-scan the whole repo file-by-file.
+              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
+                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
+                items not actually implemented).
+              - Missing tests/docs: exported functions with no coverage where the repo has a
+                clear test convention; README/CLAUDE.md describing behavior the code no longer
+                matches.
+              - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
+                newer part of the repo already replaced.
+
+            Before proposing: `gh issue list --limit 300 --state all` and skip anything an
+            existing issue already covers (don't even comment, unless you found materially new
+            information). Batch candidates first, then dedupe against each other — one root
+            cause showing up in three files is ONE issue, not three.
+
+            Do NOT file issues yourself — you have no write access. Return each surviving
+            candidate via the structured output schema instead; a separate step files them
+            with exactly two kinds of label, a TYPE and a CONFIDENCE:
+              - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
+                docs; set `security: true` in addition if it's a security issue.
+              - Confidence — YOUR honest self-assessment, since the investigator will re-judge
+                it anyway:
+                  * `high`   — you read the code and are sure it's real, and the fix is narrow,
+                               unambiguous, and low-risk.
+                  * `medium` — likely real but you didn't fully confirm, or the fix has some
+                               judgment/scope to it.
+                  * `low`    — a hunch, a big/ambiguous idea, or anything you couldn't verify.
+              - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
+                references, a suggested fix direction if you have one. A paragraph, not a report.
+
+            Skip anything you have no real basis for — a plausible-sounding but baseless guess is
+            worse than silence (propose a genuine hunch as confidence low, don't invent one).
+            Set discarded_count to how many candidates you dropped as duplicates/baseless.
+
+            Your FINAL message MUST be the machine-readable object matching the provided JSON
+            schema: {"proposals":[...],"discarded_count":N} — an empty `proposals` array (with
+            discarded_count) if you found nothing worth filing. Emit it as your structured
+            output; do NOT end with a prose summary instead, and do NOT write any file — the
+            proposals are captured from your structured output, not the filesystem. A run that
+            ends without this object files nothing and wastes the whole session.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
+            --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","type","security","confidence"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+
       # The ONLY step that ever calls `gh issue create` — the agent above has no gh-write
       # access at all. Re-validates type/confidence against an allowlist even though the
       # JSON schema already constrains them (belt-and-suspenders: a schema is the model's
@@ -179,7 +262,8 @@ jobs:
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          # Read from whichever attempt produced output (retry only ran if the first was empty).
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
         run: |
           set -euo pipefail
           if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
