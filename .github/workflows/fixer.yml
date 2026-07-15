@@ -154,11 +154,16 @@ jobs:
 
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them
-            with a single TYPE label:
+            with a TYPE label and an EFFORT label:
               - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
                 docs; set `security: true` in addition if it's a security issue.
               - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
                 references, a suggested fix direction if you have one. A paragraph, not a report.
+              - Effort: your rough gut estimate of how much work the fix is — `small` (a
+                one-file, one-concept change), `medium` (a few files or real design thought),
+                or `large` (touches many files, a real feature, or needs a design decision).
+                A rough guess is fine; this only sizes how many issues a build batch takes in
+                one pass, it is not a commitment.
 
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
             worse than silence (don't invent one; a genuine hunch is fine, just say so in the body).
@@ -183,7 +188,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"}},"required":["title","body","type","security"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       - name: Claude — scan and propose issues (retry — first attempt produced no output)
         id: claude_retry
@@ -230,11 +235,16 @@ jobs:
 
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them
-            with a single TYPE label:
+            with a TYPE label and an EFFORT label:
               - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
                 docs; set `security: true` in addition if it's a security issue.
               - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
                 references, a suggested fix direction if you have one. A paragraph, not a report.
+              - Effort: your rough gut estimate of how much work the fix is — `small` (a
+                one-file, one-concept change), `medium` (a few files or real design thought),
+                or `large` (touches many files, a real feature, or needs a design decision).
+                A rough guess is fine; this only sizes how many issues a build batch takes in
+                one pass, it is not a commitment.
 
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
             worse than silence (don't invent one; a genuine hunch is fine, just say so in the body).
@@ -250,7 +260,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"}},"required":["title","body","type","security"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       # The ONLY step that ever calls `gh issue create` — the agent above has no gh-write
       # access at all. Re-validates type against an allowlist even though the JSON schema
@@ -273,6 +283,7 @@ jobs:
             body=$(echo "$p" | jq -r '.body')
             type=$(echo "$p" | jq -r '.type')
             security=$(echo "$p" | jq -r '.security')
+            effort=$(echo "$p" | jq -r '.effort // empty')
 
             case "$type" in bug|enhancement|documentation) ;; *)
               echo "::warning::skipping proposal with unexpected type '$type': $title"; continue ;;
@@ -280,6 +291,9 @@ jobs:
 
             label_args=(--label "$type")
             [ "$security" = "true" ] && label_args+=(--label security)
+            # An invalid/missing effort is not fatal to filing — issue-build's select step
+            # defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
+            case "$effort" in small|medium|large) label_args+=(--label "effort:$effort") ;; esac
 
             url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}")
             echo "filed: $url"

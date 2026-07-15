@@ -188,8 +188,47 @@ build stage down at `red` before spend runs away. In-session Task-tool subagent 
 carry a wide batch, with the builder's own disjoint-files judgment as the collision filter.
 Default raised 8 → 20 → 40 (2026-07-15, the second raise paired with a 24h/15min-cadence
 drain). The turns cap (300 → 500) and build job timeout (45 → 90 min) were raised alongside
-each raise — turn budget saturates before issue count does (`base-max-turns + 20×count`), so
-raising the count alone just produces truncated, uncommitted sessions instead of bigger PRs.
+each raise — turn budget saturates before issue count does, so raising the count alone just
+produces truncated, uncommitted sessions instead of bigger PRs. Superseded by §3.1.4: turns
+now scale with effort points, not raw count.
+
+#### 3.1.4 Effort-aware bundling + sensed model escalation (2026-07-15)
+
+Two related deterministic-selection upgrades, same principle as §3.1.1: a model that's
+**already running** makes the judgment once, cheaply; `select` only ever reads labels — no
+new LLM call is added to the orchestrator (rule: deterministic beats LLM for
+selection/routing).
+
+**Bundling.** `fixer` and the builder's own observation-capture (§3.1.1) now also emit a
+rough `effort: small|medium|large` estimate per proposal, filed as an `effort:*` label
+(missing/invalid → no label, which `select` treats as medium — fail-safe, never drops the
+issue). `select` packs the chosen priority tier oldest-first by points (small=1, medium=2,
+large=4) against `effort-budget` (default 80), capped at `max-issues` (default 40) either
+way — whichever limit is hit first stops the pack. A bundle of a few `large` issues fills
+the budget as fast as many `small` ones; "always build at least one thing" still holds even
+if the very first issue's points alone exceed the budget. Build-session turns scale off the
+selected points total (`base-max-turns + 10×points`) instead of raw issue count — a drop-in
+equivalent at the medium (2pt) default, but now reflects real estimated work for a
+mixed-effort batch.
+
+**Model escalation.** Default stays sonnet (proven, near-Opus on codegen with CI +
+security-review gating every PR). Auto-escalates to opus only on a **sensed** signal — the
+selected batch itself carries `security` or `effort:large` — never blindly. This supersedes
+the earlier "opus is opt-in only, prove it manually first" stance: the signal reuses data
+`select` was already computing for tier/points, so it costs nothing extra to check, and a
+bad escalation self-heals the same way any failed build does (no commit → claims released,
+retried). `model-hint` still overrides in either direction — set it explicitly to force
+sonnet even when the batch would sense opus, or force opus on a batch that wouldn't.
+Rationale: maximize the rate of *meaningful* work — sonnet by default keeps throughput and
+cost down for the common case, opus only spends more where the batch already signals it's
+worth it.
+
+Deliberately NOT built: per-issue file-overlap/parallelism prediction ("smart clustering").
+That's the exact fragile pass §3.1's opening paragraph documents as already ripped out —
+asked a read-only model session to judge file overlap across candidates in a few turns, it
+couldn't, the run built nothing. The parallelism dimension lives at build time instead, in
+the model's own Task-tool subagent fan-out judgment (`fan: parallel`) once it's holding the
+bundle — not re-predicted ahead of time by a second, cheaper, less-informed pass.
 
 ### 3.2 Loop 2 — green → merge (native auto-merge, not a merge queue)
 

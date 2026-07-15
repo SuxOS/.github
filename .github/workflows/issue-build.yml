@@ -12,10 +12,13 @@ name: Issue build — grab top-priority issues, one builder, one PR (reusable)
 #   1. select (deterministic shell — no LLM): from open buildable issues (trusted author,
 #      not building/hold/needs-human), take the highest NON-EMPTY priority tier —
 #      HIGH (`priority:high` or `security`) else MED (`priority:med`) else LOW (everything
-#      else — the floor, so there is always something to build). Cap oldest-first at
-#      `max-issues`. Claim each (`building`) so a concurrent run can't double-process it.
-#      Build on sonnet (the design model; Opus reserved for the nightly audits — opt in via
-#      model-hint) and scale turns by the count.
+#      else — the floor, so there is always something to build). Pack oldest-first by
+#      `effort:small|medium|large` points (1/2/4; unlabeled = medium) against
+#      `effort-budget`, capped at `max-issues` either way — a bundle sized by real work, not
+#      just issue count. Claim each (`building`) so a concurrent run can't double-process it.
+#      Build on sonnet by default; auto-escalates to opus only when the batch itself carries
+#      `security` or `effort:large` (a sensed signal, not a blind auto-escalation) — or force
+#      either way with `model-hint`. Turns scale with the batch's effort points.
 #   2. build (ONE job — not a matrix): one Claude session gets all N issue numbers, makes
 #      the optimal build plan, implements them as ONE coherent change (fanning out to its
 #      own subagents for issues that are independent), runs the repo's gates, and opens ONE
@@ -51,6 +54,15 @@ on:
         # 20; raised again 2026-07-15 for a 24h/15min-cadence drain — turns cap and job timeout
         # below were raised together, since turns (not issue count) saturates first otherwise.
         default: 40
+      effort-budget:
+        description: >-
+          Points budget for the bundle, oldest-first within the chosen tier: small=1,
+          medium=2 (the default for an issue with no effort:* label), large=4. Sized so
+          the batch reflects actual work, not just issue count — a few large issues fill
+          it as fast as many small ones. Selection stops at whichever of max-issues or
+          effort-budget is hit first (both are hard caps).
+        type: number
+        default: 80
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
@@ -141,6 +153,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REAP_STALE_HOURS: "2"
           MAX_ISSUES: ${{ inputs.max-issues }}
+          EFFORT_BUDGET: ${{ inputs.effort-budget }}
           INCLUDE: ${{ inputs.include }}
           EXCLUDE: ${{ inputs.exclude }}
           MODEL_HINT: ${{ inputs.model-hint }}
@@ -180,7 +193,11 @@ jobs:
           # guarded so an unset knob never accidentally matches/excludes everything).
           include_csv="${INCLUDE:-}"; exclude_csv="${EXCLUDE:-}"
 
-          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" \
+          # Effort points: small=1, medium=2 (also the default for an unlabeled issue — most
+          # of today's backlog predates the effort:* label), large=4. Deterministic lookup
+          # only — no model call here, the estimate was already made by whichever session
+          # (fixer / a prior build's observation-capture) filed the issue.
+          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" --argjson budget "$EFFORT_BUDGET" \
               --arg include "$include_csv" --arg exclude "$exclude_csv" '
             ($include | if length > 0 then split(",") else [] end) as $inc
             | ($exclude | if length > 0 then split(",") else [] end) as $exc
@@ -191,6 +208,11 @@ jobs:
               | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login == "suxbot[bot]"))
               | select(($inc | length) == 0 or (($inc - $l) | length) < ($inc | length))
               | select(($exc | length) == 0 or (($exc - $l) | length) == ($exc | length));
+            def points:
+              if   (. | any(. == "effort:large")) then 4
+              elif (. | any(. == "effort:small")) then 1
+              else                                      2
+              end;
             [ .[][] | buildable | { number, body, labels: (.labels | map(.name)) } ] as $c
             | ($c | map(select((.labels | any(. == "priority:high" or . == "security"))))) as $high
             | ($c | map(select(.labels | any(. == "priority:med")))) as $med
@@ -198,35 +220,58 @@ jobs:
             | (if   ($high|length) > 0 then {tier:"high", set:$high}
                elif ($med|length)  > 0 then {tier:"med",  set:$med}
                else                          {tier:"low",  set:$low} end) as $chosen
-            | ($chosen.set | sort_by(.number) | .[0:$n]) as $picked
+            | ($chosen.set | sort_by(.number) | map(. + {pts: (.labels | points)})) as $sorted
+            # Greedy pack, oldest-first: keep adding while under BOTH caps (count, points).
+            # Always take at least one issue even if its own points exceed the budget alone —
+            # "always build at least one thing" (three-loop-pipeline.md) is never overridden
+            # by the effort budget.
+            | (reduce $sorted[] as $it
+                 ({picked: [], cum: 0, stopped: false};
+                  if .stopped then .
+                  elif (.picked | length) >= $n then . + {stopped: true}
+                  elif (.picked | length) == 0 then {picked: [$it], cum: $it.pts, stopped: false}
+                  elif (.cum + $it.pts) <= $budget then {picked: (.picked + [$it]), cum: (.cum + $it.pts), stopped: false}
+                  else . + {stopped: true}
+                  end)
+              ) as $pack
             | { tier: $chosen.tier,
-                numbers: ($picked | map(.number)),
-                count: ($picked | length) }')
+                numbers: ($pack.picked | map(.number)),
+                count: ($pack.picked | length),
+                points: $pack.cum,
+                sensed_opus: ($pack.picked | any(.labels | any(. == "security" or . == "effort:large"))) }')
 
           tier=$(echo "$plan" | jq -r '.tier')
           numbers=$(echo "$plan" | jq -c '.numbers')
           count=$(echo "$plan" | jq -r '.count')
-          echo "selected tier=$tier count=$count issues=$numbers"
+          points=$(echo "$plan" | jq -r '.points')
+          sensed_opus=$(echo "$plan" | jq -r '.sensed_opus')
+          echo "selected tier=$tier count=$count points=$points/${EFFORT_BUDGET} sensed_opus=$sensed_opus issues=$numbers"
 
-          # Model: auto = the builder's design model (sonnet) — three-loop-pipeline.md reserves
-          # scarce Opus budget for the nightly deep-audit/org-consistency passes, and Sonnet is
-          # near-Opus on codegen with CI + security-review gating every resulting PR. Opus for
-          # the builder is opt-in via model-hint (e.g. model-hint=opus), never automatic — an
-          # auto-escalation to opus here both contradicted that decision and failed at runtime
-          # (opus-via-OAuth is not exercised anywhere in this org; sonnet is proven by fixer).
+          # Model: auto = sonnet by default (three-loop-pipeline.md — Sonnet is near-Opus on
+          # codegen with CI + security-review gating every resulting PR); auto-ESCALATES to
+          # opus only on a deterministic sensed signal — the selected batch carries `security`
+          # or `effort:large` — because that's the same real signal already driving tier/points
+          # selection above, not a new judgment call. model-hint always overrides both (manual
+          # override wins over sensing, e.g. model-hint=sonnet forces sonnet even if sensed).
           if [ "$MODEL_HINT" = "auto" ]; then
-            model="$SIMPLE_MODEL"
+            if [ "$sensed_opus" = "true" ]; then
+              model="opus"
+              echo "sensed security/large-effort in batch -> auto-escalating to opus"
+            else
+              model="$SIMPLE_MODEL"
+            fi
           else
             model="$MODEL_HINT"
           fi
 
-          # Turns scale with issue count, then speed: fast halves the budget (cheaper,
-          # quicker, less exploration); thorough (default) keeps the full scaled budget.
-          # Cap raised 300 -> 500 alongside max-issues 2026-07-15: at the old cap, turn budget
-          # (not issue count) saturated at count ~13 — a 40-issue batch would run out of turns
-          # before finishing, not build 40 issues. 500 keeps headroom to ~22 before re-saturating;
-          # a batch above that still runs, just on a flatter per-issue turn budget past the cap.
-          turns=$(( BASE_TURNS + 20 * count ))
+          # Turns scale with selected effort points (not raw issue count — a few large issues
+          # cost as much attention as many small ones), then speed: fast halves the budget;
+          # thorough (default) keeps the full scaled budget. 10 turns/point keeps this a drop-in
+          # replacement for the old 20-turns/issue formula at the medium (2pt) default. Cap
+          # raised 300 -> 500 alongside max-issues 2026-07-15: turn budget (not issue count)
+          # was already the thing that saturated first; a batch above the cap still runs, just
+          # on a flatter per-point turn budget past it.
+          turns=$(( BASE_TURNS + 10 * points ))
           [ "$SPEED" = "fast" ] && turns=$(( turns / 2 ))
           [ "$turns" -lt 10 ] && turns=10
           [ "$turns" -gt 500 ] && turns=500
@@ -345,7 +390,9 @@ jobs:
                using the Write tool (absolute path, OUTSIDE the repo tree so it is never
                committed). Each element: {"title": short imperative, "body": what/why with
                file:line refs, "type": one of "bug"|"enhancement"|"documentation", "security":
-               true/false}. A lesson-worth-recording is a "documentation" observation. Rules:
+               true/false, "effort": your rough gut estimate — "small"|"medium"|"large" (sizes
+               how much work it looks like; only affects future batch sizing, not a commitment)}.
+               A lesson-worth-recording is a "documentation" observation. Rules:
                at most 3 — the best ones, not a brain-dump; nothing already covered by an open
                issue (check `gh issue list --state open --limit 300` first); nothing that is
                just one of the issues you already built. If you have nothing that clears that
@@ -441,6 +488,7 @@ jobs:
             body=$(echo "$p" | jq -r '.body // empty')
             type=$(echo "$p" | jq -r '.type // empty')
             security=$(echo "$p" | jq -r '.security // false')
+            effort=$(echo "$p" | jq -r '.effort // empty')
             [ -z "$title" ] || [ -z "$body" ] && { echo "::warning::skipping observation with empty title/body"; continue; }
 
             case "$type" in bug|enhancement|documentation) ;; *)
@@ -456,6 +504,8 @@ jobs:
             # would silently drop the observation). Same label set fixer.yml files with.
             label_args=(--label "$type")
             [ "$security" = "true" ] && label_args+=(--label security)
+            # Missing/invalid effort is not fatal — select's default (medium) covers it.
+            case "$effort" in small|medium|large) label_args+=(--label "effort:$effort") ;; esac
 
             if url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}" 2>/dev/null); then
               echo "filed observation: $url"
