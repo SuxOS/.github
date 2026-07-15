@@ -1,0 +1,22 @@
+name: Self PR watch
+
+# Read-only stuck-PR visibility on THIS repo — see self-fixer.yml for the self-*
+# pattern. Never merges or mutates a PR; maintains a rolling tracking issue that
+# flags BEHIND/failing/idle-green PRs so a stuck self-built PR (issue #189) at
+# least surfaces instead of silently rotting forever.
+
+on:
+  schedule: [{ cron: "27 9 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  watch:
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+      checks: read
+      statuses: read
+      actions: read
+    uses: SuxOS/.github/.github/workflows/pr-watch.yml@main
+    secrets: inherit
