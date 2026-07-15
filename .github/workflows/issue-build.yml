@@ -36,20 +36,43 @@ name: Issue build — grab top-priority issues, one builder, one PR (reusable)
 on:
   workflow_call:
     inputs:
+      # --- KNOBS: all deterministic (the orchestrator must be deterministic even though the
+      #     builder isn't). include/exclude/max-issues/model-hint/speed are applied in the
+      #     shell select step; only `fan` reaches the model, as a planning hint. ---
       max-issues:
-        description: "Max issues pulled into one build/PR per run, oldest-first within the chosen tier. Bounds spend + review size; the rest wait for the next run."
+        description: "Batch-size max: issues pulled into one build/PR per run, oldest-first within the chosen tier."
         type: number
         default: 8
+      include:
+        description: "Comma-list of labels; if set, only issues carrying at least one are eligible (also does priority, e.g. `priority:high` or `bug,security`)."
+        type: string
+        default: ""
+      exclude:
+        description: "Comma-list of labels; issues carrying any are dropped (e.g. `enhancement,wontfix`)."
+        type: string
+        default: ""
+      model-hint:
+        description: "`auto` = pick model from batch complexity; or force `opus`/`sonnet`/`haiku`."
+        type: string
+        default: "auto"
+      speed:
+        description: "`thorough` = full turn budget; `fast` = trimmed (cheaper, quicker)."
+        type: string
+        default: "thorough"
+      fan:
+        description: "`parallel` = builder fans out to subagents for independent issues; `serial` = one at a time."
+        type: string
+        default: "parallel"
       simple-model:
-        description: "Model for a small/simple batch."
+        description: "Model for a small/simple batch when model-hint=auto."
         type: string
         default: "sonnet"
       complex-model:
-        description: "Model for a high-tier / large / security batch."
+        description: "Model for a high-tier / large / security batch when model-hint=auto."
         type: string
         default: "opus"
       base-max-turns:
-        description: "Turn budget floor for the build session; scaled up by issue count."
+        description: "Turn budget floor for the build session; scaled up by issue count, then by speed."
         type: number
         default: 50
       gates-summary:
@@ -110,6 +133,10 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REAP_STALE_HOURS: "2"
           MAX_ISSUES: ${{ inputs.max-issues }}
+          INCLUDE: ${{ inputs.include }}
+          EXCLUDE: ${{ inputs.exclude }}
+          MODEL_HINT: ${{ inputs.model-hint }}
+          SPEED: ${{ inputs.speed }}
           SIMPLE_MODEL: ${{ inputs.simple-model }}
           COMPLEX_MODEL: ${{ inputs.complex-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
@@ -142,12 +169,21 @@ jobs:
             exit 1
           fi
 
-          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" '
-            def buildable:
+          # include/exclude are comma-lists; empty means "no filter" (jq: empty split -> [""],
+          # guarded so an unset knob never accidentally matches/excludes everything).
+          include_csv="${INCLUDE:-}"; exclude_csv="${EXCLUDE:-}"
+
+          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" \
+              --arg include "$include_csv" --arg exclude "$exclude_csv" '
+            ($include | if length > 0 then split(",") else [] end) as $inc
+            | ($exclude | if length > 0 then split(",") else [] end) as $exc
+            | def buildable:
               select(has("pull_request") | not)
               | (.labels | map(.name)) as $l
               | select(([ "building","hold","needs-human" ] - $l) | length == 3)
-              | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login == "suxbot[bot]"));
+              | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login == "suxbot[bot]"))
+              | select(($inc | length) == 0 or (($inc - $l) | length) < ($inc | length))
+              | select(($exc | length) == 0 or (($exc - $l) | length) == ($exc | length));
             [ .[][] | buildable | { number, body, labels: (.labels | map(.name)) } ] as $c
             | ($c | map(select((.labels | any(. == "priority:high" or . == "security"))))) as $high
             | ($c | map(select(.labels | any(. == "priority:med")))) as $med
@@ -167,13 +203,22 @@ jobs:
           bodysize=$(echo "$plan" | jq -r '.bodysize')
           echo "selected tier=$tier count=$count issues=$numbers"
 
-          # Model + turns from BATCH complexity: high tier, a big batch, or lots of prose
-          # earns the complex model. Turns scale with issue count.
-          model="$SIMPLE_MODEL"
-          if [ "$tier" = "high" ] || [ "$count" -ge 6 ] || [ "$bodysize" -ge 6000 ]; then
-            model="$COMPLEX_MODEL"
+          # Model: model-hint=auto picks from BATCH complexity (high tier, a big batch, or
+          # lots of prose earns the complex model); any other value forces that model.
+          if [ "$MODEL_HINT" = "auto" ]; then
+            model="$SIMPLE_MODEL"
+            if [ "$tier" = "high" ] || [ "$count" -ge 6 ] || [ "$bodysize" -ge 6000 ]; then
+              model="$COMPLEX_MODEL"
+            fi
+          else
+            model="$MODEL_HINT"
           fi
+
+          # Turns scale with issue count, then speed: fast halves the budget (cheaper,
+          # quicker, less exploration); thorough (default) keeps the full scaled budget.
           turns=$(( BASE_TURNS + 20 * count ))
+          [ "$SPEED" = "fast" ] && turns=$(( turns / 2 ))
+          [ "$turns" -lt 10 ] && turns=10
           [ "$turns" -gt 300 ] && turns=300
 
           # Claim each selected issue so a concurrent run can't double-process it.
@@ -226,6 +271,7 @@ jobs:
           TIER: ${{ needs.select.outputs.tier }}
           COUNT: ${{ needs.select.outputs.count }}
           GATES_SUMMARY: ${{ inputs.gates-summary }}
+          FAN_HINT: ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
           ENABLE_PROMPT_CACHING_1H: "1"
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
@@ -238,9 +284,7 @@ jobs:
 
             Read each with `gh issue view <n>`. Then:
 
-            1. PLAN. Work out the optimal build plan across all of them. Independent issues
-               (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with
-               the Task tool, one subagent per independent issue or group, each on its own piece.
+            1. PLAN. Work out the optimal build plan across all of them. $FAN_HINT
                Issues that touch the same files or depend on each other are done together, in
                order, to stay coherent. You have the whole batch in view, so collate naturally:
                dedupe overlapping work, and drop an issue from THIS PR if it turns out
