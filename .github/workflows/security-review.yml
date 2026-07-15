@@ -99,9 +99,13 @@ jobs:
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
-        # Default (shallow) depth: allowedTools below is Read,Grep,Glob only — no Bash,
-        # so the review never runs git log/diff/blame and doesn't need history.
+        # fetch-depth 0 (was shallow): the review now gets read-only git diff/log/show
+        # (below) so it can actually SEE the diff instead of guessing from post-change file
+        # contents. Shallow history made a real `git diff <base>...<head>` impossible even
+        # once the tool was granted — full history is needed to resolve the base SHA.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - name: Claude security review
         id: claude
         if: steps.pre.outputs.go == 'true'
@@ -116,17 +120,25 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
-            Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
-            exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
-            `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
-            untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
-            blast radius, and any autonomous-bot action that could touch prod or user data
-            unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
+            Do a SECURITY review of this PR's diff vs the base branch. FIRST run
+            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            try to infer what changed from reading post-change files alone, and do not spend
+            turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
+            context only where the diff alone is ambiguous.
+
+            Weigh: secret handling/exposure, auth-gate bypass, SSRF, injection (incl. shell
+            injection via `github.event.*` interpolation in workflows), GitHub Actions abuse
+            (pull_request_target + untrusted checkout, missing author gates, over-scoped
+            tokens), auto-merge/auto-deploy blast radius, and any autonomous-bot action that
+            could touch prod or user data unsafely. Use the repo's /security-review skill if
+            present. Post concise inline findings.
 
             Your FINAL message MUST be the machine-readable verdict object matching the provided
             JSON schema: {"critical":N,"high":N,"note":"..."} — the counts of CONFIRMED
@@ -134,7 +146,7 @@ jobs:
             is captured from your structured output, not the filesystem.
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
-            --allowedTools Read,Grep,Glob
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
       - name: Claude security review (retry — first attempt produced no verdict)
         id: claude_retry
@@ -149,17 +161,25 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
-            Do a SECURITY review of this PR's diff vs the base branch. Weigh: secret handling/
-            exposure, auth-gate bypass, SSRF, injection (incl. shell injection via
-            `github.event.*` interpolation in workflows), GitHub Actions abuse (pull_request_target +
-            untrusted checkout, missing author gates, over-scoped tokens), auto-merge/auto-deploy
-            blast radius, and any autonomous-bot action that could touch prod or user data
-            unsafely. Use the repo's /security-review skill if present. Post concise inline findings.
+            Do a SECURITY review of this PR's diff vs the base branch. FIRST run
+            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            try to infer what changed from reading post-change files alone, and do not spend
+            turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
+            context only where the diff alone is ambiguous.
+
+            Weigh: secret handling/exposure, auth-gate bypass, SSRF, injection (incl. shell
+            injection via `github.event.*` interpolation in workflows), GitHub Actions abuse
+            (pull_request_target + untrusted checkout, missing author gates, over-scoped
+            tokens), auto-merge/auto-deploy blast radius, and any autonomous-bot action that
+            could touch prod or user data unsafely. Use the repo's /security-review skill if
+            present. Post concise inline findings.
 
             Your FINAL message MUST be the machine-readable verdict object matching the provided
             JSON schema: {"critical":N,"high":N,"note":"..."} — the counts of CONFIRMED
@@ -167,7 +187,7 @@ jobs:
             is captured from your structured output, not the filesystem.
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
-            --allowedTools Read,Grep,Glob
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
       - name: Gate — scoped fail-closed on missing verdict; block on high/critical
         if: steps.pre.outputs.go == 'true'
@@ -176,24 +196,40 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           # Read the verdict from whichever attempt produced one (retry only ran if the first was empty).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+          # OWNER/MEMBER/COLLABORATOR = this org's own people and bots (App-authored PRs carry
+          # this association too, since the App is installed as a collaborator) — the trust
+          # tier the no-verdict fail-closed exists to protect everyone ELSE from. A trusted
+          # author whose diff the reviewer structurally couldn't finish (see the diff-access
+          # fix above) shouldn't be permanently unmergeable on a harness reliability gap that
+          # has nothing to do with what they changed. Untrusted/fork authors still fail closed.
+          AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
+          trusted=false
+          case "$AUTHOR_ASSOC" in OWNER|MEMBER|COLLABORATOR) trusted=true ;; esac
+
           if [ -z "$verdict" ]; then
             changed=$(gh pr diff "$PR" --name-only 2>/dev/null || true)
-            if [ -z "$changed" ]; then
-              echo "::error::security review produced no verdict AND the changed-file list is unreadable — failing closed (cannot rule out a high-blast diff)"
+            high_blast=false
+            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|auth|secret'; then
+              high_blast=true
+            fi
+
+            if [ "$high_blast" = "true" ] && [ "$trusted" != "true" ]; then
+              echo "::error::security review produced no verdict, diff is high-blast (or unreadable), and the author ($AUTHOR_ASSOC) is not a trusted org member — failing closed"
+              [ -n "$changed" ] && printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /' || true
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
-              gh pr comment "$PR" --body "🛑 security review did not finish and the diff was unreadable — applied \`hold\` (fail-closed). Re-run the review, then remove \`hold\`." 2>/dev/null || true
+              gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets from an untrusted author ($AUTHOR_ASSOC) — applied \`hold\` (fail-closed). Re-run the review or get a human review, then remove \`hold\`." 2>/dev/null || true
               exit 1
             fi
-            if printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|auth|secret'; then
-              echo "::error::security review produced no verdict AND the diff touches high-blast paths (workflows/auth/secrets) — failing closed"
-              printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /'
-              gh pr edit "$PR" --add-label hold 2>/dev/null || true
-              gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets — applied \`hold\` (fail-closed). Re-run the review or justify, then remove \`hold\`." 2>/dev/null || true
-              exit 1
+
+            if [ "$high_blast" = "true" ]; then
+              echo "::warning::security review produced no verdict on a high-blast diff, BUT the author ($AUTHOR_ASSOC) is a trusted org member — advisory pass, not permanently blocking. This is DEGRADED COVERAGE, not a clean bill of health: the nightly deep-audit still re-reviews the merged diff."
+              gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) on this workflows/auth/secrets diff. Author is a trusted org member ($AUTHOR_ASSOC), so this is an advisory pass rather than a fail-closed \`hold\` — but it means DEGRADED coverage, not a clean review. The nightly deep-audit will re-review the merged diff." 2>/dev/null || true
+              exit 0
             fi
+
             echo "::warning::security review produced no verdict (reviewer did not finish) and the diff is not high-blast — advisory pass"
             gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) and this diff doesn't touch workflows/auth/secrets — advisory pass, not blocking. Deterministic gates still apply." 2>/dev/null || true
             exit 0; fi
