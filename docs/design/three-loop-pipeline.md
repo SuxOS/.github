@@ -227,8 +227,60 @@ Deliberately NOT built: per-issue file-overlap/parallelism prediction ("smart cl
 That's the exact fragile pass §3.1's opening paragraph documents as already ripped out —
 asked a read-only model session to judge file overlap across candidates in a few turns, it
 couldn't, the run built nothing. The parallelism dimension lives at build time instead, in
-the model's own Task-tool subagent fan-out judgment (`fan: parallel`) once it's holding the
-bundle — not re-predicted ahead of time by a second, cheaper, less-informed pass.
+the model's own Task-tool subagent fan-out judgment once it's holding the bundle (§3.1.5) —
+not re-predicted ahead of time by a second, cheaper, less-informed pass.
+
+#### 3.1.5 Builder strategy freedom, real data over defensive guessing, KISS (2026-07-15)
+
+Operator directive: "more freedom in the builder to design build plan... we don't want
+knobs for knob's sake... high throughput of useful work... KISS as always." Three moves,
+each grounded in something checked rather than assumed:
+
+**Strategy is the builder's call, not a pre-decided flag.** The `fan: parallel|serial` input
+is deleted. It was the orchestrator picking an execution shape before the model had even
+read the issues. The build prompt now hands the model its turn budget and wall-clock ceiling
+and lets it choose: parallel Task-tool fan-out for independent issues (the common default),
+serial for issues that share files or depend on each other, or a first-fast-pass +
+second-careful-pass shape for a batch that mixes easy and hard issues — whichever actually
+fits *this* batch. This is real freedom because it costs nothing new: the model already had
+Task-tool access, only the orchestrator's forced flag is gone. Explicitly out of scope: a
+staging branch where fast parallel attempts (across multiple concurrent Actions jobs) dump
+into a shared branch for a heavier single-model reconciler pass to clean up. That's a real,
+available design (two sequential jobs — a cheap one, then one conditional on the first
+leaving work unresolved) if a single build session ever proves insufficient. It is not built
+today: real throughput data (below) shows no bottleneck it would fix, and it would
+reintroduce concurrent-writer conflict handling this repo does not need yet. YAGNI, not
+never.
+
+**The 90-minute timeout was a defensive guess; 30 is a measurement.** It was raised to 90
+alongside the turns cap (300→500, §3.1.3) without checking actual run time. Once real batches
+ran at the new cap — 17 and 19 issues, SuxOS/sux runs 29430528029/29427921788 and
+SuxOS/suxrouter run 29430530912 — they completed in **6.5 to 15 minutes**. The Claude step is
+API-latency-bound, not something a bigger ceiling makes faster; the one CPU-bound setup step
+observed (`npm ci` + LSP install) took 11 seconds. 30 minutes is ~2x the observed worst case:
+a real backstop, not routine headroom. The build prompt also now tells the model its actual
+budget and instructs it to trim scope (drop the lowest-value remaining issues, they retry
+later) rather than let a run approach the ceiling — "ship most of the batch solidly beats
+risking all of it."
+
+**No runner upgrade, checked not assumed.** The org is on GitHub Enterprise (larger hosted
+runners are actually available), but the timing data above shows no CPU/memory bottleneck —
+the bottleneck is LLM round-trip latency, which runner size does not touch. Not spending
+budget on an unverified guess; revisit only if a future gates step (lint/type-check/test)
+shows real CPU-bound slowness.
+
+**Bash/jq → real JS (`actions/github-script`), the org's own already-pinned convention.**
+The select step's greedy-pack was a jq `reduce` — the most complex, most escaping-prone shell
+in the pipeline, and shell/jq quoting was flagged directly as a recurring source of pipeline
+friction (operator feedback, 2026-07-15: "bash escaping ... really fuck us up"). Migrated
+select, fixer's proposal-filing, and the builder's observation-filing to
+`actions/github-script@3a2844b...#v9.0.0` — already used org-wide (`audit.yml`,
+`sux/deploy.yml`, `sux/health.yml`), so this is consistency with an established pattern, not
+a new dependency. Real JS gets try/catch instead of `|| true` swallowing errors, structured
+JSON handling instead of jq pipelines, and `core.summary` job-summary tables for free — a
+genuine observability win, not just a paradigm swap. `check-throttle` and `flood-guard` were
+left as single-line jq/grep — already simple, already working, converting them would be
+churn without a corresponding safety win.
 
 ### 3.2 Loop 2 — green → merge (native auto-merge, not a merge queue)
 
