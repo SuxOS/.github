@@ -264,6 +264,23 @@ jobs:
           git checkout -B "$BRANCH"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
+      # Give the builder real symbol-aware navigation instead of grep-and-hope. Runner starts
+      # clean each time (no local plugin config carries over), so nothing is set up unless this
+      # step does it. Gated on tsconfig.json — a non-TS repo (e.g. suxrouter) skips entirely.
+      # Installs real deps (npm ci) BEFORE the Claude session starts so the language server
+      # resolves actual project types from turn one, not bare syntax.
+      - name: Set up TypeScript language server (if this repo is TS-shaped)
+        id: lsp
+        run: |
+          set -euo pipefail
+          if [ -f tsconfig.json ]; then
+            npm ci --no-audit --no-fund
+            npm install -g typescript-language-server typescript
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Claude — plan and build the batch into one PR
         id: claude
         env:
@@ -272,6 +289,7 @@ jobs:
           COUNT: ${{ needs.select.outputs.count }}
           GATES_SUMMARY: ${{ inputs.gates-summary }}
           FAN_HINT: ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
+          LSP_HINT: ${{ steps.lsp.outputs.ready == 'true' && 'A TypeScript language server is running for this repo — prefer the LSP tool (goToDefinition/findReferences/hover) over grep for navigating symbols, checking call sites before a rename, and confirming types.' || '' }}
           ENABLE_PROMPT_CACHING_1H: "1"
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
@@ -293,6 +311,7 @@ jobs:
 
             2. BUILD. Make the smallest correct change for each issue. Do NOT touch secrets, do
                NOT weaken a test to make it pass, do NOT touch code unrelated to these issues.
+               $LSP_HINT
 
             3. GATE. All of these must pass before you commit:
                $GATES_SUMMARY
