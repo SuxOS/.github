@@ -171,14 +171,16 @@ jobs:
     secrets: inherit
 YAML
 
-emit waitch <<YAML
-name: Waitch
+# Deliberately slow (daily) — pr-unstick is a patient long-lived-unstuck mechanism, not
+# a fast retry loop. See pr-unstick.yml's header for why.
+emit pr-unstick <<YAML
+name: PR unstick
 on:
-  schedule: [{ cron: "0 */6 * * *" }]
+  schedule: [{ cron: "23 4 * * *" }]
   workflow_dispatch:
 jobs:
-  waitch:
-    uses: $REPO/.github/workflows/waitch.yml@$REF
+  pr-unstick:
+    uses: $REPO/.github/workflows/pr-unstick.yml@$REF
     secrets: inherit
 YAML
 
@@ -252,20 +254,9 @@ jobs:
 YAML
 
 # Batch schedules, not issues: triggers (2026-07 redesign, docs/design/budget-and-cadence.md):
-# per-issue triggers fanned out one Opus session per event during fixer bursts. A staggered
-# batch keeps triage/build at a handful of sessions per day; stagger the minutes per repo so
+# per-issue triggers fanned out one session per event during fixer bursts. A staggered batch
+# keeps the builder at a handful of sessions per day; stagger the minutes per repo so
 # concurrent repos don't stack sessions inside one 5-hour subscription window.
-
-emit triage <<YAML
-name: Triage
-on:
-  schedule: [{ cron: "7 5,13,21 * * *" }]
-  workflow_dispatch:
-jobs:
-  triage:
-    uses: $REPO/.github/workflows/triage.yml@$REF
-    secrets: inherit
-YAML
 
 emit issue-build <<YAML
 name: Issue build
@@ -286,8 +277,7 @@ Caller stubs scaffolded. Remaining manual steps (see README):
   - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, SUX_BOT_APP_ID,
     SUX_BOT_PRIVATE_KEY. (CI billing is subscription-based via
     CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
-  - Create labels: queued-for-build, building, triaged, confidence:high|medium|low,
-    automerge, needs-review, needs-human, hold.
+  - Create labels: building, needs-human, automerge, hold.
   - Protect main with a repository RULESET (Settings → Rules → Rulesets), NOT
     classic branch protection: assert-branch-protection.yml runs with the App
     token, and GitHub hard-403s a classic-protection read for App tokens (a

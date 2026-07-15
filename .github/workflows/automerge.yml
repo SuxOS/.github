@@ -5,13 +5,12 @@ name: Auto-merge (reusable)
 # an auto-deploying main. This job only *enables* auto-merge; it never force-merges.
 # Merge method: squash.
 #
-# Eligibility (the safe, hands-off subset):
-#   - a conventional-commit "safe type" title: fix|security|perf|refactor|chore|docs|test|build|ci|revert
-#     OR an explicit eligible label: automerge | bug | security | chore-safe
-#   - AND not a draft, not labelled `hold`, not a breaking `!` title.
-#     (A `feature` label no longer vetoes: a feature PR that ALSO carries a safe-type title or
-#     an eligible label is as safe to auto-merge as any other such PR — CI + security-review
-#     still gate it. `feature` is simply no longer read here.)
+# Eligibility (2026-07-15, three-loop-pipeline.md Phase 1): not a draft, and not
+# labelled `hold`. That's the whole predicate. The prior safe-type-title/eligible-label/
+# breaking-change taxonomy is gone — on a private, single-operator repo it was re-encoding
+# "did CI + security-review pass," which native auto-merge + branch protection already
+# enforce as the actual merge condition. `hold` (applied only by a CONFIRMED critical/high
+# security finding, or by hand) is the one write-gate; everything else is advisory.
 #
 # Uses pull_request_target (base-repo context, write token) but never checks out PR
 # code — it only reads the event payload and calls the API.
@@ -60,20 +59,12 @@ jobs:
   enable-automerge:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # PUBLIC REPO: only auto-merge PRs from trusted authors, the org's own bot
-    # (`suxbot[bot]`, a first-class trusted author — matched by login so this holds
-    # regardless of what author_association an App-token PR resolves to), or any
-    # other Bot-authored PR carrying `self-improve` (addable only by trusted write
-    # access). The org bot still passes the eligibility predicate + every required
-    # gate below; trusting it here only means the pipeline's OWN plumbing never
-    # withholds auto-merge from it — a confirmed security finding still blocks it.
-    if: >
-      github.event.pull_request.state == 'open' &&
-      (
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) ||
-        github.event.pull_request.user.login == 'suxbot[bot]' ||
-        (github.event.pull_request.user.type == 'Bot' && contains(github.event.pull_request.labels.*.name, 'self-improve'))
-      )
+    # No author-trust gate: the repos are PRIVATE (verified 2026-07-15) — there is no
+    # anonymous-fork attacker, so gating on author_association/bot-login/self-improve
+    # defended against an actor that can't exist here. Draft/hold are checked below in
+    # the run step (structural filters); a confirmed security finding still blocks via
+    # `hold`, applied by security-review.yml on a CONFIRMED critical/high verdict.
+    if: github.event.pull_request.state == 'open'
     steps:
       - name: Mint app token
         id: app-token
@@ -99,27 +90,6 @@ jobs:
           # disabling this fail-closed gate instead of erroring loudly.
           base-branch: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
 
-      # Serialize this PR's number/title/labels into the array shape the shared
-      # eligibility action expects (single-element array).
-      - name: Build eligibility payload
-        id: payload
-        env:
-          PR_NUM: ${{ github.event.pull_request.number }}
-          TITLE: ${{ github.event.pull_request.title }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, '\n') }}
-        run: |
-          set -euo pipefail
-          prs=$(jq -cn --argjson n "$PR_NUM" --arg t "$TITLE" --arg l "$LABELS" \
-            '[{number: $n, title: $t, labels: ($l | split("\n") | map(select(. != "")))}]')
-          echo "prs-json=$prs" >> "$GITHUB_OUTPUT"
-
-      # Shared safe-type/label/breaking core predicate (single source of truth).
-      - name: Evaluate shared eligibility predicate
-        id: eligible
-        uses: SuxOS/.github/.github/actions/pr-eligibility@main
-        with:
-          prs-json: ${{ steps.payload.outputs.prs-json }}
-
       - name: Decide eligibility and enable auto-merge
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -128,7 +98,6 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
           DRAFT: ${{ github.event.pull_request.draft }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
         run: |
           set -euo pipefail
           echo "PR #$PR_NUM  title=$TITLE  draft=$DRAFT  labels=$LABELS"
@@ -142,16 +111,10 @@ jobs:
             exit 0
           }
 
-          # Caller-specific structural filters (kept here, not in the shared action).
-          # NOTE: `feature` is intentionally NOT a filter — a feature PR auto-merges iff it
-          # independently satisfies the shared eligibility predicate below (safe-type title or
-          # eligible label), same bar as any other PR. CI + security-review still gate it.
+          # The whole predicate: not draft, not held. CI + security-review are enforced by
+          # native auto-merge waiting on branch-protection required checks, not re-checked here.
           if [ "$DRAFT" = "true" ]; then ineligible "draft"; fi
           if has_label hold;    then ineligible "hold label"; fi
-
-          # Shared core predicate (safe-type/label/breaking) via pr-eligibility.
-          if ! printf ' %s ' "$ELIGIBLE_NUMBERS" | grep -qw "$PR_NUM"; then
-            ineligible "feature, breaking-change, or unlabeled PR"; fi
 
           echo "eligible → enabling native auto-merge (squash)"
           gh pr merge --auto --squash "$PR_URL" || {

@@ -1,0 +1,166 @@
+name: PR unstick — periodic retry for needs-human PRs (reusable)
+
+# Long-lived unstuck mechanism (docs/design/three-loop-pipeline.md §3.3 extension,
+# 2026-07-15).
+#
+# The rebase/autofix ladder (pr-auto-update.yml -> claude-autofix.yml) already bounds
+# itself: claude-autofix.yml gives up after `max-attempts` bot commits and tags
+# `needs-human`. Without this workflow, `needs-human` is a dead end until either the
+# operator notices and removes the label, or pr-drain.yml's close-stale sweep closes the
+# PR after `stale-days` (14) of inactivity. That's a long silent gap for a solo operator
+# who isn't glued to notifications — and it wastes a PR that might unstick itself for
+# free: CI failures are sometimes flaky (network blip, OIDC hiccup — the same class of
+# harness unreliability security-review.yml's no-verdict fix already treats as noise, not
+# signal), and merge conflicts sometimes resolve themselves when main moves again.
+#
+# This does NOT spend a fresh LLM autofix attempt — that budget was already spent and
+# exhausted per-PR by claude-autofix.yml. It only does the two FREE/cheap moves that
+# might clear a stuck PR without any new judgment call:
+#   1. Re-run the PR's failed check runs (catches transient/flaky failures).
+#   2. `gh pr update-branch` (catches "the conflict/root cause got fixed elsewhere").
+# then removes `needs-human` so the PR re-enters the normal flow. If it's still
+# genuinely broken, the EXISTING claude-autofix.yml trigger fires again on the fresh CI
+# failure and makes its own (correctly already-exhausted) call — no special-casing here.
+#
+# Bounded so this can't loop forever either: a cooldown between attempts (don't hammer a
+# PR that just failed again) and a hard cycle cap (default 3) — past the cap, the PR
+# waits for the operator or pr-drain.yml's close-stale backstop, same as today. State
+# (cycle count + last-attempt time) lives in a single upserted marker comment on the PR,
+# not a label — a label can't carry a timestamp for the cooldown check.
+#
+# Caller (needs its own schedule/dispatch trigger — daily is plenty; this is a slow,
+# patient mechanism by design, not a fast retry loop):
+#   uses: SuxOS/.github/.github/workflows/pr-unstick.yml@main
+#   with: { cooldown-hours: "24", max-cycles: "3" }
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      cooldown-hours:
+        description: "Minimum time since the last unstick attempt before trying this PR again."
+        type: string
+        default: "24"
+      max-cycles:
+        description: "Total unstick attempts per PR before giving up until the operator intervenes or pr-drain.yml's close-stale sweep closes it."
+        type: string
+        default: "3"
+      pr-limit:
+        description: "Max open needs-human PRs to consider per run."
+        type: string
+        default: "50"
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # gh run rerun --failed
+  issues: write
+
+concurrency:
+  group: pr-unstick-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  COOLDOWN_HOURS: ${{ inputs.cooldown-hours }}
+  MAX_CYCLES: ${{ inputs.max-cycles }}
+  PR_LIMIT: ${{ inputs.pr-limit }}
+
+jobs:
+  unstick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Retry needs-human PRs past their cooldown, up to the cycle cap
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          if ! [[ "$COOLDOWN_HOURS" =~ ^[0-9]+$ ]] || ! [[ "$MAX_CYCLES" =~ ^[0-9]+$ ]]; then
+            echo "::error::cooldown-hours ('$COOLDOWN_HOURS') and max-cycles ('$MAX_CYCLES') must be non-negative integers"
+            exit 1
+          fi
+          cooldown_sec=$(( COOLDOWN_HOURS * 3600 ))
+          now=$(date -u +%s)
+
+          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
+            --json number,isDraft,labels,headRefOid,mergeStateStatus \
+            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | index("needs-human")) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+            echo "::error::gh pr list failed — aborting instead of treating as zero needs-human PRs"
+            exit 1
+          fi
+
+          count=$(echo "$prs" | jq 'length')
+          echo "needs-human candidates (not hold/keep): $count"
+          if [ "$count" -eq 0 ]; then exit 0; fi
+
+          MARKER='<!-- pr-unstick:'
+
+          for n in $(echo "$prs" | jq -r '.[].number'); do
+            echo "::group::PR #$n"
+
+            # Read this PR's marker comment (if any) for cycle count + last-attempt time.
+            # The marker is upserted (edited in place), never duplicated, so there's at
+            # most one per PR — plain 'last' pick is unambiguous.
+            comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null || echo '[]')
+            marker=$(echo "$comments" | jq -c --arg m "$MARKER" '[.[] | select(.body | startswith($m))] | last')
+            cycle=0
+            last_at_epoch=0
+            comment_id=""
+            if [ "$marker" != "null" ] && [ -n "$marker" ]; then
+              comment_id=$(echo "$marker" | jq -r '.id')
+              body=$(echo "$marker" | jq -r '.body')
+              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2)
+              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2)
+              last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
+              cycle=${cycle:-0}
+            fi
+
+            if [ "$cycle" -ge "$MAX_CYCLES" ]; then
+              echo "#$n already used $cycle/$MAX_CYCLES unstick cycles — leaving to the operator / close-stale sweep"
+              echo "::endgroup::"; continue
+            fi
+            age=$(( now - last_at_epoch ))
+            if [ "$last_at_epoch" -gt 0 ] && [ "$age" -lt "$cooldown_sec" ]; then
+              echo "#$n last attempt ${age}s ago, cooldown is ${cooldown_sec}s — skipping this run"
+              echo "::endgroup::"; continue
+            fi
+
+            next_cycle=$(( cycle + 1 ))
+            echo "#$n unstick cycle $next_cycle/$MAX_CYCLES — re-running failed checks + updating branch"
+
+            sha=$(echo "$prs" | jq -r --argjson n "$n" '.[] | select(.number == $n) | .headRefOid')
+            run_ids=$(gh run list --repo "$GH_REPO" --commit "$sha" --json databaseId,conclusion \
+              --jq '[.[] | select(.conclusion == "failure") | .databaseId] | .[]' 2>/dev/null || true)
+            for rid in $run_ids; do
+              gh run rerun "$rid" --repo "$GH_REPO" --failed 2>/dev/null \
+                || echo "::warning::could not rerun failed jobs for run $rid on PR #$n"
+            done
+
+            gh pr update-branch "$n" 2>/dev/null \
+              || echo "PR #$n not BEHIND (or update-branch no-op) — fine, the rerun above is the other half of this attempt"
+
+            gh pr edit "$n" --remove-label needs-human 2>/dev/null || true
+
+            marker_line="${MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
+            summary_line="🔁 Auto-unstick attempt ${next_cycle}/${MAX_CYCLES}: re-ran this PR's failed checks and updated the branch onto main, then removed \`needs-human\`. If it's still red, the normal autofix/needs-human path re-applies on its own — this doesn't spend a fresh autofix attempt, it only retries the free/cheap moves (flaky reruns, staleness). After ${MAX_CYCLES} cycles this stops auto-retrying until a human looks or pr-drain.yml's close-stale sweep closes it."
+            new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
+            if [ -n "$comment_id" ]; then
+              gh api "repos/${GH_REPO}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
+                || echo "::warning::could not update the marker comment on PR #$n"
+            else
+              gh pr comment "$n" --body "$new_body" 2>/dev/null \
+                || echo "::warning::could not post the marker comment on PR #$n"
+            fi
+
+            echo "::endgroup::"
+            sleep 2
+          done

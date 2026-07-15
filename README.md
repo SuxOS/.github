@@ -16,9 +16,10 @@ a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 `health.yml` (app health) · `pipeline-utilization.yml` (autonomy-pipeline run volume/duration —
 a proxy for spend/waste, since actual Claude token usage isn't queryable via the GitHub API)
 
-**Autonomy pipeline** (keeps the merge queue moving hands-off):
+**Autonomy pipeline** (keeps PRs moving hands-off — native GitHub auto-merge, not a merge
+queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
-`waitch.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml`
+`pr-unstick.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml`
 
 **Budget & deep passes** (run directly in THIS repo — not reusables; see
 [docs/design/budget-and-cadence.md](docs/design/budget-and-cadence.md)):
@@ -29,12 +30,28 @@ over each repo's merged diff — the compensating control for the sonnet per-PR
 security-review) · `org-consistency.yml` (weekly opus cross-repo drift + refactor sweep,
 files findings into the backlog pipeline).
 
-**Backlog pipeline** (turns latent work into merged/staged PRs — propose → investigate → build):
-`fixer.yml` (propose issues w/ confidence) · `triage.yml` (independently verify + opt-out-queue
-for build) · `issue-build.yml` (cluster n issues → m PRs, one build session per cluster;
-`confidence:high` clusters auto-merge, the rest stage). Full design +
-state machine + auth split: [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
-Caller-stub examples below.
+**Backlog pipeline** (turns latent work into merged PRs — propose → build):
+`fixer.yml` (propose work as typed issues) · `issue-build.yml` (select buildable issues,
+cluster n → m PRs, one build session per cluster, always ≥1, never waits; PRs auto-merge on
+green). The separate Opus `triage` stage and the `confidence:*` taxonomy were removed in the
+three-loop rework — see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)
+(current design) and [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md)
+(historical). Caller-stub examples below.
+
+### The three loops → workflows (the resolvable map)
+
+`claude-config`'s `fabric.json` names the pipeline as three loops; this is what each
+resolves to here (consumed by the `dispatch`/`orient` tools):
+
+| Loop (fabric slug) | Workflows |
+|---|---|
+| `collate-build` | `fixer.yml` + `issue-build.yml` |
+| `green-merge` | `automerge.yml` |
+| `red-rebase` | `pr-auto-update.yml` + `claude-autofix.yml` + `pr-unstick.yml` |
+
+Everything else (`security-review`, `deep-audit`, `org-consistency`, `budget-governor`,
+`pr-watch`, `pr-drain`, `health`, `ci`, `audit`) is a required check or a safety net, not
+one of the three loops.
 
 ## Auth: unified on the subscription token
 
@@ -98,32 +115,27 @@ jobs:
 ```
 
 ```yaml
-# triage.yml — investigate. Fires on a newly-filed issue (fixer's or a human's) + manual drain.
-name: Triage
-on:
-  issues: { types: [opened, reopened] }
-  workflow_dispatch:
-jobs:
-  triage: { uses: SuxOS/.github/.github/workflows/triage.yml@main, secrets: inherit }
-```
-
-```yaml
-# issue-build.yml — collate + build. Fires when queued-for-build is applied + manual drain.
+# issue-build.yml — select buildable issues, cluster + build. Batched cron, NOT a per-issue
+# `issues:` trigger — an issue-event stub fans out a session per event during fixer bursts
+# (SuxOS/.github#140).
 name: Issue build
 on:
-  issues: { types: [labeled] }
+  schedule: [{ cron: "7 2,8,14,20 * * *" }]
   workflow_dispatch:
 jobs:
   issue-build:
-    if: github.event_name != 'issues' || github.event.label.name == 'queued-for-build'
     uses: SuxOS/.github/.github/workflows/issue-build.yml@main
     with: { gates-summary: "npm run type-check · npm test · npm run lint" }
     secrets: inherit
 ```
 
-Labels each repo needs once (`gh label create`): `queued-for-build`, `building`,
-`triaged`, `confidence:high|medium|low`, plus the usual `automerge` /
-`needs-review` / `needs-human` / `hold`.
+`scripts/scaffold-caller.sh` generates these stubs (and the others above) directly —
+prefer running it over hand-copying, so a caller repo can't drift from the cadence above.
+
+Labels each repo needs once (`gh label create`): `building`, `needs-human`, plus the usual
+`automerge` / `hold`. (The `confidence:*`, `triaged`, `queued-for-build`, and `needs-review`
+labels were retired in the three-loop rework — issue-build selects/claims directly and
+`automerge.yml` no longer reads eligibility labels.)
 
 ### Required secrets/vars in the caller repo
 
@@ -152,18 +164,23 @@ repo (`bug` is a GitHub default label, so it needs no setup):
   safe-type commit title); `automerge.yml` also self-applies it once auto-merge is armed.
 - `hold` — blocks all automation on a PR: `automerge.yml` refuses to arm,
   `pr-auto-update.yml` won't update-branch it, `pr-drain.yml`/`pr-watch.yml` skip it.
-  Auto-applied by `security-review.yml` on a critical/high finding, or fail-closed
-  when the verdict is missing/unreadable.
+  Auto-applied by `security-review.yml` only on a CONFIRMED critical/high finding — a
+  missing/unreadable verdict (the reviewer didn't finish) is an advisory pass, not a hold;
+  we'd rather ship and roll back than block merges on a flaky review run.
 - `needs-human` — not safe for unattended handling. `claude-autofix.yml` applies it
-  once its retry cap is hit; `triage.yml` applies it to issues it doesn't judge buildable.
-- `feature` — net-new feature work; `automerge.yml` and `pr-drain.yml`'s reconcile pass
-  both refuse to auto-merge a `feature`-labeled PR — a human always merges it.
+  once its retry cap is hit; `issue-build.yml` applies it to issues its cluster pass judges
+  non-buildable (excluding them from future candidate selection).
+- `feature` — net-new feature work; as of #152 this label no longer vetoes auto-merge
+  (previously a hard human-only gate). A `feature`-labeled PR auto-merges under the same
+  bar as any other — a safe-type title or one of `automerge`/`bug`/`security`/`chore-safe`,
+  plus passing CI + security-review — `feature` itself is not one of the eligible labels.
 - `chore-safe` — safe refactor/cleanup/docs; one of the auto-merge-eligible labels.
 - `keep` — opts a PR out of `pr-drain.yml`'s close-stale sweep (alongside `hold`)
   without blocking any other automation.
 - `security` — security fix; auto-merge-eligible like `chore-safe`/`bug`/`automerge`.
-- `self-improve` — lets a Bot-authored PR pass `automerge.yml`'s trusted-author check
-  (addable only by write access) and keeps bot PRs out of `pr-drain.yml`'s close-stale sweep.
+- `self-improve` — keeps bot PRs out of `pr-drain.yml`'s close-stale sweep. (It no longer
+  gates auto-merge: `automerge.yml`'s trusted-author check was removed in Phase 1, since the
+  repos are private — it now arms on `not-draft AND not-hold` regardless of author.)
 
 ```bash
 gh label create automerge    -c 2da44e -d "Bot may auto-merge when green (bug/security/chore-safe/automerge only)" --force

@@ -32,9 +32,11 @@ env:
   # Repos whose runs are scanned AND whose throttle issues are maintained.
   REPOS: "sux suxrouter sux-fileops .github"
   # Workflow-name → model classification (case-insensitive extended regexes).
-  # Post-redesign: triage + the deep passes run opus; everything else Claude-ish is sonnet.
-  CLAUDE_WF_RE: "claude|security review|fixer|triage|issue build|deep audit|org consistency"
-  OPUS_WF_RE: "triage|deep audit|org consistency"
+  # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
+  # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
+  # deep-audit + weekly org-consistency passes; everything else Claude-ish is sonnet.
+  CLAUDE_WF_RE: "claude|security review|fixer|issue build|deep audit|org consistency"
+  OPUS_WF_RE: "deep audit|org consistency"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
   OPUS_BUDGET_MIN: "900"
