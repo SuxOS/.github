@@ -48,9 +48,9 @@ on:
         type: string
         default: ""
       allowed-bots:
-        description: "Comma-separated bot LOGINS, exactly as GitHub reports them — INCLUDING the [bot] suffix (e.g. \"suxbot[bot]\"), matching claude-code-action's own allowed_bots convention (docs example: \"dependabot[bot],renovate[bot]\"). Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
+        description: "Comma-separated bot LOGINS, exactly as GitHub reports them — INCLUDING the [bot] suffix (e.g. \"suxbot[bot]\"), matching claude-code-action's own allowed_bots convention (docs example: \"dependabot[bot],renovate[bot]\"). Defaults to the org bot suxbot[bot] so a caller that forgets to pass it doesn't make the action refuse a bot PR and hard-fail this required gate (a mechanical block, never a security signal). Empty allows no bots. Do not use '*' without reading claude-code-action's security.md."
         type: string
-        default: ""
+        default: "suxbot[bot]"
 
 permissions:
   contents: read
@@ -203,23 +203,36 @@ jobs:
           # fix above) shouldn't be permanently unmergeable on a harness reliability gap that
           # has nothing to do with what they changed. Untrusted/fork authors still fail closed.
           AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
+          # The org bot (suxbot[bot]) is trusted here by LOGIN — a no-verdict on its PR is a
+          # mechanical failure, never a security signal, so it takes the advisory path, not
+          # fail-closed. A CONFIRMED critical/high finding still holds it (below): that gate is
+          # deliberately kept, since the bot is an autonomous agent reading attacker-controllable
+          # issue/PR text and is exactly what a prompt-injection would trip.
+          AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
           trusted=false
           case "$AUTHOR_ASSOC" in OWNER|MEMBER|COLLABORATOR) trusted=true ;; esac
+          [ "$AUTHOR_LOGIN" = "suxbot[bot]" ] && trusted=true
+
+          # High-blast path detector, defined once (used to classify AND to print the offenders).
+          # auth|secret are matched as DELIMITER-BOUNDED tokens (optional trailing plural), not as
+          # bare substrings — so oauth/auth/secret(s) files flag, but author.ts / authors /
+          # secretary.py no longer false-positive into a spurious fail-closed hold.
+          HIGH_BLAST_RE='\.github/workflows/|\.github/actions/|\.github/scripts/|(^|[/._-])(oauth|auth[nz]?|secret)s?([/._-]|$)'
 
           if [ -z "$verdict" ]; then
             changed=$(gh pr diff "$PR" --name-only 2>/dev/null || true)
             high_blast=false
-            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|\.github/actions/|\.github/scripts/|auth|secret'; then
+            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE "$HIGH_BLAST_RE"; then
               high_blast=true
             fi
 
             if [ "$high_blast" = "true" ] && [ "$trusted" != "true" ]; then
               echo "::error::security review produced no verdict, diff is high-blast (or unreadable), and the author ($AUTHOR_ASSOC) is not a trusted org member — failing closed"
               if [ -n "$changed" ]; then
-                printf '%s\n' "$changed" | grep -iE '\.github/workflows/|\.github/actions/|\.github/scripts/|auth|secret' | sed 's/^/  high-blast path: /' || true
+                printf '%s\n' "$changed" | grep -iE "$HIGH_BLAST_RE" | sed 's/^/  high-blast path: /' || true
               fi
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
               gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets from an untrusted author ($AUTHOR_ASSOC) — applied \`hold\` (fail-closed). Re-run the review or get a human review, then remove \`hold\`." 2>/dev/null || true

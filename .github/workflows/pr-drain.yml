@@ -27,9 +27,9 @@ on:
         type: string
         default: "14"
       pr-limit:
-        description: "Max open PRs to list per run. Raise on repos with a busy queue (>100 open PRs) so the sweep doesn't silently skip PRs past the first page."
+        description: "Max open PRs to list per run. Raise on repos with a busy queue so the sweep doesn't silently skip PRs past the first page (truncation is invisible, so err high)."
         type: string
-        default: "100"
+        default: "200"
       dry-run:
         description: "If true, log the computed close-set but skip the actual `gh pr close` mutation (and the heads-up comment that announces it). Read-only preview of CLOSE-STALE."
         type: boolean
@@ -97,13 +97,16 @@ jobs:
 
           # gh's --json flag has no authorAssociation field for PRs (it does for
           # issues, but not pulls) — the REST API does, so fetch it per PR and merge
-          # it in rather than dropping the trust check downstream relies on.
+          # it in rather than dropping the trust check downstream relies on. Also grab
+          # the author login: the org bot (suxbot[bot]) is a first-class trusted author
+          # matched by login, independent of whatever association an App-token PR resolves to.
           assoc=$(printf '%s' "$prs" | jq -r '.[].number' | while read -r n; do
-            gh api "repos/${GH_REPO}/pulls/$n" -q '{number: .number, authorAssociation: .author_association}' 2>/dev/null
+            gh api "repos/${GH_REPO}/pulls/$n" -q '{number: .number, authorAssociation: .author_association, login: .user.login}' 2>/dev/null
           done | jq -s '.')
           prs=$(jq -c --argjson assoc "$assoc" '
             ($assoc | INDEX(.number)) as $idx
-            | map(. + {authorAssociation: ($idx[.number|tostring].authorAssociation // "NONE")})
+            | map(. + {authorAssociation: ($idx[.number|tostring].authorAssociation // "NONE"),
+                       authorLogin: ($idx[.number|tostring].login // "")})
           ' <<<"$prs")
 
           stale=$(( STALE_DAYS * 86400 ))
@@ -147,15 +150,17 @@ jobs:
           # Structural filter only (green, unarmed, trusted, not held/feature). The
           # drift-prone safe-type/label/breaking core predicate is applied by the
           # shared pr-eligibility action in the next step.
+          # `feature` is intentionally NOT excluded — a feature PR reconciles iff it satisfies
+          # the shared eligibility predicate (next step), same bar as any other PR. Trust the
+          # org bot by login too, alongside association-trusted humans.
           candidates=$(printf '%s' "$prs" | jq -c '
             [ .[]
               | select(.isDraft | not)
               | select(.mergeStateStatus == "CLEAN")
               | select(.autoMergeRequest == null)
-              | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a))
+              | select((.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) or (.authorLogin == "suxbot[bot]"))
               | ([.labels[].name]) as $l
               | select(($l | index("hold")) | not)
-              | select(($l | index("feature")) | not)
               | {number, title, labels: [.labels[].name]} ]')
           echo "reconcile-candidates=$candidates" >> "$GITHUB_OUTPUT"
 
@@ -186,14 +191,15 @@ jobs:
           set -uo pipefail
 
           # shellcheck disable=SC2016  # jq program; $l is a jq var, not shell
+          # Mirrors the batch filter: `feature` is not excluded, and the org bot is trusted by
+          # login alongside association-trusted authors.
           structural_filter='
             select(.isDraft | not)
             | select(.mergeStateStatus == "CLEAN")
             | select(.autoMergeRequest == null)
-            | select(.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a))
+            | select((.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) or (.authorLogin == "suxbot[bot]"))
             | ([.labels[].name]) as $l
-            | select(($l | index("hold")) | not)
-            | select(($l | index("feature")) | not)'
+            | select(($l | index("hold")) | not)'
 
           for n in $ELIGIBLE_NUMBERS; do
             echo "::group::reconcile PR #$n (arm auto-merge)"
@@ -205,8 +211,10 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            assoc=$(gh api "repos/${GH_REPO}/pulls/$n" -q '.author_association' 2>/dev/null || echo "NONE")
-            if ! printf '%s' "$pr_json" | jq -e --arg assoc "$assoc" '. + {authorAssociation: $assoc} | '"$structural_filter" >/dev/null; then
+            meta=$(gh api "repos/${GH_REPO}/pulls/$n" -q '{assoc: .author_association, login: .user.login}' 2>/dev/null || echo '{"assoc":"NONE","login":""}')
+            assoc=$(printf '%s' "$meta" | jq -r '.assoc // "NONE"')
+            login=$(printf '%s' "$meta" | jq -r '.login // ""')
+            if ! printf '%s' "$pr_json" | jq -e --arg assoc "$assoc" --arg login "$login" '. + {authorAssociation: $assoc, authorLogin: $login} | '"$structural_filter" >/dev/null; then
               echo "#$n no longer arm-eligible (state changed) — skipping"
               echo "::endgroup::"
               continue
