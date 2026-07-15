@@ -208,13 +208,16 @@ jobs:
               // resolves author_association to "NONE" for real org members when queried via a
               // token that can't verify org membership, not just for outside contributors. That
               // starved every human-authored issue (SuxOS/.github#185): buildable came back
-              // empty even with a backlog waiting. ORG_OWNER_LOGINS is a stopgap allowlist until
+              // empty even with a backlog waiting. ORG_OWNER_IDS is a stopgap allowlist until
               // the App is granted `members: read` (org admin action, github.com/organizations/
               // SuxOS/settings/installations) makes association resolve correctly again.
-              const ORG_OWNER_LOGINS = ["colinxs"];
+              // Keyed on the IMMUTABLE numeric user.id, not the mutable login — a login is
+              // renameable and a freed handle is reclaimable, so trusting a login string would
+              // be spoofable; the account id never changes (security-review finding, #186).
+              const ORG_OWNER_IDS = [18266472]; // colinxs
               const trusted = ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association)
                 || i.user.login === "suxbot[bot]"
-                || ORG_OWNER_LOGINS.includes(i.user.login);
+                || ORG_OWNER_IDS.includes(i.user.id);
               if (!trusted) return false;
               if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
