@@ -266,38 +266,45 @@ jobs:
       # access at all. Re-validates type against an allowlist even though the JSON schema
       # already constrains it (belt-and-suspenders: a schema is the model's contract, this
       # is the pipeline's own gate on what it will actually write).
+      # Real JS via the org's already-pinned actions/github-script, not jq-in-bash — same move
+      # as issue-build.yml's select step (2026-07-15): a real language for structured
+      # model-authored JSON, no shell-quoting surface.
       - name: File proposed issues
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Read from whichever attempt produced output (retry only ran if the first was empty).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
-        run: |
-          set -euo pipefail
-          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
-          count=$(echo "$VERDICT" | jq '.proposals | length')
-          discarded=$(echo "$VERDICT" | jq -r '.discarded_count // 0')
-          echo "proposals: $count (discarded as duplicate/baseless: $discarded)"
-          echo "$VERDICT" | jq -c '.proposals[]' | while read -r p; do
-            title=$(echo "$p" | jq -r '.title')
-            body=$(echo "$p" | jq -r '.body')
-            type=$(echo "$p" | jq -r '.type')
-            security=$(echo "$p" | jq -r '.security')
-            effort=$(echo "$p" | jq -r '.effort // empty')
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const raw = process.env.VERDICT;
+            if (!raw) { core.info("no structured output → nothing to file"); return; }
 
-            case "$type" in bug|enhancement|documentation) ;; *)
-              echo "::warning::skipping proposal with unexpected type '$type': $title"; continue ;;
-            esac
+            let verdict;
+            try { verdict = JSON.parse(raw); } catch { core.warning("structured output is not valid JSON — nothing to file"); return; }
+            const proposals = Array.isArray(verdict.proposals) ? verdict.proposals : [];
+            core.info(`proposals: ${proposals.length} (discarded as duplicate/baseless: ${verdict.discarded_count ?? 0})`);
 
-            label_args=(--label "$type")
-            [ "$security" = "true" ] && label_args+=(--label security)
-            # An invalid/missing effort is not fatal to filing — issue-build's select step
-            # defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
-            case "$effort" in small|medium|large) label_args+=(--label "effort:$effort") ;; esac
+            const filed = [];
+            for (const p of proposals) {
+              const { title, body, type, security, effort } = p || {};
+              if (!["bug", "enhancement", "documentation"].includes(type)) { core.warning(`skipping proposal with unexpected type '${type}': ${title}`); continue; }
 
-            url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}")
-            echo "filed: $url"
-          done
+              const labels = [type];
+              if (security === true) labels.push("security");
+              // An invalid/missing effort is not fatal to filing — issue-build's select step
+              // defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
+              if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
+
+              const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
+              core.info(`filed: ${data.html_url}`);
+              filed.push(data.html_url);
+            }
+            if (filed.length > 0) {
+              await core.summary.addHeading("fixer: proposals filed", 3).addList(filed).write();
+            }
 
       # Deterministic on purpose (cardinal rule: script over model call whenever exact) —
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped

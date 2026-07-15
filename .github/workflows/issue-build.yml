@@ -40,8 +40,10 @@ on:
   workflow_call:
     inputs:
       # --- KNOBS: all deterministic (the orchestrator must be deterministic even though the
-      #     builder isn't). include/exclude/max-issues/model-hint/speed are applied in the
-      #     shell select step; only `fan` reaches the model, as a planning hint. ---
+      #     builder isn't). include/exclude/max-issues/effort-budget/model-hint/speed are all
+      #     applied in the select step; NONE of them reach the model. How to execute the batch
+      #     (serial/parallel/staged, per-issue depth) is the builder's own call — see §3.1.5 —
+      #     the orchestrator only decides WHICH issues and WHICH model/turn budget. ---
       max-issues:
         description: "Batch-size max: issues pulled into one build/PR per run, oldest-first within the chosen tier."
         type: number
@@ -83,10 +85,6 @@ on:
         description: "`thorough` = full turn budget; `fast` = trimmed (cheaper, quicker)."
         type: string
         default: "thorough"
-      fan:
-        description: "`parallel` = builder fans out to subagents for independent issues; `serial` = one at a time."
-        type: string
-        default: "parallel"
       simple-model:
         description: "Builder model when model-hint=auto (the design default; Opus is reserved for the nightly audits — opt into it per-run via model-hint=opus)."
         type: string
@@ -146,11 +144,18 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # Real JS via the org's already-pinned actions/github-script (matches audit.yml /
+      # sux/deploy.yml / sux/health.yml), not jq-in-bash. This was the most complex shell in
+      # the pipeline (a jq reduce doing greedy bin-packing) — bash/jq quoting and word-splitting
+      # are a real, recurring source of pipeline bugs in this repo (operator feedback,
+      # 2026-07-15); a real language with try/catch and no shell-escaping surface is the fix,
+      # not a cleverer bash incantation. Also gets a job-summary for free (real observability,
+      # not another log line to grep).
       - name: Reap stale claims, then select the top-priority build batch
         id: pick
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REAP_STALE_HOURS: "2"
           MAX_ISSUES: ${{ inputs.max-issues }}
           EFFORT_BUDGET: ${{ inputs.effort-budget }}
@@ -160,144 +165,133 @@ jobs:
           SPEED: ${{ inputs.speed }}
           SIMPLE_MODEL: ${{ inputs.simple-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
-        run: |
-          set -euo pipefail
-          now=$(date -u +%s)
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const maxIssues = Number(process.env.MAX_ISSUES);
+            const effortBudget = Number(process.env.EFFORT_BUDGET);
+            const reapHours = Number(process.env.REAP_STALE_HOURS);
+            const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
+            const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
 
-          # 1. Reap: an issue stuck in `building` with no activity for >REAP_STALE_HOURS is an
-          #    orphan from a build run that crashed after claiming — drop the claim (self-healing).
-          if ! stale_rows=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
-              --json number,updatedAt --jq '.[] | [.number,.updatedAt] | @tsv'); then
-            echo "::error::gh issue list (label:building) failed — aborting instead of silently skipping the reap"
-            exit 1
-          fi
-          if [ -n "$stale_rows" ]; then
-            while IFS=$'\t' read -r n upd; do
-              age_h=$(( (now - $(date -u -d "$upd" +%s 2>/dev/null || echo "$now")) / 3600 ))
-              if [ "$age_h" -ge "$REAP_STALE_HOURS" ]; then
-                echo "reaping orphaned building issue #$n (idle ${age_h}h)"
-                gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
-              fi
-            done <<< "$stale_rows"
-          fi
+            // 1. Reap: an issue stuck in `building` with no activity for >reapHours is an
+            //    orphan from a build run that crashed after claiming — drop the claim.
+            const stale = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: "building", per_page: 100,
+            });
+            const now = Date.now();
+            for (const issue of stale) {
+              const ageH = (now - new Date(issue.updated_at).getTime()) / 3_600_000;
+              if (ageH >= reapHours) {
+                core.info(`reaping orphaned building issue #${issue.number} (idle ${ageH.toFixed(1)}h)`);
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: "building" }).catch(() => {});
+              }
+            }
 
-          # 2. Select. REST issues endpoint (has author_association; also lists PRs, so drop
-          #    entries with a pull_request key). Partition buildable candidates into priority
-          #    tiers and take the highest NON-EMPTY one — HIGH else MED else LOW (floor).
-          if ! all=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate); then
-            echo "::error::gh api issues list failed — aborting instead of treating as zero candidates"
-            exit 1
-          fi
+            // 2. Select. listForRepo also returns PRs (drop entries with a pull_request key).
+            const all = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
 
-          # include/exclude are comma-lists; empty means "no filter" (jq: empty split -> [""],
-          # guarded so an unset knob never accidentally matches/excludes everything).
-          include_csv="${INCLUDE:-}"; exclude_csv="${EXCLUDE:-}"
+            const buildable = all.filter((i) => {
+              if (i.pull_request) return false;
+              const labels = i.labels.map((l) => l.name);
+              if (["building", "hold", "needs-human"].some((l) => labels.includes(l))) return false;
+              const trusted = ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association) || i.user.login === "suxbot[bot]";
+              if (!trusted) return false;
+              if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
+              if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
+              return true;
+            }).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
 
-          # Effort points: small=1, medium=2 (also the default for an unlabeled issue — most
-          # of today's backlog predates the effort:* label), large=4. Deterministic lookup
-          # only — no model call here, the estimate was already made by whichever session
-          # (fixer / a prior build's observation-capture) filed the issue.
-          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" --argjson budget "$EFFORT_BUDGET" \
-              --arg include "$include_csv" --arg exclude "$exclude_csv" '
-            ($include | if length > 0 then split(",") else [] end) as $inc
-            | ($exclude | if length > 0 then split(",") else [] end) as $exc
-            | def buildable:
-              select(has("pull_request") | not)
-              | (.labels | map(.name)) as $l
-              | select(([ "building","hold","needs-human" ] - $l) | length == 3)
-              | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login == "suxbot[bot]"))
-              | select(($inc | length) == 0 or (($inc - $l) | length) < ($inc | length))
-              | select(($exc | length) == 0 or (($exc - $l) | length) == ($exc | length));
-            def points:
-              if   (. | any(. == "effort:large")) then 4
-              elif (. | any(. == "effort:small")) then 1
-              else                                      2
-              end;
-            [ .[][] | buildable | { number, body, labels: (.labels | map(.name)) } ] as $c
-            | ($c | map(select((.labels | any(. == "priority:high" or . == "security"))))) as $high
-            | ($c | map(select(.labels | any(. == "priority:med")))) as $med
-            | ($c | map(select((.labels | any(. == "priority:high" or . == "security" or . == "priority:med")) | not))) as $low
-            | (if   ($high|length) > 0 then {tier:"high", set:$high}
-               elif ($med|length)  > 0 then {tier:"med",  set:$med}
-               else                          {tier:"low",  set:$low} end) as $chosen
-            | ($chosen.set | sort_by(.number) | map(. + {pts: (.labels | points)})) as $sorted
-            # Greedy pack, oldest-first: keep adding while under BOTH caps (count, points).
-            # Always take at least one issue even if its own points exceed the budget alone —
-            # "always build at least one thing" (three-loop-pipeline.md) is never overridden
-            # by the effort budget.
-            | (reduce $sorted[] as $it
-                 ({picked: [], cum: 0, stopped: false};
-                  if .stopped then .
-                  elif (.picked | length) >= $n then . + {stopped: true}
-                  elif (.picked | length) == 0 then {picked: [$it], cum: $it.pts, stopped: false}
-                  elif (.cum + $it.pts) <= $budget then {picked: (.picked + [$it]), cum: (.cum + $it.pts), stopped: false}
-                  else . + {stopped: true}
-                  end)
-              ) as $pack
-            | { tier: $chosen.tier,
-                numbers: ($pack.picked | map(.number)),
-                count: ($pack.picked | length),
-                points: $pack.cum,
-                sensed_opus: ($pack.picked | any(.labels | any(. == "security" or . == "effort:large"))) }')
+            // Effort points: small=1, medium=2 (also the default for an unlabeled issue — most
+            // of today's backlog predates the effort:* label), large=4. Deterministic lookup —
+            // the estimate was already made by whichever session (fixer / a prior build's
+            // observation-capture) filed the issue; no model call happens here.
+            const pointsFor = (labels) => (labels.includes("effort:large") ? 4 : labels.includes("effort:small") ? 1 : 2);
 
-          tier=$(echo "$plan" | jq -r '.tier')
-          numbers=$(echo "$plan" | jq -c '.numbers')
-          count=$(echo "$plan" | jq -r '.count')
-          points=$(echo "$plan" | jq -r '.points')
-          sensed_opus=$(echo "$plan" | jq -r '.sensed_opus')
-          echo "selected tier=$tier count=$count points=$points/${EFFORT_BUDGET} sensed_opus=$sensed_opus issues=$numbers"
+            const high = buildable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
+            const med = buildable.filter((i) => i.labels.includes("priority:med"));
+            const low = buildable.filter((i) => !high.includes(i) && !med.includes(i));
+            const [tier, set] = high.length > 0 ? ["high", high] : med.length > 0 ? ["med", med] : ["low", low];
 
-          # Model: auto = sonnet by default (three-loop-pipeline.md — Sonnet is near-Opus on
-          # codegen with CI + security-review gating every resulting PR); auto-ESCALATES to
-          # opus only on a deterministic sensed signal — the selected batch carries `security`
-          # or `effort:large` — because that's the same real signal already driving tier/points
-          # selection above, not a new judgment call. model-hint always overrides both (manual
-          # override wins over sensing, e.g. model-hint=sonnet forces sonnet even if sensed).
-          if [ "$MODEL_HINT" = "auto" ]; then
-            if [ "$sensed_opus" = "true" ]; then
-              model="opus"
-              echo "sensed security/large-effort in batch -> auto-escalating to opus"
-            else
-              model="$SIMPLE_MODEL"
-            fi
-          else
-            model="$MODEL_HINT"
-          fi
+            // Greedy pack, oldest-first: keep adding while under BOTH caps (count, points).
+            // Always take at least one issue even if its own points exceed the budget alone —
+            // "always build at least one thing" (three-loop-pipeline.md) is never overridden
+            // by the effort budget (verified: a lone effort:large issue still gets picked
+            // even when its 4pts alone exceed a 2pt budget).
+            const sorted = [...set].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
+            const picked = [];
+            let points = 0;
+            for (const it of sorted) {
+              if (picked.length >= maxIssues) break;
+              if (picked.length === 0) { picked.push(it); points += it.pts; continue; }
+              if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
+              break;
+            }
+            const sensedOpus = picked.some((i) => i.labels.includes("security") || i.labels.includes("effort:large"));
 
-          # Turns scale with selected effort points (not raw issue count — a few large issues
-          # cost as much attention as many small ones), then speed: fast halves the budget;
-          # thorough (default) keeps the full scaled budget. 10 turns/point keeps this a drop-in
-          # replacement for the old 20-turns/issue formula at the medium (2pt) default. Cap
-          # raised 300 -> 500 alongside max-issues 2026-07-15: turn budget (not issue count)
-          # was already the thing that saturated first; a batch above the cap still runs, just
-          # on a flatter per-point turn budget past it.
-          turns=$(( BASE_TURNS + 10 * points ))
-          [ "$SPEED" = "fast" ] && turns=$(( turns / 2 ))
-          [ "$turns" -lt 10 ] && turns=10
-          [ "$turns" -gt 500 ] && turns=500
+            core.info(`selected tier=${tier} count=${picked.length} points=${points}/${effortBudget} sensedOpus=${sensedOpus} issues=${JSON.stringify(picked.map((i) => i.number))}`);
 
-          # Claim each selected issue so a concurrent run can't double-process it.
-          for i in $(echo "$numbers" | jq -r '.[]'); do
-            gh issue edit "$i" --repo "$GITHUB_REPOSITORY" --add-label building 2>/dev/null || true
-          done
+            // Model: auto = sonnet by default (three-loop-pipeline.md — Sonnet is near-Opus on
+            // codegen with CI + security-review gating every resulting PR); auto-ESCALATES to
+            // opus only on the sensed signal above (security or effort:large in the selected
+            // batch) — reusing data already computed for tier/points, not a new judgment call.
+            // model-hint always overrides sensing in either direction.
+            const modelHint = process.env.MODEL_HINT;
+            let model;
+            if (modelHint === "auto") {
+              model = sensedOpus ? "opus" : process.env.SIMPLE_MODEL;
+              if (sensedOpus) core.info("sensed security/large-effort in batch -> auto-escalating to opus");
+            } else {
+              model = modelHint;
+            }
 
-          {
-            echo "numbers=$numbers"
-            echo "count=$count"
-            echo "tier=$tier"
-            echo "model=$model"
-            echo "turns=$turns"
-          } >> "$GITHUB_OUTPUT"
+            // Turns scale with selected effort points (not raw issue count — a few large
+            // issues cost as much attention as many small ones), then speed. 10 turns/point is
+            // a drop-in equivalent of the old 20-turns/issue formula at the medium (2pt)
+            // default. Cap 500: turn budget, not issue count or wall-clock, is what actually
+            // saturates first on a wide batch; a batch above the cap still runs on a flatter
+            // per-point budget past it. The job's own 30min timeout (not the turns cap) is the
+            // real backstop against a runaway session — see the build job for that reasoning.
+            let turns = Number(process.env.BASE_TURNS) + 10 * points;
+            if (process.env.SPEED === "fast") turns = Math.floor(turns / 2);
+            turns = Math.max(10, Math.min(500, turns));
+
+            // Claim each selected issue so a concurrent run can't double-process it.
+            for (const i of picked) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number: i.number, labels: ["building"] }).catch(() => {});
+            }
+
+            core.setOutput("numbers", JSON.stringify(picked.map((i) => i.number)));
+            core.setOutput("count", String(picked.length));
+            core.setOutput("tier", tier);
+            core.setOutput("model", model);
+            core.setOutput("turns", String(turns));
+
+            await core.summary
+              .addHeading("issue-build: select", 3)
+              .addTable([
+                [{ data: "tier", header: true }, { data: "count", header: true }, { data: "points", header: true }, { data: "model", header: true }, { data: "turns", header: true }],
+                [tier, String(picked.length), `${points}/${effortBudget}`, model, String(turns)],
+              ])
+              .addDetails("issues in this batch", picked.map((i) => `#${i.number}`).join(", ") || "(none)")
+              .write();
 
   build:
     needs: select
     if: needs.select.outputs.count != '' && needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
-    # Raised 45 -> 90 alongside the turns cap (300 -> 500, 2026-07-15): a wider batch with more
-    # turn budget can genuinely run longer, and a job killed by timeout mid-commit is worse than
-    # a slow one — "Push and open ONE PR" only checks for a real commit either way, so a timeout
-    # here loses whatever partial work wasn't yet committed and pushed.
-    timeout-minutes: 90
+    # 45 -> 90 -> 30 (2026-07-15, same day): 90 was raised defensively alongside the turns cap
+    # (300 -> 500) without real data. Actual runs at the 500-turn cap on 17-19 issue batches
+    # completed in 6.5-15 minutes (SuxOS/sux run 29430528029, SuxOS/suxrouter run 29430530912)
+    # — the Claude step is API-latency-bound, not something a bigger timeout makes faster. 30min
+    # is ~2x observed worst case, a real backstop against a runaway session rather than an
+    # unverified guess. The build prompt (step 1, PLAN) now tells the model its actual budget
+    # and to trim scope proactively rather than risk the timeout — losing whatever isn't yet
+    # committed+pushed is still possible, just meant to be rare, not routine.
+    timeout-minutes: 30
     steps:
       - name: Mint app token
         id: app-token
@@ -364,12 +358,27 @@ jobs:
 
             Read each with `gh issue view <n>`. Then:
 
-            1. PLAN. Work out the optimal build plan across all of them. ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
-               Issues that touch the same files or depend on each other are done together, in
-               order, to stay coherent. You have the whole batch in view, so collate naturally:
-               dedupe overlapping work, and drop an issue from THIS PR if it turns out
-               unbuildable or would conflict — note which and why in your final message; it keeps
-               its claim released and gets retried later.
+            1. PLAN — your call, not a prescribed shape. You have a turn budget of
+               ${{ needs.select.outputs.turns }} and this job is killed at 30 minutes wall-clock
+               no matter what — that's a hard stop, and anything not committed+pushed by then is
+               lost, so plan to comfortably finish inside it, not to exactly fill it. Pick
+               whatever execution shape actually fits this specific batch:
+                 - Independent issues (disjoint files, no ordering dependency) are usually best
+                   fanned out to Task-tool subagents in parallel, one per issue or tight group —
+                   this is the common case and a reasonable default when you're not sure.
+                 - Issues that touch the same files or depend on each other are done together,
+                   serially, in order, to stay coherent — don't parallelize what isn't independent.
+                 - A batch with a couple of genuinely hard/risky issues among easy ones can
+                   benefit from a first fast pass on the easy majority, then a slower, more
+                   careful second pass on the hard remainder once you've seen the rest of the
+                   codebase — use that shape if it fits, don't force it if it doesn't.
+               Collate naturally across the batch: dedupe overlapping work, and drop an issue
+               from THIS PR if it turns out unbuildable, would conflict, or you're running short
+               on turns/time and it's the lowest-value remaining piece — note which and why in
+               your final message; a dropped issue keeps its claim released and gets retried
+               later (by this builder or a future one, possibly with a different model if it's
+               since been marked effort:large or security). Shipping most of the batch solidly
+               beats risking all of it on an over-ambitious plan.
 
             2. BUILD. Make the smallest correct change for each issue. Do NOT touch secrets, do
                NOT weaken a test to make it pass, do NOT touch code unrelated to these issues.
@@ -464,54 +473,50 @@ jobs:
       # The builder may have written mid-build observations (a bug out of scope, a feature the
       # code is asking for, a durable lesson) to a file OUTSIDE the repo tree. This is the ONLY
       # step that files them — the model has no gh-write access to issues here. Model-authored
-      # content is parsed with jq and passed as argv (never interpolated into the shell), type is
-      # re-validated against an allowlist, enhancements are dropped under flood backpressure, and
-      # the whole thing is capped — the Safe Outputs pattern, identical in shape to fixer.yml.
-      # Best-effort: a missing/empty/malformed file is a green no-op (the build already shipped).
+      # content is parsed as real JSON (real language, no shell quoting/word-splitting surface),
+      # type is re-validated against an allowlist, enhancements are dropped under flood
+      # backpressure, and the whole thing is capped — the Safe Outputs pattern, identical in
+      # shape to fixer.yml. Best-effort: a missing/empty/malformed file is a green no-op (the
+      # build already shipped either way).
       - name: File builder observations
         if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          OBS_FILE: ${{ runner.temp }}/observations.json
           FEATURES_OK: ${{ steps.flood.outputs.features-ok }}
-          MAX_OBS: "3"
-        run: |
-          set -uo pipefail
-          if [ ! -s "$OBS_FILE" ]; then echo "no observations file → nothing to file"; exit 0; fi
-          if ! jq -e 'type == "array"' "$OBS_FILE" >/dev/null 2>&1; then
-            echo "::warning::observations file is not a JSON array — ignoring"; exit 0
-          fi
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require("fs");
+            const { owner, repo } = context.repo;
+            const obsFile = `${process.env.RUNNER_TEMP}/observations.json`;
+            const MAX_OBS = 3;
 
-          # Cap first, then iterate. jq -c emits one compact object per line; read parses each.
-          jq -c ".[0:${MAX_OBS}][]" "$OBS_FILE" 2>/dev/null | while IFS= read -r p; do
-            title=$(echo "$p" | jq -r '.title // empty')
-            body=$(echo "$p" | jq -r '.body // empty')
-            type=$(echo "$p" | jq -r '.type // empty')
-            security=$(echo "$p" | jq -r '.security // false')
-            effort=$(echo "$p" | jq -r '.effort // empty')
-            [ -z "$title" ] || [ -z "$body" ] && { echo "::warning::skipping observation with empty title/body"; continue; }
+            if (!fs.existsSync(obsFile)) { core.info("no observations file → nothing to file"); return; }
+            let raw;
+            try { raw = JSON.parse(fs.readFileSync(obsFile, "utf8")); } catch { core.warning("observations file is not valid JSON — ignoring"); return; }
+            if (!Array.isArray(raw)) { core.warning("observations file is not a JSON array — ignoring"); return; }
 
-            case "$type" in bug|enhancement|documentation) ;; *)
-              echo "::warning::skipping observation with unexpected type '$type': $title"; continue ;;
-            esac
+            const filed = [];
+            for (const p of raw.slice(0, MAX_OBS)) {
+              const { title, body, type, security, effort } = p || {};
+              if (!title || !body) { core.warning(`skipping observation with empty title/body`); continue; }
+              if (!["bug", "enhancement", "documentation"].includes(type)) { core.warning(`skipping observation with unexpected type '${type}': ${title}`); continue; }
+              if (type === "enhancement" && process.env.FEATURES_OK === "false") { core.info(`flood guard active → holding feature observation: ${title}`); continue; }
 
-            # Flood backpressure applies to features only; fixes/docs always flow.
-            if [ "$type" = "enhancement" ] && [ "$FEATURES_OK" = "false" ]; then
-              echo "flood guard active → holding feature observation: $title"; continue
-            fi
+              const labels = [type];
+              if (security === true) labels.push("security");
+              // Missing/invalid effort is not fatal — select's default (medium) covers it.
+              if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
 
-            # Only known-good labels (a non-existent label makes `gh issue create` fail and
-            # would silently drop the observation). Same label set fixer.yml files with.
-            label_args=(--label "$type")
-            [ "$security" = "true" ] && label_args+=(--label security)
-            # Missing/invalid effort is not fatal — select's default (medium) covers it.
-            case "$effort" in small|medium|large) label_args+=(--label "effort:$effort") ;; esac
-
-            if url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}" 2>/dev/null); then
-              echo "filed observation: $url"
-            else
-              echo "::warning::failed to file observation (non-fatal): $title"
-            fi
-          done
-          # Never fail the run over observations — the build already shipped.
-          exit 0
+              try {
+                const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
+                core.info(`filed observation: ${data.html_url}`);
+                filed.push(data.html_url);
+              } catch (e) {
+                core.warning(`failed to file observation (non-fatal): ${title} — ${e.message}`);
+              }
+            }
+            // Never fail the run over observations — the build already shipped.
+            if (filed.length > 0) {
+              await core.summary.addHeading("issue-build: observations filed", 3).addList(filed).write();
+            }
