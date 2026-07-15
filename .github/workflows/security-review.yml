@@ -48,7 +48,7 @@ on:
         type: string
         default: ""
       allowed-bots:
-        description: "Comma-separated bot usernames (without [bot] suffix) allowed to trigger this review, e.g. a repo's own automerge/issue-build App. Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
+        description: "Comma-separated bot LOGINS, exactly as GitHub reports them — INCLUDING the [bot] suffix (e.g. \"suxbot[bot]\"), matching claude-code-action's own allowed_bots convention (docs example: \"dependabot[bot],renovate[bot]\"). Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
         type: string
         default: ""
 

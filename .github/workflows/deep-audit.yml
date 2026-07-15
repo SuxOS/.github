@@ -99,6 +99,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # Inert here today (schedule/workflow_dispatch only, no bot-authored trigger event
+          # exists for this job) — added for consistency with every other claude-code-action
+          # step in the org so a future trigger change doesn't quietly need this rediscovered.
+          allowed_bots: suxbot[bot]
           prompt: |
             You are the nightly deep auditor for this repo. The fast per-PR security review
             runs on a cheaper model; you are the stronger second pass over what actually
