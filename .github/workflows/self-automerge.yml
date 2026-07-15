@@ -13,8 +13,6 @@ on:
     types: [opened, reopened, synchronize, labeled, ready_for_review]
   pull_request_review:
     types: [submitted]
-  check_suite:
-    types: [completed]
 
 jobs:
   automerge:
