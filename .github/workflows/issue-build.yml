@@ -304,8 +304,10 @@ jobs:
             n=$(echo "$nh" | jq -r '.number')
             reason=$(echo "$nh" | jq -r '.reason // ""')
             gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
-            [ -n "$reason" ] && gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-              --body "🤖 Held off autonomous build: $reason (labeled \`needs-human\`). Remove the label to let the builder retry it." 2>/dev/null || true
+            if [ -n "$reason" ]; then
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 Held off autonomous build: $reason (labeled \`needs-human\`). Remove the label to let the builder retry it." 2>/dev/null || true
+            fi
             echo "issue #$n → needs-human ($reason)"
           done
 
