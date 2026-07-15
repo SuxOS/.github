@@ -28,7 +28,7 @@ on:
       smoke-url:
         description: "URL to smoke-check. Empty to skip the single-endpoint check entirely."
         type: string
-        default: "https://sux.colinxs.workers.dev/mcp"
+        default: ""
       expected-status:
         description: "Expected HTTP status code from smoke-url (the healthy signal)."
         type: string
