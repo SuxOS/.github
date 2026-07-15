@@ -53,21 +53,36 @@ on:
         # job is one shared checkout, one branch; the builder's own disjoint-files judgment is
         # the collision filter, not filesystem isolation) lets one builder carry a wide batch.
         # The governor stands the whole stage down at red before spend runs away. Was 8, 20,
-        # 40; recalibrated to 24 (2026-07-15) against live data — 17-19 issue batches completed
-        # comfortably in 6-15min, so 24 is ~observed-comfortable with headroom, and dynamic
-        # expand (§3.1.5) lets the builder push higher when the work is light.
-        default: 24
+        # 40, 24; shrunk to 10 (2026-07-15, parallel-batches redesign) — now that `select` is
+        # the only serialized phase and `build` runs unlocked, real wall-clock throughput comes
+        # from MORE small concurrent batches (real per-runner isolation, small failure blast
+        # radius) rather than one big batch's internal subagent fan-out (shared checkout,
+        # trusted-not-verified disjointness). Dynamic expand (§3.1.5) still lets a builder push
+        # higher when the work in its own batch is light.
+        default: 10
       effort-budget:
         description: >-
           Points budget for the bundle, oldest-first within the chosen tier: small=1,
           medium=2 (the default for an issue with no effort:* label), large=4. Sized so
           the batch reflects actual work, not just issue count — a few large issues fill
           it as fast as many small ones. Selection stops at whichever of max-issues or
-          effort-budget is hit first (both are hard caps).
+          effort-budget is hit first (both are hard caps). Also the unit the `requeue` job
+          divides remaining backlog by to decide how many parallel batches to fire.
         type: number
-        # Recalibrated 80 -> 48 alongside max-issues (2026-07-15): ~24 medium-effort issues,
-        # matching observed-comfortable batch size; dynamic expand pushes higher when light.
-        default: 48
+        # 80 -> 48 -> 16 (2026-07-15, parallel-batches redesign): shrunk alongside max-issues
+        # so a typical backlog splits into ~2-3 concurrent batches instead of one big serial
+        # one — see max-issues above and `parallel-batches` below.
+        default: 16
+      parallel-batches:
+        description: >-
+          Max concurrent issue-build runs (this run plus requeued ones) for one repo.
+          The `requeue` job counts currently in-flight runs and only dispatches enough
+          more to reach this cap, sized against remaining backlog / effort-budget — so a
+          big backlog gets genuine wall-clock parallelism (separate runners, separate
+          checkouts, small per-batch failure blast radius) while spend stays bounded and
+          predictable rather than growing with an ever-larger single session.
+        type: number
+        default: 4
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
@@ -107,9 +122,12 @@ permissions:
   issues: write
   actions: read
 
-concurrency:
-  group: issue-build-${{ github.workflow }}
-  cancel-in-progress: false
+# NO top-level concurrency: the whole run must NOT serialize, or parallel batches can't run.
+# Only `select` (the claim step) is serialized — see its job-level concurrency below — so two
+# runs never claim overlapping issues, while their `build` jobs run concurrently on separate
+# runners/checkouts. That per-runner isolation (not one big session's trusted-disjoint subagent
+# fan-out) is where real throughput comes from; the `requeue` job fans out up to
+# `parallel-batches` concurrent runs against the remaining backlog.
 
 jobs:
   select:
@@ -117,6 +135,13 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # Serialize ONLY the claim step across the repo: two selects running at once could both
+    # read an issue as unclaimed and double-claim it (the classic claim race). cancel-in-progress
+    # false so a queued select waits its turn rather than being dropped — every dispatched batch
+    # gets to claim its own disjoint slice. build/requeue are intentionally NOT in this group.
+    concurrency:
+      group: issue-build-select-${{ github.workflow }}
+      cancel-in-progress: false
     outputs:
       numbers: ${{ steps.pick.outputs.numbers }}
       count: ${{ steps.pick.outputs.count }}
@@ -180,13 +205,36 @@ jobs:
             const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
             const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
 
+            // 0. Issues already covered by an OPEN pull request. The `building` label is only
+            //    the in-run claim (it covers select → PR-open); once a PR exists, IT is the
+            //    durable "this issue is handled" marker, and the claim is intentionally NOT
+            //    re-stripped when the PR opens (see the build job). So the real cross-run dedup
+            //    is: an issue named in an open PR's closing keyword (`Closes/Fixes/Resolves #n`)
+            //    is off the table until that PR merges (which closes it) or closes (which frees
+            //    it). This is what makes fast requeue / parallel batches safe — without it a
+            //    second run selects the same issues the moment the first opens its PR but before
+            //    it merges, producing duplicate PRs (observed live 2026-07-15 across sux-fileops
+            //    and suxrouter; the whole reason this guard exists). It also protects issues
+            //    whose `building` label was already stripped by the old release-at-PR-open code.
+            const openPrs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            const referencedByOpenPr = new Set();
+            for (const pr of openPrs) {
+              for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
+            }
+
             // 1. Reap: an issue stuck in `building` with no activity for >reapHours is an
-            //    orphan from a build run that crashed after claiming — drop the claim.
+            //    orphan from a build run that crashed after claiming — drop the claim. But NEVER
+            //    reap one whose PR is still open (a slow-CI'ing PR can idle past reapHours while
+            //    perfectly healthy) — that would free it for a duplicate rebuild.
             const stale = await github.paginate(github.rest.issues.listForRepo, {
               owner, repo, state: "open", labels: "building", per_page: 100,
             });
             const now = Date.now();
             for (const issue of stale) {
+              if (referencedByOpenPr.has(issue.number)) continue;
               const ageH = (now - new Date(issue.updated_at).getTime()) / 3_600_000;
               if (ageH >= reapHours) {
                 core.info(`reaping orphaned building issue #${issue.number} (idle ${ageH.toFixed(1)}h)`);
@@ -208,6 +256,10 @@ jobs:
               // it were a feature request (confirmed live: SuxOS/sux#499 was the ONLY issue
               // this filter returned as buildable before the label existed).
               if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
+              // Already covered by an open PR (see step 0) — the durable cross-run dedup that
+              // makes parallel/fast-requeue batches safe, and that also covers issues whose
+              // `building` claim was stripped by the old release-at-PR-open behaviour.
+              if (referencedByOpenPr.has(i.number)) return false;
               // The suxbot App installation (SUX_BOT_APP_ID/SUX_BOT_PRIVATE_KEY, which mints
               // this step's token) has no org `members: read` permission — GitHub silently
               // resolves author_association to "NONE" for real org members when queried via a
@@ -555,10 +607,15 @@ jobs:
           gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" \
             --title "$title" --body "$body"
 
-          # Release claims; the PR's `Closes #n` closes each issue on merge.
-          for n in $nums; do
-            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
-          done
+          # NOTE: the `building` claim is deliberately NOT released here. The PR's `Closes #n`
+          # is now the durable "this issue is handled" marker — select's step-0 predicate skips
+          # any issue referenced by an OPEN PR, so the claim's job (dedup) is done by the PR from
+          # here on. Releasing at PR-open is exactly what let a fast requeue / parallel batch
+          # re-select the same issues before the PR merged, producing duplicate PRs (observed
+          # live 2026-07-15). On MERGE, `Closes #n` closes the issue (gone from the open set);
+          # on unmerged CLOSE, the issue reopens to `building`-labelled + no-open-PR, and the
+          # reaper releases it after REAP_STALE_HOURS so it retries. Both paths are covered
+          # without a race window.
 
       # Backpressure for the observations below: if the bot's PR queue is already deep, don't
       # let the builder pile MORE feature work on top (bug/security/doc observations still flow).
@@ -621,14 +678,12 @@ jobs:
               await core.summary.addHeading("issue-build: observations filed", 3).addList(filed).write();
             }
 
-  # N -> K -> N=0: draining the existing backlog never waits on the clock — only NEW
-  # issues arriving is cron-paced (fixer). As long as buildable backlog remains and the
-  # governor isn't red, immediately re-dispatch the caller workflow instead of idling
-  # until the next scheduled slot. Self-terminates the moment backlog hits zero; the
-  # existing schedule trigger is the wake-up call once new work arrives (fixer / a human
-  # labeling an issue) or the governor clears back to green/yellow. The governor (red) is
-  # also the runaway backstop if a batch keeps failing without ever shrinking the
-  # backlog — this job just stops requeueing, the caller's own cron resumes it later.
+  # N -> K -> N=0: draining the existing backlog never waits on the clock — only NEW issues
+  # arriving is cron-paced (fixer). While UNCLAIMED buildable backlog remains and the governor
+  # isn't red, keep up to `parallel-batches` issue-build runs in flight at once by dispatching
+  # however many more are needed to reach that cap. Self-terminates the moment nothing unclaimed
+  # remains; the schedule trigger is the wake-up call once new work arrives or the governor
+  # clears. The governor (red) is the runaway backstop; the cap bounds concurrency+spend.
   requeue:
     needs: [select, build]
     if: always()
@@ -655,51 +710,84 @@ jobs:
       # A plain GITHUB_TOKEN cannot dispatch new workflow runs — GitHub blocks that
       # specifically to prevent runaway self-triggering loops — hence the app token above,
       # same as select/build already use to mutate issues/PRs across a run boundary.
-      - name: Requeue this workflow if buildable backlog remains
+      - name: Fan out up to parallel-batches while unclaimed backlog remains
         if: steps.throttle.outputs.go == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WORKFLOW_REF: ${{ github.workflow_ref }}
           REF_NAME: ${{ github.ref_name }}
+          MAX_ISSUES: ${{ inputs.max-issues }}
+          PARALLEL_BATCHES: ${{ inputs.parallel-batches }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { owner, repo } = context.repo;
-            // Same buildable predicate as the select step (kept in sync manually — both are
-            // short and a shared module isn't worth the indirection in a single-file reusable
-            // workflow); re-checked fresh rather than trusting select's now-stale output,
-            // since build may have just claimed/closed issues that change the count.
+            const maxIssues = Math.max(1, Number(process.env.MAX_ISSUES) || 10);
+            const cap = Math.max(1, Number(process.env.PARALLEL_BATCHES) || 1);
+
+            // UNCLAIMED buildable count — the same predicate select uses (kept in sync manually;
+            // both are short and a shared module isn't worth the indirection in a single-file
+            // reusable). "Unclaimed" is the key word: an issue that a concurrent batch has
+            // already `building`-claimed, or that an open PR already covers, is NOT more work to
+            // dispatch for — counting it would spawn batches that find nothing to do. Re-read
+            // fresh (not select's stale output): build/other concurrent runs just changed state.
             const ORG_OWNER_IDS = [18266472]; // colinxs
-            const all = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: "open", per_page: 100,
-            });
-            const buildable = all.filter((i) => {
+            const [all, openPrs] = await Promise.all([
+              github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
+              github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
+            ]);
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            const referencedByOpenPr = new Set();
+            for (const pr of openPrs) {
+              for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
+            }
+            const unclaimed = all.filter((i) => {
               if (i.pull_request) return false;
               const labels = i.labels.map((l) => l.name);
               if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
+              if (referencedByOpenPr.has(i.number)) return false;
               return ["OWNER", "MEMBER", "COLLABORATOR"].includes(i.author_association)
                 || i.user.login === "suxbot[bot]"
                 || ORG_OWNER_IDS.includes(i.user.id);
-            });
+            }).length;
 
-            if (buildable.length === 0) {
-              core.info("no buildable backlog remains — idling until the next scheduled run or new issue");
+            if (unclaimed === 0) {
+              core.info("no unclaimed buildable backlog — idling until the next scheduled run or new issue");
               return;
             }
 
-            // workflow_ref looks like "OWNER/REPO/.github/workflows/FILE.yml@refs/heads/main"
-            // regardless of whether FILE.yml is this reusable's own definition or (as here,
-            // since workflow_call runs in the caller's context) the caller's stub — resolving
-            // it from the ref means this job needs no per-repo configuration to know what to
-            // re-dispatch.
+            // How many issue-build runs are already in flight for this repo (this run's own
+            // requeue job still counts its run as in_progress, so it's included — we top UP to
+            // the cap, we don't add cap-many on top). GitHub has no "runs for workflow X" filter
+            // on the REST list that's reliable across reusable callers, so filter by name.
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner, repo, per_page: 100, status: "in_progress",
+            }).then((r) => r.data.workflow_runs).catch(() => []);
+            const queued = await github.rest.actions.listWorkflowRunsForRepo({
+              owner, repo, per_page: 100, status: "queued",
+            }).then((r) => r.data.workflow_runs).catch(() => []);
+            const inFlight = [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
+
+            // Dispatch enough to reach the cap, but never more batches than there is unclaimed
+            // work to fill (each batch drains ~maxIssues), and never negative.
+            const wantForWork = Math.ceil(unclaimed / maxIssues);
+            const toDispatch = Math.max(0, Math.min(cap - inFlight, wantForWork));
+            core.info(`unclaimed=${unclaimed} inFlight=${inFlight} cap=${cap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
+            if (toDispatch === 0) {
+              core.info("cap already saturated (or no headroom) — a running batch's own requeue will top up as it finishes");
+              return;
+            }
+
+            // workflow_ref: "OWNER/REPO/.github/workflows/FILE.yml@refs/heads/main" — resolving
+            // the file from it means no per-repo config is needed to know what to re-dispatch.
             const m = (process.env.WORKFLOW_REF || "").match(/\.github\/workflows\/([^@]+)/);
             const workflowFile = m ? m[1] : "issue-build.yml";
-
-            core.info(`backlog=${buildable.length} remains → requeueing ${workflowFile}`);
-            try {
-              await github.rest.actions.createWorkflowDispatch({
-                owner, repo, workflow_id: workflowFile, ref: process.env.REF_NAME || "main",
-              });
-            } catch (e) {
-              core.warning(`requeue dispatch failed (non-fatal — the next scheduled run still picks up the backlog): ${e.message}`);
+            const ref = process.env.REF_NAME || "main";
+            for (let n = 0; n < toDispatch; n++) {
+              try {
+                await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id: workflowFile, ref });
+                core.info(`dispatched requeue ${n + 1}/${toDispatch} of ${workflowFile}`);
+              } catch (e) {
+                core.warning(`requeue dispatch ${n + 1} failed (non-fatal — the schedule still picks up the backlog): ${e.message}`);
+              }
             }
