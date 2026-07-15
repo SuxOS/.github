@@ -183,8 +183,13 @@ disabling feature proposals — remains the coarse lever on top of this fine one
 
 `max-issues` (batch size) is tuned for throughput, not spend-avoidance, because
 `budget-governor.yml`'s weekly runner-minute cap is the real throttle and stands the whole
-build stage down at `red` before spend runs away. Worktree/subagent isolation lets one
-builder carry a wide batch without file collisions. Default raised 8 → 20 (2026-07-15).
+build stage down at `red` before spend runs away. In-session Task-tool subagent fan-out —
+**not git worktrees**; the build job is one shared checkout on one branch — lets one builder
+carry a wide batch, with the builder's own disjoint-files judgment as the collision filter.
+Default raised 8 → 20 → 40 (2026-07-15, the second raise paired with a 24h/15min-cadence
+drain). The turns cap (300 → 500) and build job timeout (45 → 90 min) were raised alongside
+each raise — turn budget saturates before issue count does (`base-max-turns + 20×count`), so
+raising the count alone just produces truncated, uncommitted sessions instead of bigger PRs.
 
 ### 3.2 Loop 2 — green → merge (native auto-merge, not a merge queue)
 

@@ -44,10 +44,13 @@ on:
         type: number
         # Governor-as-ceiling (operator decision 2026-07-15): the budget-governor's weekly
         # runner-minute cap is the real throttle, so this batch size is set for throughput,
-        # not spend-avoidance. Worktree/subagent isolation lets one builder carry a wide batch
-        # without file collisions; the governor stands the whole stage down at red before spend
-        # runs away. Was 8 (conservative); raised to drain backlogs in fewer, wider passes.
-        default: 20
+        # not spend-avoidance. In-session Task-tool subagent fan-out (NOT git worktrees — this
+        # job is one shared checkout, one branch; the builder's own disjoint-files judgment is
+        # the collision filter, not filesystem isolation) lets one builder carry a wide batch.
+        # The governor stands the whole stage down at red before spend runs away. Was 8, then
+        # 20; raised again 2026-07-15 for a 24h/15min-cadence drain — turns cap and job timeout
+        # below were raised together, since turns (not issue count) saturates first otherwise.
+        default: 40
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
@@ -219,10 +222,14 @@ jobs:
 
           # Turns scale with issue count, then speed: fast halves the budget (cheaper,
           # quicker, less exploration); thorough (default) keeps the full scaled budget.
+          # Cap raised 300 -> 500 alongside max-issues 2026-07-15: at the old cap, turn budget
+          # (not issue count) saturated at count ~13 — a 40-issue batch would run out of turns
+          # before finishing, not build 40 issues. 500 keeps headroom to ~22 before re-saturating;
+          # a batch above that still runs, just on a flatter per-issue turn budget past the cap.
           turns=$(( BASE_TURNS + 20 * count ))
           [ "$SPEED" = "fast" ] && turns=$(( turns / 2 ))
           [ "$turns" -lt 10 ] && turns=10
-          [ "$turns" -gt 300 ] && turns=300
+          [ "$turns" -gt 500 ] && turns=500
 
           # Claim each selected issue so a concurrent run can't double-process it.
           for i in $(echo "$numbers" | jq -r '.[]'); do
@@ -241,7 +248,11 @@ jobs:
     needs: select
     if: needs.select.outputs.count != '' && needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Raised 45 -> 90 alongside the turns cap (300 -> 500, 2026-07-15): a wider batch with more
+    # turn budget can genuinely run longer, and a job killed by timeout mid-commit is worse than
+    # a slow one — "Push and open ONE PR" only checks for a real commit either way, so a timeout
+    # here loses whatever partial work wasn't yet committed and pushed.
+    timeout-minutes: 90
     steps:
       - name: Mint app token
         id: app-token
