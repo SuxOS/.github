@@ -1,0 +1,21 @@
+name: Self security review
+
+# The safety gate for suxbot[bot]-authored PRs against THIS repo's own workflow
+# files (see self-fixer.yml). ready_for_review is required — see
+# scripts/test-pipeline-invariants.sh for why omitting it is a regression.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  security-review:
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/security-review.yml@main
+    with:
+      allowed-bots: "suxbot[bot]"
+    secrets: inherit

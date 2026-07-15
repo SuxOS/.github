@@ -1,0 +1,19 @@
+name: Self fixer
+
+# Wires the backlog "propose" stage onto THIS repo (SuxOS/.github), same as every
+# consumer repo's fixer.yml caller stub. Added 2026-07-15 to unblock the 16 issues
+# piling up here that never entered the pipeline (issue-build.yml/fixer.yml/
+# automerge.yml in this repo are only the reusable *definitions* — nothing
+# previously called them against .github itself). TEMPORARY: this consciously
+# lets suxbot[bot] author PRs that edit this repo's own shared workflow files;
+# see self-issue-build.yml and self-automerge.yml for the matching build/merge
+# stages and self-security-review.yml for the gate that still applies to them.
+
+on:
+  schedule: [{ cron: "37 8 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  fixer:
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    secrets: inherit
