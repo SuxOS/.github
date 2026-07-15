@@ -153,6 +153,39 @@ survive; `triage`'s three-tier confidence machinery is deleted and its residual
 buildable/needs-human check folds into the front of `issue-build` (one fewer stage, one
 fewer Opus session class, one fewer label family).
 
+#### 3.1.1 The builder also proposes — capture insight, don't waste it (2026-07-15)
+
+The builder holds the deepest view of a repo anyone gets that day. Making it *only* build
+throws that away: a bug it trips over out-of-scope, a feature the code is obviously asking
+for, a durable lesson about how the repo works — all lost when the session ends. So the
+build session has a **secondary capture step**: after it finishes and pushes, it may write
+up to 3 observations (`{title, body, type, security}`, same shape fixer proposes) to a file
+*outside the repo tree*; a deterministic Safe-Outputs step files them as issues, which
+re-enter Loop 1. This closes the loop — the pipeline that builds work also *discovers* the
+next work — without a second scanning session. It is strictly secondary (never spends gate
+turns), best-effort (a missing/empty file is a green no-op), and flood-guarded (below).
+
+This is why `fixer` is no longer the *only* proposer, but stays: `fixer` is the cheap bulk
+scan that runs when there's no build to ride along on; the builder's capture is the
+high-signal, zero-marginal-cost proposer that only exists while a build is already happening.
+
+#### 3.1.2 Flood guard — backpressure on feature generation
+
+The operator's rule is "if the bots flood with features, disable auto-feature." The
+deterministic half of that is the `flood-guard` composite action: it counts the bot's open
+PRs, and at/over a threshold (default 8) **feature** proposals stand down — bug/security/doc
+work still flows. A deep bot-PR queue means Loops 2–3 aren't keeping up, so generating more
+feature work just grows the pile; the guard applies backpressure until the queue drains.
+Fail-open (a lookup failure never stalls the pipeline). The operator's manual override — fully
+disabling feature proposals — remains the coarse lever on top of this fine one.
+
+#### 3.1.3 Throughput: the governor is the ceiling, not a hardcoded cap
+
+`max-issues` (batch size) is tuned for throughput, not spend-avoidance, because
+`budget-governor.yml`'s weekly runner-minute cap is the real throttle and stands the whole
+build stage down at `red` before spend runs away. Worktree/subagent isolation lets one
+builder carry a wide batch without file collisions. Default raised 8 → 20 (2026-07-15).
+
 ### 3.2 Loop 2 — green → merge (native auto-merge, not a merge queue)
 
 **Research said "use GitHub's native merge queue."** For a high-volume repo with PR
