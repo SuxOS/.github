@@ -26,7 +26,7 @@ jobs:
       pull-requests: write
     uses: SuxOS/.github/.github/workflows/automerge.yml@main
     with:
-      required-checks: |
+      required-gates: |
         actionlint
         pin-consistency
         security-review
