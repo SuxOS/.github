@@ -1,15 +1,16 @@
 # Self-CI: fail if any third-party action is SHA-pinned to more than one commit
-# across .github/workflows/**. Third-party actions are pinned by full commit SHA
-# (supply-chain hygiene); this guard catches the drift where one action ends up
-# maintained at two SHAs by hand (as actions/checkout did across v4/v7). Runs
-# directly on this repo — it is NOT a reusable workflow_call file.
+# across .github/workflows/** and .github/actions/*/action.yml. Third-party actions
+# are pinned by full commit SHA (supply-chain hygiene); this guard catches the
+# drift where one action ends up maintained at two SHAs by hand (as
+# actions/checkout did across v4/v7). Runs directly on this repo — it is NOT a
+# reusable workflow_call file.
 name: pin-consistency
 
 on:
   push:
-    paths: [".github/workflows/**"]
+    paths: [".github/workflows/**", ".github/actions/**"]
   pull_request:
-    paths: [".github/workflows/**"]
+    paths: [".github/workflows/**", ".github/actions/**"]
 
 permissions:
   contents: read
@@ -17,13 +18,16 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Assert each SHA-pinned action resolves to a single SHA
         run: |
           set -euo pipefail
-          # Collect "owner/action<TAB>sha" for every SHA-pinned `uses:` line.
-          pairs="$(grep -rhoE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-fA-F]{40}' .github/workflows/ \
+          # Collect "owner/action<TAB>sha" for every SHA-pinned `uses:` line, across
+          # both the reusable workflows and the composite actions they call into.
+          pairs="$(grep -rhoE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-fA-F]{40}' \
+              .github/workflows/ .github/actions/*/action.yml \
             | sed -E 's/uses:[[:space:]]*//' \
             | awk -F@ '{print $1"\t"$2}' \
             | sort -u)"
