@@ -52,10 +52,11 @@ on:
         # not spend-avoidance. In-session Task-tool subagent fan-out (NOT git worktrees — this
         # job is one shared checkout, one branch; the builder's own disjoint-files judgment is
         # the collision filter, not filesystem isolation) lets one builder carry a wide batch.
-        # The governor stands the whole stage down at red before spend runs away. Was 8, then
-        # 20; raised again 2026-07-15 for a 24h/15min-cadence drain — turns cap and job timeout
-        # below were raised together, since turns (not issue count) saturates first otherwise.
-        default: 40
+        # The governor stands the whole stage down at red before spend runs away. Was 8, 20,
+        # 40; recalibrated to 24 (2026-07-15) against live data — 17-19 issue batches completed
+        # comfortably in 6-15min, so 24 is ~observed-comfortable with headroom, and dynamic
+        # expand (§3.1.5) lets the builder push higher when the work is light.
+        default: 24
       effort-budget:
         description: >-
           Points budget for the bundle, oldest-first within the chosen tier: small=1,
@@ -64,7 +65,9 @@ on:
           it as fast as many small ones. Selection stops at whichever of max-issues or
           effort-budget is hit first (both are hard caps).
         type: number
-        default: 80
+        # Recalibrated 80 -> 48 alongside max-issues (2026-07-15): ~24 medium-effort issues,
+        # matching observed-comfortable batch size; dynamic expand pushes higher when light.
+        default: 48
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
@@ -119,6 +122,8 @@ jobs:
       count: ${{ steps.pick.outputs.count }}
       tier: ${{ steps.pick.outputs.tier }}
       model: ${{ steps.pick.outputs.model }}
+      subagent_model: ${{ steps.pick.outputs.subagent_model }}
+      effort: ${{ steps.pick.outputs.effort }}
       turns: ${{ steps.pick.outputs.turns }}
     steps:
       - name: Preflight — need the token
@@ -230,23 +235,40 @@ jobs:
               if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
               break;
             }
-            const sensedOpus = picked.some((i) => i.labels.includes("security") || i.labels.includes("effort:large"));
+            // Escalate the MAIN model to opus for meaningful work: the whole HIGH tier
+            // (security or priority:high) or any effort:large issue. Routine MED/LOW work
+            // stays on sonnet — spending opus on the bug floor is waste, spending it on the
+            // work that actually matters is the point (operator: "default opus sonnet build"
+            // for real work; governor is the spend ceiling). Reuses data already computed.
+            const sensedOpus = tier === "high" || picked.some((i) => i.labels.includes("effort:large"));
 
             core.info(`selected tier=${tier} count=${picked.length} points=${points}/${effortBudget} sensedOpus=${sensedOpus} issues=${JSON.stringify(picked.map((i) => i.number))}`);
 
-            // Model: auto = sonnet by default (three-loop-pipeline.md — Sonnet is near-Opus on
-            // codegen with CI + security-review gating every resulting PR); auto-ESCALATES to
-            // opus only on the sensed signal above (security or effort:large in the selected
-            // batch) — reusing data already computed for tier/points, not a new judgment call.
-            // model-hint always overrides sensing in either direction.
+            // model-hint always overrides the auto choice in either direction.
             const modelHint = process.env.MODEL_HINT;
             let model;
             if (modelHint === "auto") {
               model = sensedOpus ? "opus" : process.env.SIMPLE_MODEL;
-              if (sensedOpus) core.info("sensed security/large-effort in batch -> auto-escalating to opus");
+              if (sensedOpus) core.info(`high-tier/large-effort batch -> opus main model`);
             } else {
               model = modelHint;
             }
+
+            // Subagent (Task-tool) model: one tier below the main model, floored at sonnet so
+            // parallel CODE-writing subagents are never haiku (weaker codegen -> the main
+            // session redoing bad work costs more than it saves). So an opus build fans out to
+            // sonnet subagents ("opus sonnet build"); a sonnet build keeps sonnet subagents.
+            // Passed to the build session via CLAUDE_CODE_SUBAGENT_MODEL (see the build job).
+            const subagentModel = modelHint === "auto" ? (model === "opus" ? "sonnet" : model) : model;
+
+            // Effort level scales with tier — the orchestrator picks model AND reasoning depth
+            // per build, deterministically, from the same tier signal (operator: "choose model
+            // and settings for agent and subagent for each build" automatically). High-tier
+            // (opus) work gets deep reasoning; the routine floor runs fast and cheap. Passed via
+            // CLAUDE_CODE_EFFORT_LEVEL. Only meaningful when model-hint is auto; a manual hint
+            // leaves effort at the model default (auto) so an explicit override isn't second-
+            // guessed. Opus 4.8 + Sonnet support low|medium|high|xhigh|max.
+            const effort = modelHint !== "auto" ? "auto" : sensedOpus ? "high" : tier === "med" ? "medium" : "low";
 
             // Turns scale with selected effort points (not raw issue count — a few large
             // issues cost as much attention as many small ones), then speed. 10 turns/point is
@@ -268,13 +290,15 @@ jobs:
             core.setOutput("count", String(picked.length));
             core.setOutput("tier", tier);
             core.setOutput("model", model);
+            core.setOutput("subagent_model", subagentModel);
+            core.setOutput("effort", effort);
             core.setOutput("turns", String(turns));
 
             await core.summary
               .addHeading("issue-build: select", 3)
               .addTable([
-                [{ data: "tier", header: true }, { data: "count", header: true }, { data: "points", header: true }, { data: "model", header: true }, { data: "turns", header: true }],
-                [tier, String(picked.length), `${points}/${effortBudget}`, model, String(turns)],
+                [{ data: "tier", header: true }, { data: "count", header: true }, { data: "points", header: true }, { data: "model", header: true }, { data: "subagent", header: true }, { data: "effort", header: true }, { data: "turns", header: true }],
+                [tier, String(picked.length), `${points}/${effortBudget}`, model, subagentModel, effort, String(turns)],
               ])
               .addDetails("issues in this batch", picked.map((i) => `#${i.number}`).join(", ") || "(none)")
               .write();
@@ -358,6 +382,19 @@ jobs:
           # (docs/custom-automations.md) is GitHub Actions `${{ }}` expressions written
           # directly inline in the prompt string below — no env-var indirection needed.
           ENABLE_PROMPT_CACHING_1H: "1"
+          # The orchestrator picks the subagent model + reasoning effort per build (select
+          # step, by tier): opus main fans out to sonnet subagents; effort scales high/medium/
+          # low with the tier. These two the Claude Code runtime reads from the environment.
+          CLAUDE_CODE_SUBAGENT_MODEL: ${{ needs.select.outputs.subagent_model }}
+          CLAUDE_CODE_EFFORT_LEVEL: ${{ needs.select.outputs.effort }}
+          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529)
+          # window and retry instead of failing the build — the pool-exhaustion jam, solved
+          # without a metered key (env-vars docs: "for unattended sessions such as CI jobs").
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
+          # A repo's gate commands (test/build) can legitimately run long; the 2-min default
+          # would kill them mid-build. Raise the floor and the ceiling the model may set.
+          BASH_DEFAULT_TIMEOUT_MS: "600000"
+          BASH_MAX_TIMEOUT_MS: "1200000"
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
           show_full_output: true
