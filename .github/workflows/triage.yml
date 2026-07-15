@@ -176,6 +176,14 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # Load-bearing (unlike the inert additions elsewhere in the org): the `issues:
+          # opened/reopened` trigger fires with the ISSUE'S author as the event actor. When
+          # suxbot[bot] files the issue (author_association: NONE), the action's own
+          # default "never run on a bot-triggered event" block can refuse this step even
+          # though the job-level `if:` (fixed for #140) already lets the JOB run. Without
+          # this, #140's fix is incomplete — the job would start and then the action itself
+          # would still refuse to execute for a bot-filed issue.
+          allowed_bots: suxbot[bot]
           prompt: |
             You are the investigator. These open issue numbers are untriaged: $ISSUE_NUMBERS
 
@@ -248,6 +256,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # Load-bearing (see the primary step's comment above) — same reasoning applies
+          # to the retry attempt.
+          allowed_bots: suxbot[bot]
           prompt: |
             You are the investigator. These open issue numbers are untriaged: $ISSUE_NUMBERS
 

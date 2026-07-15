@@ -91,6 +91,13 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # NOTE: this job's OWN `if:` (above) still requires
+          # github.event.sender.type != 'Bot', so suxbot[bot] can't actually reach this step
+          # today — that's a deliberate separate gate (a bot puppeting @claude via a comment
+          # is a different risk than a bot's own issue/PR existing). Only stops the action's
+          # default bot-trigger block from adding a SECOND reason to refuse suxbot[bot], for
+          # if/when the job-level gate is intentionally relaxed for it.
+          allowed_bots: suxbot[bot]
           trigger_phrase: "@claude"
           # MENTION job: gated to trusted (non-bot OWNER/MEMBER/COLLABORATOR) actors above and
           # can legitimately be asked to make changes and push commits, so tools stay broad
@@ -139,6 +146,12 @@ jobs:
           ENABLE_PROMPT_CACHING_1H: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # NOTE: this job's OWN `if:` still requires github.event.pull_request.author_association
+          # in OWNER/MEMBER/COLLABORATOR with sender.type != 'Bot' — suxbot[bot] can't reach this
+          # step today (that gate is deliberate, separate from this). Only stops the action's
+          # default bot-trigger block from adding a second reason to refuse it, in case a
+          # bot-authored PR is ever meant to get automated review.
+          allowed_bots: suxbot[bot]
           prompt: ${{ inputs.review-prompt }}
           # Review is advisory only — it posts inline findings, never edits or pushes.
           # Restrict to read tools + the specific git/gh-pr reads the /code-review skill

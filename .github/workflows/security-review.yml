@@ -48,7 +48,7 @@ on:
         type: string
         default: ""
       allowed-bots:
-        description: "Comma-separated bot usernames (without [bot] suffix) allowed to trigger this review, e.g. a repo's own automerge/issue-build App. Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
+        description: "Comma-separated bot LOGINS, exactly as GitHub reports them — INCLUDING the [bot] suffix (e.g. \"suxbot[bot]\"), matching claude-code-action's own allowed_bots convention (docs example: \"dependabot[bot],renovate[bot]\"). Empty (default) allows no bots — a bot-authored PR then hard-fails this required check and can never merge. Do not use '*' without reading claude-code-action's security.md."
         type: string
         default: ""
 
@@ -212,14 +212,14 @@ jobs:
           if [ -z "$verdict" ]; then
             changed=$(gh pr diff "$PR" --name-only 2>/dev/null || true)
             high_blast=false
-            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|auth|secret'; then
+            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE '\.github/workflows/|\.github/actions/|\.github/scripts/|auth|secret'; then
               high_blast=true
             fi
 
             if [ "$high_blast" = "true" ] && [ "$trusted" != "true" ]; then
               echo "::error::security review produced no verdict, diff is high-blast (or unreadable), and the author ($AUTHOR_ASSOC) is not a trusted org member — failing closed"
               if [ -n "$changed" ]; then
-                printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /' || true
+                printf '%s\n' "$changed" | grep -iE '\.github/workflows/|\.github/actions/|\.github/scripts/|auth|secret' | sed 's/^/  high-blast path: /' || true
               fi
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
               gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets from an untrusted author ($AUTHOR_ASSOC) — applied \`hold\` (fail-closed). Re-run the review or get a human review, then remove \`hold\`." 2>/dev/null || true

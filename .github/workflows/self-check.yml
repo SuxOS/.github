@@ -34,3 +34,14 @@ jobs:
       - name: Run actionlint
         run: ${{ steps.actionlint.outputs.executable }} -color
         shell: bash
+
+  invariants:
+    name: pipeline invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Assert cross-cutting pipeline invariants
+        run: bash scripts/test-pipeline-invariants.sh
+        shell: bash

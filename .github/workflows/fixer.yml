@@ -124,6 +124,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # Inert here today (schedule/workflow_dispatch only, no bot-authored trigger event
+          # exists for this job) — added for consistency with every other claude-code-action
+          # step in the org so a future trigger change does not quietly need this rediscovered.
+          allowed_bots: suxbot[bot]
           prompt: |
             You are the proposer. Find work worth doing in this repo and file it as issues —
             do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
@@ -201,6 +205,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
+          # Inert here today (schedule/workflow_dispatch only, no bot-authored trigger event
+          # exists for this job) — added for consistency with every other claude-code-action
+          # step in the org so a future trigger change does not quietly need this rediscovered.
+          allowed_bots: suxbot[bot]
           prompt: |
             You are the proposer. Find work worth doing in this repo and file it as issues —
             do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
