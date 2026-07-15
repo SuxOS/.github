@@ -202,6 +202,8 @@ jobs:
           # author whose diff the reviewer structurally couldn't finish (see the diff-access
           # fix above) shouldn't be permanently unmergeable on a harness reliability gap that
           # has nothing to do with what they changed. Untrusted/fork authors still fail closed.
+          # TODO:                 printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /' || true
+
           AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
         run: |
           set -euo pipefail
@@ -219,7 +221,6 @@ jobs:
             if [ "$high_blast" = "true" ] && [ "$trusted" != "true" ]; then
               echo "::error::security review produced no verdict, diff is high-blast (or unreadable), and the author ($AUTHOR_ASSOC) is not a trusted org member — failing closed"
               if [ -n "$changed" ]; then
-                printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /' || true
               fi
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
               gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets from an untrusted author ($AUTHOR_ASSOC) — applied \`hold\` (fail-closed). Re-run the review or get a human review, then remove \`hold\`." 2>/dev/null || true
