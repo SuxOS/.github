@@ -24,7 +24,7 @@ on:
         type: string
         default: "Stuck PRs — pipeline watcher"
       flag-behind:
-        description: "Flag BEHIND-main PRs as stuck. Set false under a merge queue, where the queue rebases each PR onto the queue head itself — BEHIND is then expected, not stuck."
+        description: "Flag BEHIND-main PRs as stuck. Default true: without a queue, BEHIND is actionable — Loop 3 rebases it."
         type: boolean
         default: true
 
@@ -72,8 +72,8 @@ jobs:
           now=$(date -u +%s)
           stale=$(( STALE_HOURS * 3600 ))
 
-          # main's required check names (classic branch protection + rulesets, unioned —
-          # a merge-queue is typically ruleset-gated). Only a FAILING check in this set is
+          # main's required check names (classic branch protection + rulesets, unioned).
+          # Only a FAILING check in this set is
           # "required"; a failing optional/advisory check must not be labelled required.
           required=""
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then

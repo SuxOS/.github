@@ -8,22 +8,15 @@ name: Security review (reusable)
 #
 # AUTH: unified onto the Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), same as every other
 # Claude workflow. ACCEPTED RISK: security-review is a REQUIRED merge gate, so if the shared
-# subscription pool exhausts, this check cannot run → the merge queue jams and NOTHING can
-# merge, including humans' PRs. This was previously kept on the metered ANTHROPIC_API_KEY
-# specifically to avoid that failure mode; the split was dropped by explicit decision to
-# consolidate on one token. If merge-queue jams become a problem, revert this file to
-# anthropic_api_key — see docs/design/backlog-pipeline.md § auth split.
+# subscription pool exhausts, this check cannot run → nothing can merge, including humans'
+# PRs (native auto-merge waits on this required check). This was previously kept on the
+# metered ANTHROPIC_API_KEY specifically to avoid that failure mode; the split was dropped
+# by explicit decision to consolidate on one token. If merge stalls from an exhausted pool
+# become a problem, revert this file to anthropic_api_key — see docs/design/backlog-pipeline.md § auth split.
 #
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/security-review.yml@main
 #   secrets: inherit
-#
-# Under a merge queue, the caller should also trigger `on: merge_group` (branch protection
-# requires this check report on the queue's speculative ref, or the queue stalls forever).
-# The job below short-circuits to a green passthrough on merge_group: the real review is a
-# PR-stage gate (a high/critical finding applies `hold`, keeping the PR out of the queue
-# entirely), so by the time a PR is queued it has already been reviewed and there is no PR
-# left to review on the merge_group ref.
 
 on:
   workflow_call:
@@ -64,7 +57,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -75,21 +68,12 @@ jobs:
     # skip (as a prior version had, gating on trusted author_association / a `self-improve`
     # label) therefore let an untrusted or unlabelled PR bypass the security review entirely
     # by being skipped — an unreviewed change merging on deterministic CI alone. The only
-    # skip conditions kept are the merge_group passthrough (the PR was already reviewed
-    # pre-queue) and draft PRs; self-improve PRs are non-draft so they still run here.
-    # NOTE: on a PR from a PUBLIC fork, GitHub withholds secrets, so
-    # CLAUDE_CODE_OAUTH_TOKEN may be absent and the Preflight step marks the review inert.
-    # That is a future concern for when repos go public; fork-secret handling is not solved
-    # here.
-    if: >
-      github.event_name == 'merge_group' ||
-      github.event.pull_request.draft == false
+    # skip condition kept is draft PRs; self-improve PRs are non-draft so they still run here.
+    # (fork/public-repo hardening: re-earn at go-public, not before — private today)
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Merge queue — security review satisfied by the pre-queue PR review
-        if: github.event_name == 'merge_group'
-        run: echo "merge_group event - security-review already performed on the PR before queueing"
       - name: Preflight — need the key
         id: pre
         if: github.event_name == 'pull_request'

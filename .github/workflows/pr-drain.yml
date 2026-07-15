@@ -147,6 +147,11 @@ jobs:
           done
 
           # ── RECONCILE ────────────────────────────────────────────────────────────────
+          # RETAINED (three-loop-pipeline.md §5 open item, verified 2026-07-15): NOT redundant
+          # with automerge.yml. automerge.yml is event-driven (pull_request_target) — it can't
+          # self-heal a PR that reached green with no triggering event (missed/failed arm event,
+          # PR predating the workflow). This periodic sweep is the only thing that arms those;
+          # pr-watch.yml flags exactly that "green + auto-merge not armed" state as stuck.
           # Structural filter only (green, unarmed, trusted, not held/feature). The
           # drift-prone safe-type/label/breaking core predicate is applied by the
           # shared pr-eligibility action in the next step.
