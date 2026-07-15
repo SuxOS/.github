@@ -10,7 +10,7 @@ name: Self fixer
 # stages and self-security-review.yml for the gate that still applies to them.
 
 on:
-  schedule: [{ cron: "*/15 * * * *" }]
+  schedule: [{ cron: "37 8 * * *" }]
   workflow_dispatch:
 
 jobs:
