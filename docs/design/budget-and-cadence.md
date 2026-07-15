@@ -68,6 +68,14 @@ interactive). Sonnet spend (~2,500–3,500 min/week) sits far inside the Sonnet 
 2. Rolls up wall-clock minutes for Claude-invoking workflows, split opus/sonnet by a
    workflow→model map kept in the workflow env (the same proxy caveat as
    `pipeline-utilization.yml`: wall-clock correlates with spend; it is not a bill).
+   Known gap (accepted, not fixed): this map keys off the *workflow name* only.
+   issue-build's build step (`.github/workflows/issue-build.yml`, `sensedOpus`, added
+   in #172) adaptively escalates its *own* run to opus per-batch based on tier/labels —
+   the workflow is still named "Issue build" either way, so those opus-escalated
+   minutes land in `total_min` and never `opus_min`. Precise attribution would need
+   issue-build to emit a distinguishable signal (distinct run-name/job-name per tier)
+   that the governor's `gh run list` sweep can key off; not worth the complexity while
+   opus escalation stays rare (high-tier or effort:large batches only).
 3. Compares against two thresholds (workflow inputs): `opus-budget-min` (default 900/week)
    and `total-budget-min` (default 6000/week). ≥75% of either → **yellow**; ≥100% → **red**.
 4. Upserts one org-wide report issue in this repo, and a per-repo tracking issue titled

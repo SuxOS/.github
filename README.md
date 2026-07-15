@@ -38,6 +38,16 @@ three-loop rework — see [docs/design/three-loop-pipeline.md](docs/design/three
 (current design) and [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md)
 (historical). Caller-stub examples below.
 
+**Self-hosted (`self-*.yml`)** — this repo also runs the backlog pipeline on itself:
+`self-fixer.yml` · `self-issue-build.yml` · `self-automerge.yml` ·
+`self-security-review.yml` are caller stubs that wire `fixer.yml`/`issue-build.yml`/
+`automerge.yml`/`security-review.yml` back onto SuxOS/.github, so this repo's own open
+issues flow through the same propose → build → automerge pipeline as `sux`/`suxrouter`.
+Since this repo ships no app (only reusable workflow YAML), `self-issue-build.yml` gates
+on `actionlint` (`self-check.yml`) + `pin-consistency.yml` instead of a Node build/test
+trio. Marked TEMPORARY in `self-fixer.yml`'s header — a consciously self-hosted
+arrangement, not the long-term shape.
+
 ### The three loops → workflows (the resolvable map)
 
 `claude-config`'s `fabric.json` names the pipeline as three loops; this is what each
