@@ -319,7 +319,12 @@ jobs:
             can't get them green (genuine design problem, missing context), do NOT push a broken
             commit — say so clearly in your final message and explain what's blocking it.
           # BUILD legitimately writes code, pushes, and fans out to subagents — tools stay broad.
-          claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }}"
+          # bypassPermissions: a headless CI run has no human to satisfy the interactive
+          # per-command approval gate (confirmed live: a build session hung retrying `env`,
+          # burning turns until timeout, never producing a commit). Matches this org's own
+          # ship-and-roll-back trust model (three-loop-pipeline.md) — CI + security-review
+          # still gate the merge.
+          claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }} --permission-mode bypassPermissions"
 
       - name: Push and open ONE PR, or release claims on failure
         env:
