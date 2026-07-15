@@ -54,7 +54,10 @@ issues flow through the same propose → build → automerge pipeline as `sux`/`
 Since this repo ships no app (only reusable workflow YAML), `self-issue-build.yml` gates
 on `actionlint` (`self-check.yml`) + `pin-consistency.yml` instead of a Node build/test
 trio. Marked TEMPORARY in `self-fixer.yml`'s header — a consciously self-hosted
-arrangement, not the long-term shape.
+arrangement, not the long-term shape. `self-pr-auto-update.yml` · `self-pr-watch.yml` ·
+`self-pr-drain.yml` complete Loop 3 on this repo too — without them, a second
+concurrent bot PR against `.github` flips BEHIND on merge with no rebase/visibility/
+drain backstop (issue #189).
 
 ### The three loops → workflows (the resolvable map)
 

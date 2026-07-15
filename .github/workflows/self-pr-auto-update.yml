@@ -1,0 +1,19 @@
+name: Self PR auto-update
+
+# Loop 3 step 1 (rebase-BEHIND) wired onto THIS repo — see self-fixer.yml for the
+# self-* pattern and why it exists. Without this, the moment two suxbot[bot] PRs
+# are open against .github at once, the first to merge (self-automerge.yml) flips
+# the second to BEHIND (strict=true branch protection) with nothing to rebase it —
+# a true dead-end, not just "waiting for the next run" (issue #189).
+
+on:
+  schedule: [{ cron: "13 9 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  update-behind:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: SuxOS/.github/.github/workflows/pr-auto-update.yml@main
+    secrets: inherit
