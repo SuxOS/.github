@@ -15,5 +15,18 @@ on:
 
 jobs:
   fixer:
+    # Default GITHUB_TOKEN perms are read-only; the reusable requests more than that,
+    # so a caller that doesn't grant these fails at STARTUP (observed: the first
+    # self-fixer dispatch 2026-07-15 was a startup_failure for exactly this reason —
+    # self-issue-build.yml already had its block and ran fine). Grant exactly what
+    # fixer.yml needs, mirroring sux/suxrouter's proven fixer stub.
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
     uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    with:
+      # Full-repo sweep across this repo's workflows/docs needs more than the default 25
+      # turns to read broadly before proposing (same tuning as sux's fixer stub).
+      max-turns: 40
     secrets: inherit

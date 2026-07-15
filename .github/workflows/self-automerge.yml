@@ -18,6 +18,12 @@ on:
 
 jobs:
   automerge:
+    # Reusable requests more than the read-only default GITHUB_TOKEN → grant it here or
+    # the job startup-fails (same class of bug as self-fixer's first dispatch). Mirrors
+    # the proven sux-fileops automerge stub.
+    permissions:
+      contents: write
+      pull-requests: write
     uses: SuxOS/.github/.github/workflows/automerge.yml@main
     with:
       required-checks: |
