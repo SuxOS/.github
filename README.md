@@ -59,6 +59,16 @@ arrangement, not the long-term shape. `self-pr-auto-update.yml` · `self-pr-watc
 concurrent bot PR against `.github` flips BEHIND on merge with no rebase/visibility/
 drain backstop (issue #189).
 
+`gh workflow list --repo SuxOS/.github --all` shows the org's shared reusable
+workflows (`automerge.yml`, `fixer.yml`, `issue-build.yml`, `pr-auto-update.yml`,
+`pr-drain.yml`, `pr-watch.yml`, `security-review.yml`) as `disabled_manually`. This
+is **by design and harmless**: they were disabled to stop their own direct triggers
+from firing on this repo, but `workflow_call`/`uses:` reuse by other repos is
+unaffected by that state — disabling a workflow's direct triggers doesn't block
+other repos from calling it. Only the `self-*.yml` stubs above need to stay directly
+enabled for this repo's own pipeline to run; don't re-enable the shared reusables
+here on the strength of `gh workflow list` output alone.
+
 ### The three loops → workflows (the resolvable map)
 
 `claude-config`'s `fabric.json` names the pipeline as three loops; this is what each
