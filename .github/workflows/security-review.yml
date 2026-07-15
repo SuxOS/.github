@@ -202,8 +202,6 @@ jobs:
           # author whose diff the reviewer structurally couldn't finish (see the diff-access
           # fix above) shouldn't be permanently unmergeable on a harness reliability gap that
           # has nothing to do with what they changed. Untrusted/fork authors still fail closed.
-          # TODO:                 printf '%s\n' "$changed" | grep -iE '\.github/workflows/|auth|secret' | sed 's/^/  high-blast path: /' || true
-
           AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
         run: |
           set -euo pipefail
