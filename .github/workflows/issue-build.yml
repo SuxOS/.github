@@ -284,12 +284,13 @@ jobs:
       - name: Claude — plan and build the batch into one PR
         id: claude
         env:
-          ISSUE_NUMBERS: ${{ needs.select.outputs.numbers }}
-          TIER: ${{ needs.select.outputs.tier }}
-          COUNT: ${{ needs.select.outputs.count }}
-          GATES_SUMMARY: ${{ inputs.gates-summary }}
-          FAN_HINT: ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
-          LSP_HINT: ${{ steps.lsp.outputs.ready == 'true' && 'A TypeScript language server is running for this repo — prefer the LSP tool (goToDefinition/findReferences/hover) over grep for navigating symbols, checking call sites before a rename, and confirming types.' || '' }}
+          # Only real env vars the SDK itself reads go here. claude-code-action's `prompt:`
+          # is a plain string handed to the action — it is NOT a shell context, so bare $VAR
+          # references are never substituted (confirmed: an earlier version of this prompt
+          # shipped literal, unsubstituted "$COUNT"/"$TIER"/"$ISSUE_NUMBERS" text to Claude on
+          # every run, which is why builds silently produced nothing). The documented pattern
+          # (docs/custom-automations.md) is GitHub Actions `${{ }}` expressions written
+          # directly inline in the prompt string below — no env-var indirection needed.
           ENABLE_PROMPT_CACHING_1H: "1"
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
@@ -297,12 +298,13 @@ jobs:
           github_token: ${{ steps.app-token.outputs.token }}
           allowed_bots: suxbot[bot]
           prompt: |
-            You are the builder. These $COUNT open issues (priority tier: $TIER) are yours to
-            ship in ONE pull request on the current branch: $ISSUE_NUMBERS
+            You are the builder. These ${{ needs.select.outputs.count }} open issues (priority
+            tier: ${{ needs.select.outputs.tier }}) are yours to ship in ONE pull request on the
+            current branch: ${{ needs.select.outputs.numbers }}
 
             Read each with `gh issue view <n>`. Then:
 
-            1. PLAN. Work out the optimal build plan across all of them. $FAN_HINT
+            1. PLAN. Work out the optimal build plan across all of them. ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
                Issues that touch the same files or depend on each other are done together, in
                order, to stay coherent. You have the whole batch in view, so collate naturally:
                dedupe overlapping work, and drop an issue from THIS PR if it turns out
@@ -311,10 +313,10 @@ jobs:
 
             2. BUILD. Make the smallest correct change for each issue. Do NOT touch secrets, do
                NOT weaken a test to make it pass, do NOT touch code unrelated to these issues.
-               $LSP_HINT
+               ${{ steps.lsp.outputs.ready == 'true' && 'A TypeScript language server is running for this repo — prefer the LSP tool (goToDefinition/findReferences/hover) over grep for navigating symbols, checking call sites before a rename, and confirming types.' || '' }}
 
             3. GATE. All of these must pass before you commit:
-               $GATES_SUMMARY
+               ${{ inputs.gates-summary }}
                Commit (conventional-commit message referencing the issues) and push to this
                branch. One coherent commit history for the batch is fine.
 
