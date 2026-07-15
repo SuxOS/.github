@@ -3,7 +3,7 @@ name: Deep audit
 # The infrequent-expensive half of the security-review bargain (docs/design/
 # budget-and-cadence.md): the per-PR gate runs on sonnet at high frequency; this nightly
 # Opus pass re-reviews the day's MERGED diff per repo with fresh eyes and files anything
-# it finds as ordinary issues, which flow into the triage → issue-build pipeline.
+# it finds as ordinary issues, which flow into the issue-build pipeline.
 # Cheap-exits when nothing merged. Serialized (max-parallel: 1) so the Opus sessions
 # don't stack inside one 5-hour subscription window.
 #
@@ -93,6 +93,11 @@ jobs:
       - name: Claude — deep-review the merged diff
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.range.outputs.go == 'true'
+        # The action hard-fails when the model ends its turn without emitting structured_output.
+        # Without this, that aborts the job red instead of reaching "File findings as issues"
+        # below, which already treats an empty VERDICT as a clean no-op pass. Same fix as
+        # fixer/triage/issue-build (#141/#140/#142) and security-review.yml (#139).
+        continue-on-error: true
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -132,7 +137,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ env.MAX_TURNS }} --model ${{ env.MODEL }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","security","confidence"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"security":{"type":"boolean"}},"required":["title","body","security"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
 
       # The ONLY step that files issues (Safe Outputs). Validates fields before writing.
       - name: File findings as issues
@@ -149,11 +154,7 @@ jobs:
             title=$(jq -r '.title' <<<"$f")
             body=$(jq -r '.body' <<<"$f")
             security=$(jq -r '.security' <<<"$f")
-            conf=$(jq -r '.confidence' <<<"$f")
-            case "$conf" in high|medium|low) ;; *)
-              echo "::warning::skipping finding with unexpected confidence '$conf': $title"; continue ;;
-            esac
-            label_args=(--label bug --label "confidence:$conf")
+            label_args=(--label bug)
             [ "$security" = "true" ] && label_args+=(--label security)
             body=$(printf '%s\n\n---\nFiled by deep-audit (nightly opus pass over the merged diff).' "$body")
             url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}")

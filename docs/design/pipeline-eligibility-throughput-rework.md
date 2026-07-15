@@ -1,5 +1,13 @@
 # Pipeline rework — eligibility, throughput, bot-immunity, observability (2026-07)
 
+> **Superseded (2026-07-15) by [three-loop-pipeline.md](three-loop-pipeline.md).** That
+> design collapses the confidence tiers, high-blast classifier, and author-trust gates this
+> doc describes into a two-tier model on the correct (PRIVATE, single-operator) threat
+> assumption. This doc still assumes PUBLIC repos in places (e.g. §"Explicitly NOT changed",
+> the "public-safety gate"); that assumption is **false today** — the repos are private.
+> Read the three-loop design for current intent; this remains as the changelog of the
+> intermediate step.
+
 Consolidates a set of tuning changes to the org-wide backlog/merge pipeline. Read
 [backlog-pipeline.md](backlog-pipeline.md) first — this doc only records what changed and why,
 several of the changes deliberately reverse a rationale written into an existing code comment.
@@ -81,12 +89,12 @@ this rework; the eligibility / throughput / bot-immunity changes above stand on 
 ## Explicitly NOT changed
 
 - The **confirmed critical/high `hold`** on any PR, bot or human. Not weakened.
-- The **fail-closed hold** on high-blast, no-verdict, *untrusted*-author diffs. Kept — it is the
-  backstop on the highest-blast-radius PRs (see [suxos memory: security-review gate is
-  intentional]). What *is* fixed is a false-positive in the high-blast detector (`auth|secret`
-  matched as unanchored substrings, wrongly flagging `oauth.ts`/`author.md`/`secretary.py`) —
-  tightening it to path-segment boundaries makes the gate **stricter and more accurate**, not
-  weaker, and removes a real source of spurious holds.
+- ~~The **fail-closed hold** on high-blast, no-verdict, *untrusted*-author diffs. Kept~~ —
+  **superseded**: a subsequent pass removed the high-blast/trusted-author fail-closed
+  entirely. A missing/unreadable verdict is now an unconditional advisory pass, never a
+  `hold`, regardless of what the diff touches — accepted tradeoff, favoring throughput
+  over blocking merges on a flaky review run. See `security-review.yml`'s "Gate — advisory
+  pass on missing verdict" step.
 - The **author-trust tier** for auto-merge stays `OWNER|MEMBER|COLLABORATOR` (+ the org bot). Not
   widened to `CONTRIBUTOR`/`NONE` — that is the public-safety gate, revisit at go-public.
 

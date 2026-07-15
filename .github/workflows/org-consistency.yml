@@ -2,8 +2,8 @@ name: Org consistency sweep
 
 # Weekly Opus pass over ALL org repos checked out side by side, hunting what no single-repo
 # workflow can see: inter-repo drift and cross-repo refactor opportunities. Findings are
-# filed as ordinary issues in the affected repo and flow into the existing triage →
-# issue-build pipeline. Deterministic checks stay where they are (pin-consistency owns SHA
+# filed as ordinary issues in the affected repo and flow into the existing issue-build
+# pipeline. Deterministic checks stay where they are (pin-consistency owns SHA
 # drift) — this pass is for the judgment-shaped inconsistencies a script can't express.
 # The infrequent-expensive tier of docs/design/budget-and-cadence.md.
 #
@@ -97,6 +97,11 @@ jobs:
       - name: Claude — cross-repo consistency and refactor sweep
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        # The action hard-fails when the model ends its turn without emitting structured_output.
+        # Without this, that aborts the job red instead of reaching "File findings as issues"
+        # below, which already treats an empty VERDICT as a clean no-op pass. Same fix as
+        # fixer/triage/issue-build (#141/#140/#142) and security-review.yml (#139).
+        continue-on-error: true
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -144,7 +149,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ env.MAX_TURNS }} --model ${{ env.MODEL }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"repo":{"type":"string","enum":["sux","suxrouter","sux-fileops","claude-config",".github"]},"title":{"type":"string"},"body":{"type":"string"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["repo","title","body","confidence"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"repo":{"type":"string","enum":["sux","suxrouter","sux-fileops","claude-config",".github"]},"title":{"type":"string"},"body":{"type":"string"}},"required":["repo","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
 
       # The ONLY step that files issues (Safe Outputs). Re-validates repo against the
       # allowlist even though the schema already constrains it.
@@ -161,18 +166,14 @@ jobs:
             repo=$(jq -r '.repo' <<<"$f")
             title=$(jq -r '.title' <<<"$f")
             body=$(jq -r '.body' <<<"$f")
-            conf=$(jq -r '.confidence' <<<"$f")
             ok=false
             for a in $ALLOWED_REPOS; do [ "$repo" = "$a" ] && ok=true; done
             if [ "$ok" != "true" ]; then
               echo "::warning::skipping finding for unexpected repo '$repo': $title"; continue
             fi
-            case "$conf" in high|medium|low) ;; *)
-              echo "::warning::skipping finding with unexpected confidence '$conf': $title"; continue ;;
-            esac
             body=$(printf '%s\n\n---\nFiled by the weekly org-consistency sweep (SuxOS/.github).' "$body")
             url=$(gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body" \
-              --label enhancement --label "confidence:$conf" \
+              --label enhancement \
               || gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body")
             echo "filed: $url"
           done

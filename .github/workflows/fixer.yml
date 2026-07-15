@@ -1,19 +1,19 @@
 name: Fixer — propose work as issues (reusable)
 
-# The PROPOSER in the three-stage backlog pipeline (propose -> investigate -> build):
-#   fixer.yml (this)  — scans a repo and FILES bugs + feature ideas as issues, each with a
-#                       self-assessed `confidence:*` label. It never verifies deeply and never
-#                       decides what gets built — it just proposes.
-#   triage.yml        — an INDEPENDENT investigator re-checks each open untriaged issue (these
-#                       AND ones a human filed), assigns its own type + confidence, and opts
-#                       most of them into building with `queued-for-build` (opt-out default).
-#   issue-build.yml   — clusters the queued issues and builds one PR per chunk; only a verified
-#                       all-`confidence:high` cluster auto-merges, the rest stage for review.
-# Splitting propose from investigate is deliberate: the thing that files an issue should not
-# also be the thing that clears it for unattended building — a second, adversarial look
-# (triage.yml) catches a confidently-wrong proposal before it ever touches code.
+# The PROPOSER in the two-stage backlog pipeline (propose -> build):
+#   fixer.yml (this)  — scans a repo and FILES bugs + feature ideas as issues, typed only
+#                       (bug/enhancement/documentation, +security). It never verifies deeply
+#                       and never decides what gets built — it just proposes.
+#   issue-build.yml   — selects the buildable issues (its own read-only pass judges buildable
+#                       vs needs-human), clusters related ones, and builds one PR per chunk;
+#                       the PR auto-merges on green (automerge.yml) unless a human adds `hold`.
+# The separate Opus `triage` stage and the `confidence:*` taxonomy were removed in the
+# three-loop rework (docs/design/three-loop-pipeline.md, 2026-07-15): confidence gated nothing
+# once auto-merge stopped reading labels, and the buildability call folded into issue-build.
+# fixer stays a distinct, cheap bulk proposer so the expensive builder isn't also the thing
+# scanning for work — but it no longer self-assesses confidence.
 #
-# Never opens a PR, never touches code, never applies `queued-for-build` (that's triage's job).
+# Never opens a PR, never touches code, never claims an issue (that's issue-build's job).
 # Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN, from `claude setup-token`),
 # not a metered ANTHROPIC_API_KEY — inert until that secret is set.
 #
@@ -39,7 +39,7 @@ on:
     inputs:
       model:
         type: string
-        default: "sonnet" # a bulk scan whose every proposal is re-verified by triage — bulk tier
+        default: "sonnet" # a bulk scan whose every proposal is re-judged by issue-build — bulk tier
       max-turns:
         type: number
         default: 40
@@ -81,7 +81,7 @@ jobs:
 
       # Budget governor signal (docs/design/budget-and-cadence.md). Proposing NEW work is
       # the most deferrable stage, so fixer stands down at yellow — the in-flight backlog
-      # keeps draining through triage/issue-build until red.
+      # keeps draining through issue-build until red.
       - name: Check autonomy throttle
         id: throttle
         uses: SuxOS/.github/.github/actions/check-throttle@main
@@ -130,8 +130,8 @@ jobs:
           allowed_bots: suxbot[bot]
           prompt: |
             You are the proposer. Find work worth doing in this repo and file it as issues —
-            do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
-            investigator decides what actually gets built).
+            do NOT do the work and do NOT open any PR (the builder, a separate workflow, decides
+            what actually gets built and ships it).
 
             What to look for:
               - Correctness bugs: read code in areas of recent churn
@@ -153,21 +153,15 @@ jobs:
 
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them
-            with exactly two kinds of label, a TYPE and a CONFIDENCE:
+            with a single TYPE label:
               - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
                 docs; set `security: true` in addition if it's a security issue.
-              - Confidence — YOUR honest self-assessment, since the investigator will re-judge
-                it anyway:
-                  * `high`   — you read the code and are sure it's real, and the fix is narrow,
-                               unambiguous, and low-risk.
-                  * `medium` — likely real but you didn't fully confirm, or the fix has some
-                               judgment/scope to it.
-                  * `low`    — a hunch, a big/ambiguous idea, or anything you couldn't verify.
               - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
                 references, a suggested fix direction if you have one. A paragraph, not a report.
 
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
-            worse than silence (propose a genuine hunch as confidence low, don't invent one).
+            worse than silence (don't invent one; a genuine hunch is fine, just say so in the body).
+            The builder re-judges buildability on its own read, so you don't gate that here.
             Set discarded_count to how many candidates you dropped as duplicates/baseless.
 
             Your FINAL message MUST be the machine-readable object matching the provided JSON
@@ -179,7 +173,7 @@ jobs:
           # Proposer only READS (code + `gh issue list` for dedup) and returns a structured
           # proposal list — it has no `gh issue create`/write access at all. A separate
           # deterministic step below is the only thing that ever calls `gh issue create`,
-          # validating each proposal's type/confidence against an allowlist first (Safe
+          # validating each proposal's type against an allowlist first (Safe
           # Outputs pattern: agent proposes, a least-privileged step disposes — see
           # docs/design/backlog-pipeline.md and issue #79's recommendation). Read-only git
           # subcommands are enumerated so the write-scoped App token can't push, and
@@ -188,7 +182,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","type","security","confidence"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"}},"required":["title","body","type","security"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       - name: Claude — scan and propose issues (retry — first attempt produced no output)
         id: claude_retry
@@ -211,8 +205,8 @@ jobs:
           allowed_bots: suxbot[bot]
           prompt: |
             You are the proposer. Find work worth doing in this repo and file it as issues —
-            do NOT do the work, do NOT open any PR, do NOT apply `queued-for-build` (a separate
-            investigator decides what actually gets built).
+            do NOT do the work and do NOT open any PR (the builder, a separate workflow, decides
+            what actually gets built and ships it).
 
             What to look for:
               - Correctness bugs: read code in areas of recent churn
@@ -234,21 +228,15 @@ jobs:
 
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them
-            with exactly two kinds of label, a TYPE and a CONFIDENCE:
+            with a single TYPE label:
               - Type: `bug` for a defect; `enhancement` for a feature/idea; `documentation` for
                 docs; set `security: true` in addition if it's a security issue.
-              - Confidence — YOUR honest self-assessment, since the investigator will re-judge
-                it anyway:
-                  * `high`   — you read the code and are sure it's real, and the fix is narrow,
-                               unambiguous, and low-risk.
-                  * `medium` — likely real but you didn't fully confirm, or the fix has some
-                               judgment/scope to it.
-                  * `low`    — a hunch, a big/ambiguous idea, or anything you couldn't verify.
               - Title: short, specific, imperative ("Fix X", "Add Y"). Body: what/why, file:line
                 references, a suggested fix direction if you have one. A paragraph, not a report.
 
             Skip anything you have no real basis for — a plausible-sounding but baseless guess is
-            worse than silence (propose a genuine hunch as confidence low, don't invent one).
+            worse than silence (don't invent one; a genuine hunch is fine, just say so in the body).
+            The builder re-judges buildability on its own read, so you don't gate that here.
             Set discarded_count to how many candidates you dropped as duplicates/baseless.
 
             Your FINAL message MUST be the machine-readable object matching the provided JSON
@@ -260,12 +248,12 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","type","security","confidence"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"}},"required":["title","body","type","security"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       # The ONLY step that ever calls `gh issue create` — the agent above has no gh-write
-      # access at all. Re-validates type/confidence against an allowlist even though the
-      # JSON schema already constrains them (belt-and-suspenders: a schema is the model's
-      # contract, this is the pipeline's own gate on what it will actually write).
+      # access at all. Re-validates type against an allowlist even though the JSON schema
+      # already constrains it (belt-and-suspenders: a schema is the model's contract, this
+      # is the pipeline's own gate on what it will actually write).
       - name: File proposed issues
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
@@ -283,16 +271,12 @@ jobs:
             body=$(echo "$p" | jq -r '.body')
             type=$(echo "$p" | jq -r '.type')
             security=$(echo "$p" | jq -r '.security')
-            conf=$(echo "$p" | jq -r '.confidence')
 
             case "$type" in bug|enhancement|documentation) ;; *)
               echo "::warning::skipping proposal with unexpected type '$type': $title"; continue ;;
             esac
-            case "$conf" in high|medium|low) ;; *)
-              echo "::warning::skipping proposal with unexpected confidence '$conf': $title"; continue ;;
-            esac
 
-            label_args=(--label "$type" --label "confidence:$conf")
+            label_args=(--label "$type")
             [ "$security" = "true" ] && label_args+=(--label security)
 
             url=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body" "${label_args[@]}")
@@ -333,7 +317,7 @@ jobs:
             echo "Assigning #$n to $ASSIGNEE..."
             if ! gh api "repos/${{ github.repository }}/issues/${n}/assignees" \
                    -f "assignees[]=${ASSIGNEE}" >/dev/null; then
-              echo "::warning::Failed to assign #$n to $ASSIGNEE — likely means the agent isn't enabled on this repo, or AGENT_ASSIGN_PAT's owner doesn't have it enabled. Leaving the issue unassigned; the normal triage/build pipeline still picks it up."
+              echo "::warning::Failed to assign #$n to $ASSIGNEE — likely means the agent isn't enabled on this repo, or AGENT_ASSIGN_PAT's owner doesn't have it enabled. Leaving the issue unassigned; the normal issue-build pipeline still picks it up."
             fi
           done
 

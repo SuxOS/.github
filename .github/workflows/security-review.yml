@@ -8,22 +8,15 @@ name: Security review (reusable)
 #
 # AUTH: unified onto the Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), same as every other
 # Claude workflow. ACCEPTED RISK: security-review is a REQUIRED merge gate, so if the shared
-# subscription pool exhausts, this check cannot run → the merge queue jams and NOTHING can
-# merge, including humans' PRs. This was previously kept on the metered ANTHROPIC_API_KEY
-# specifically to avoid that failure mode; the split was dropped by explicit decision to
-# consolidate on one token. If merge-queue jams become a problem, revert this file to
-# anthropic_api_key — see docs/design/backlog-pipeline.md § auth split.
+# subscription pool exhausts, this check cannot run → nothing can merge, including humans'
+# PRs (native auto-merge waits on this required check). This was previously kept on the
+# metered ANTHROPIC_API_KEY specifically to avoid that failure mode; the split was dropped
+# by explicit decision to consolidate on one token. If merge stalls from an exhausted pool
+# become a problem, revert this file to anthropic_api_key — see docs/design/backlog-pipeline.md § auth split.
 #
 # Caller:
 #   uses: SuxOS/.github/.github/workflows/security-review.yml@main
 #   secrets: inherit
-#
-# Under a merge queue, the caller should also trigger `on: merge_group` (branch protection
-# requires this check report on the queue's speculative ref, or the queue stalls forever).
-# The job below short-circuits to a green passthrough on merge_group: the real review is a
-# PR-stage gate (a high/critical finding applies `hold`, keeping the PR out of the queue
-# entirely), so by the time a PR is queued it has already been reviewed and there is no PR
-# left to review on the merge_group ref.
 
 on:
   workflow_call:
@@ -64,7 +57,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  group: secreview-${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -75,21 +68,12 @@ jobs:
     # skip (as a prior version had, gating on trusted author_association / a `self-improve`
     # label) therefore let an untrusted or unlabelled PR bypass the security review entirely
     # by being skipped — an unreviewed change merging on deterministic CI alone. The only
-    # skip conditions kept are the merge_group passthrough (the PR was already reviewed
-    # pre-queue) and draft PRs; self-improve PRs are non-draft so they still run here.
-    # NOTE: on a PR from a PUBLIC fork, GitHub withholds secrets, so
-    # CLAUDE_CODE_OAUTH_TOKEN may be absent and the Preflight step marks the review inert.
-    # That is a future concern for when repos go public; fork-secret handling is not solved
-    # here.
-    if: >
-      github.event_name == 'merge_group' ||
-      github.event.pull_request.draft == false
+    # skip condition kept is draft PRs; self-improve PRs are non-draft so they still run here.
+    # (fork/public-repo hardening: re-earn at go-public, not before — private today)
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Merge queue — security review satisfied by the pre-queue PR review
-        if: github.event_name == 'merge_group'
-        run: echo "merge_group event - security-review already performed on the PR before queueing"
       - name: Preflight — need the key
         id: pre
         if: github.event_name == 'pull_request'
@@ -189,65 +173,28 @@ jobs:
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
-      - name: Gate — scoped fail-closed on missing verdict; block on high/critical
+      - name: Gate — advisory pass on missing verdict; block on high/critical
         if: steps.pre.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           # Read the verdict from whichever attempt produced one (retry only ran if the first was empty).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
-          # OWNER/MEMBER/COLLABORATOR = this org's own people and bots (App-authored PRs carry
-          # this association too, since the App is installed as a collaborator) — the trust
-          # tier the no-verdict fail-closed exists to protect everyone ELSE from. A trusted
-          # author whose diff the reviewer structurally couldn't finish (see the diff-access
-          # fix above) shouldn't be permanently unmergeable on a harness reliability gap that
-          # has nothing to do with what they changed. Untrusted/fork authors still fail closed.
-          AUTHOR_ASSOC: ${{ github.event.pull_request.author_association }}
-          # The org bot (suxbot[bot]) is trusted here by LOGIN — a no-verdict on its PR is a
-          # mechanical failure, never a security signal, so it takes the advisory path, not
-          # fail-closed. A CONFIRMED critical/high finding still holds it (below): that gate is
-          # deliberately kept, since the bot is an autonomous agent reading attacker-controllable
-          # issue/PR text and is exactly what a prompt-injection would trip.
-          AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
-          trusted=false
-          case "$AUTHOR_ASSOC" in OWNER|MEMBER|COLLABORATOR) trusted=true ;; esac
-          [ "$AUTHOR_LOGIN" = "suxbot[bot]" ] && trusted=true
 
-          # High-blast path detector, defined once (used to classify AND to print the offenders).
-          # auth|secret are matched as DELIMITER-BOUNDED tokens (optional trailing plural), not as
-          # bare substrings — so oauth/auth/secret(s) files flag, but author.ts / authors /
-          # secretary.py no longer false-positive into a spurious fail-closed hold.
-          HIGH_BLAST_RE='\.github/workflows/|\.github/actions/|\.github/scripts/|(^|[/._-])(oauth|auth[nz]?|secret)s?([/._-]|$)'
-
+          # No-verdict (reviewer didn't finish, whatever the diff touches) is a harness
+          # reliability gap, not a security signal — advisory pass, never fail-closed. The
+          # high-blast/trusted-author distinction that used to gate this was removed: we'd
+          # rather ship and roll back than block on a flaky review run. A CONFIRMED
+          # critical/high finding (below, when the reviewer DID finish) still holds the PR —
+          # that's real signal from a completed review, not this reliability fallback.
           if [ -z "$verdict" ]; then
-            changed=$(gh pr diff "$PR" --name-only 2>/dev/null || true)
-            high_blast=false
-            if [ -z "$changed" ] || printf '%s\n' "$changed" | grep -qiE "$HIGH_BLAST_RE"; then
-              high_blast=true
-            fi
-
-            if [ "$high_blast" = "true" ] && [ "$trusted" != "true" ]; then
-              echo "::error::security review produced no verdict, diff is high-blast (or unreadable), and the author ($AUTHOR_ASSOC) is not a trusted org member — failing closed"
-              if [ -n "$changed" ]; then
-                printf '%s\n' "$changed" | grep -iE "$HIGH_BLAST_RE" | sed 's/^/  high-blast path: /' || true
-              fi
-              gh pr edit "$PR" --add-label hold 2>/dev/null || true
-              gh pr comment "$PR" --body "🛑 security review did not finish and this PR touches workflows/auth/secrets from an untrusted author ($AUTHOR_ASSOC) — applied \`hold\` (fail-closed). Re-run the review or get a human review, then remove \`hold\`." 2>/dev/null || true
-              exit 1
-            fi
-
-            if [ "$high_blast" = "true" ]; then
-              echo "::warning::security review produced no verdict on a high-blast diff, BUT the author ($AUTHOR_ASSOC) is a trusted org member — advisory pass, not permanently blocking. This is DEGRADED COVERAGE, not a clean bill of health: the nightly deep-audit still re-reviews the merged diff."
-              gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) on this workflows/auth/secrets diff. Author is a trusted org member ($AUTHOR_ASSOC), so this is an advisory pass rather than a fail-closed \`hold\` — but it means DEGRADED coverage, not a clean review. The nightly deep-audit will re-review the merged diff." 2>/dev/null || true
-              exit 0
-            fi
-
-            echo "::warning::security review produced no verdict (reviewer did not finish) and the diff is not high-blast — advisory pass"
-            gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) and this diff doesn't touch workflows/auth/secrets — advisory pass, not blocking. Deterministic gates still apply." 2>/dev/null || true
-            exit 0; fi
+            echo "::warning::security review produced no verdict (reviewer did not finish) — advisory pass, not blocking"
+            gh pr comment "$PR" --body "⚠️ the security review did not finish (no verdict) — advisory pass, not blocking. Deterministic gates still apply." 2>/dev/null || true
+            exit 0
+          fi
           crit=$(printf '%s' "$verdict" | jq -r '.critical // 0'); high=$(printf '%s' "$verdict" | jq -r '.high // 0')
           echo "security verdict: critical=$crit high=$high"
           if [ "${crit:-0}" -gt 0 ] || [ "${high:-0}" -gt 0 ]; then

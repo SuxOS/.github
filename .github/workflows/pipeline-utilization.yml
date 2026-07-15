@@ -5,7 +5,7 @@ name: Pipeline utilization report (reusable)
 # utilization/waste target is more than a guess. Actual Claude token/spend is Anthropic-side
 # and not queryable from here; run count + wall-clock duration per workflow is the closest
 # proxy available via the GitHub API, and is what this reports. Read-only; maintains a
-# single rolling tracking issue (like waitch.yml/audit.yml/health.yml).
+# single rolling tracking issue (like audit.yml/health.yml).
 #
 # A run's wall-clock duration (startedAt → updatedAt) is a PROXY, not a billing figure — it
 # correlates with Claude turns/spend but isn't it. Treat the numbers here as directional
@@ -124,7 +124,7 @@ jobs:
             "|----------|-----:|----------:|-------:|----------:|-------------:|--------------------------------:|" \
             "$rows" \
             "" \
-            "**Fast runs** are completed runs at or under the fast-run threshold — likely a cheap-exit no-op (an empty queue, an already-claimed issue, a disarmed preflight) rather than a real Claude invocation. A high fast-run share on \`issue-build\`/\`triage\` means the pipeline's cheap-exit guards are doing their job; a low one on those means most triggers are doing real (billed) work." \
+            "**Fast runs** are completed runs at or under the fast-run threshold — likely a cheap-exit no-op (no build candidates, an already-claimed issue, a disarmed preflight) rather than a real Claude invocation. A high fast-run share on \`issue-build\` means the pipeline's cheap-exit guards are doing their job; a low one means most triggers are doing real (billed) work." \
             "" \
             "**Failed/cancelled runs** worth a look if the count is non-trivial: a failure is discarded work (the run consumed time/spend and produced nothing merged); a cancellation is usually a concurrency-group supersede (expected churn, not necessarily waste) but a persistently high count on a workflow without a fast concurrency group is worth checking.")
 
