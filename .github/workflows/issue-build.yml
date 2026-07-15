@@ -512,6 +512,10 @@ jobs:
           claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }} --permission-mode bypassPermissions"
 
       - name: Push and open ONE PR, or release claims on failure
+        # always(): this is the only thing that releases the `building` claim on this run's own
+        # failure/cancellation — without it, a killed build step skips straight to the reaper's
+        # REAP_STALE_HOURS backstop, leaving issues locked for hours instead of released immediately.
+        if: always()
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ steps.branch.outputs.name }}

@@ -139,9 +139,15 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_branch }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
+
+      - name: Pin local branch to the checked-out commit
+        if: steps.gate.outputs.go == 'true'
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: git checkout -B "$HEAD_BRANCH"
 
       - name: Attempt cap — stop looping after MAX_ATTEMPTS bot commits
         if: steps.gate.outputs.go == 'true'

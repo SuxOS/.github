@@ -155,6 +155,12 @@ jobs:
             information). Batch candidates first, then dedupe against each other — one root
             cause showing up in three files is ONE issue, not three.
 
+            Before citing a specific file:line as evidence, re-check it against the current
+            checkout (grep or `git blame` the exact line) — don't trust a stale snapshot or an
+            earlier pass's notes. A finding whose cited sink no longer exists or has already
+            been fixed wastes a full builder run; if you can't confirm the citation still
+            reproduces at HEAD, drop the candidate instead of filing it.
+
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them
             with a TYPE label and an EFFORT label:
@@ -238,6 +244,12 @@ jobs:
             existing issue already covers (don't even comment, unless you found materially new
             information). Batch candidates first, then dedupe against each other — one root
             cause showing up in three files is ONE issue, not three.
+
+            Before citing a specific file:line as evidence, re-check it against the current
+            checkout (grep or `git blame` the exact line) — don't trust a stale snapshot or an
+            earlier pass's notes. A finding whose cited sink no longer exists or has already
+            been fixed wastes a full builder run; if you can't confirm the citation still
+            reproduces at HEAD, drop the candidate instead of filing it.
 
             Do NOT file issues yourself — you have no write access. Return each surviving
             candidate via the structured output schema instead; a separate step files them

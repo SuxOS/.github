@@ -1,9 +1,17 @@
 # SuxOS/.github — shared CI/autonomy pipeline
 
 Reusable GitHub Actions workflows extracted from `colinxs/sux`, phase 1 of the
-SuxOS migration (see `sux-mcp/docs/knowledge/refactor-runbook.md`). Every
+SuxOS migration (see `sux/docs/knowledge/refactor-runbook.md`). Every
 SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 1,400+ lines of workflow YAML per repo.
+
+## Repos in this org
+
+- `sux` — the Cloudflare Worker MCP server this pipeline was extracted from.
+- `suxrouter` — OpenWrt/ucode router project.
+- `sux-fileops` — file-operations tooling.
+- `claude-config` — shared Claude Code configuration.
+- `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
 
 ## The two groups
 
@@ -81,7 +89,7 @@ Set `CLAUDE_CODE_OAUTH_TOKEN` as an **org-level** secret so every repo inherits 
 ## Caller-stub pattern
 
 Each file here is a `workflow_call` reusable workflow with `inputs:` (defaults
-mirror sux-mcp's layout — override the ones that don't fit your repo). Callers
+mirror sux's layout — override the ones that don't fit your repo). Callers
 almost always want `secrets: inherit` so the App-token / Anthropic-key secrets
 flow through without being re-declared per repo.
 
@@ -213,7 +221,7 @@ reusable file for the job body. Same idea applies to any other event trigger
 (`schedule`, `pull_request_target`, etc.) — those live in the caller's stub,
 `workflow_call` only supplies the reusable job.
 
-## Two hard-won gotchas preserved from sux-mcp (read before editing these files)
+## Two hard-won gotchas preserved from sux (read before editing these files)
 
 1. **Push with a GitHub App token, never `GITHUB_TOKEN`.** GitHub suppresses
    new workflow runs for events attributed to `GITHUB_TOKEN` (anti-recursion),
@@ -227,9 +235,9 @@ reusable file for the job body. Same idea applies to any other event trigger
    `claude-code-action` runs the model in a sandbox `cwd` that is not
    `$GITHUB_WORKSPACE`, so a model-written verdict file can land somewhere the
    gate step never reads — this shipped weeks of silently-advisory-passing
-   security reviews in sux-mcp. Always pass `--json-schema` in `claude_args`
+   security reviews in sux. Always pass `--json-schema` in `claude_args`
    and read the verdict via
    `fromJSON(steps.<id>.outputs.structured_output).<field>` — it's
    cwd-independent.
 
-Full details: `sux-mcp/docs/knowledge/auth-github-ci.md`.
+Full details: `sux/docs/knowledge/auth-github-ci.md`.
