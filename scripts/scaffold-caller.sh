@@ -79,11 +79,24 @@ YAML
 
 emit security-review <<YAML
 name: Security review
+# ready_for_review is required: the reusable skips draft PRs, and GitHub counts a
+# skipped required check as passing — omitting this type lets a PR go ready+merge
+# without the review ever re-running. (Every hand-written caller stub in the org
+# already carries this; this template used to lag them — see SuxOS/.github#144-era
+# audit finding.)
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 jobs:
   security-review:
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
     uses: $REPO/.github/workflows/security-review.yml@$REF
+    with:
+      allowed-bots: "suxbot[bot]"
     secrets: inherit
 YAML
 
@@ -275,8 +288,12 @@ Caller stubs scaffolded. Remaining manual steps (see README):
     CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
   - Create labels: queued-for-build, building, triaged, confidence:high|medium|low,
     automerge, needs-review, needs-human, hold.
-  - Turn on strict branch protection on main (Type-check & build, security-review,
-    npm audit & SBOM) before relying on automerge. Secret scanning is GitHub's
-    native secret-scanning + push-protection (repo Settings → Security), not a
-    status check — enable it there, not as a required gate.
+  - Protect main with a repository RULESET (Settings → Rules → Rulesets), NOT
+    classic branch protection: assert-branch-protection.yml runs with the App
+    token, and GitHub hard-403s a classic-protection read for App tokens (a
+    platform wall, not a permissions bug) — a classic-only setup reads as
+    unprotected and automerge refuses to arm. Require Type-check & build,
+    security-review, npm audit & SBOM on the ruleset. Secret scanning is
+    GitHub's native secret-scanning + push-protection (repo Settings →
+    Security), not a status check — enable it there, not as a required gate.
 DONE
