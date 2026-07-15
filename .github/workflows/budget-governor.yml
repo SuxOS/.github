@@ -153,6 +153,7 @@ jobs:
           update-mode: replace
           title: "Autonomy budget report"
           body: ${{ steps.body.outputs.body }}
+          labels: "tracking"
 
       - name: Set per-repo throttle issues
         env:
@@ -168,6 +169,13 @@ jobs:
             "" \
             "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Trailing-7-day proxy spend: opus-tier ${OPUS_MIN}/${OPUS_BUDGET_MIN} runner-min, total ${TOTAL_MIN}/${TOTAL_BUDGET_MIN} runner-min. To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
           for r in $REPOS; do
+            # gh issue create/edit --label errors on a label the repo doesn't have yet —
+            # ensure it exists first (idempotent). Bookkeeping issues like this one carry
+            # no other signal marking them non-work, so issue-build's backlog selector
+            # excludes by this label instead of misreading them as buildable.
+            gh label create tracking --repo "SuxOS/$r" --color ededed \
+              --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
+
             found=$(gh issue list --repo "SuxOS/$r" --state open --limit 100 --json number,title,labels \
               | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
             if [ -n "$found" ]; then
@@ -177,10 +185,10 @@ jobs:
                 echo "SuxOS/$r#$num is pinned (throttle-manual) — leaving as-is"
                 continue
               fi
-              gh issue edit "$num" --repo "SuxOS/$r" --body "$body" >/dev/null
+              gh issue edit "$num" --repo "SuxOS/$r" --body "$body" --add-label tracking >/dev/null
               echo "SuxOS/$r#$num → level: $LEVEL"
             else
-              url=$(gh issue create --repo "SuxOS/$r" --title "Autonomy throttle" --body "$body")
+              url=$(gh issue create --repo "SuxOS/$r" --title "Autonomy throttle" --body "$body" --label tracking)
               echo "created $url → level: $LEVEL"
             fi
           done
