@@ -1,0 +1,22 @@
+name: Self issue build
+
+# Builder stage on THIS repo (SuxOS/.github) — see self-fixer.yml for why this
+# exists and the TEMPORARY note on scope. No wrangler/build gates: this repo
+# ships no app, only reusable workflow YAML, so gates-summary is left empty
+# and the reviewer relies on self-check.yml (actionlint) + pin-consistency.yml
+# + self-security-review.yml instead of a language build/test suite.
+
+on:
+  schedule: [{ cron: "43 8,20 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  issue-build:
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/issue-build.yml@main
+    secrets: inherit
