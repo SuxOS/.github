@@ -14,8 +14,8 @@ name: Issue build — grab top-priority issues, one builder, one PR (reusable)
 #      HIGH (`priority:high` or `security`) else MED (`priority:med`) else LOW (everything
 #      else — the floor, so there is always something to build). Cap oldest-first at
 #      `max-issues`. Claim each (`building`) so a concurrent run can't double-process it.
-#      Pick the build model from the BATCH's complexity (high tier / large bodies / big
-#      batch -> complex-model; else simple-model) and scale turns by the count.
+#      Build on sonnet (the design model; Opus reserved for the nightly audits — opt in via
+#      model-hint) and scale turns by the count.
 #   2. build (ONE job — not a matrix): one Claude session gets all N issue numbers, makes
 #      the optimal build plan, implements them as ONE coherent change (fanning out to its
 #      own subagents for issues that are independent), runs the repo's gates, and opens ONE
@@ -52,7 +52,7 @@ on:
         type: string
         default: ""
       model-hint:
-        description: "`auto` = pick model from batch complexity; or force `opus`/`sonnet`/`haiku`."
+        description: "`auto` = the design builder model (sonnet); or force `opus`/`sonnet`/`haiku` for this run."
         type: string
         default: "auto"
       speed:
@@ -64,13 +64,9 @@ on:
         type: string
         default: "parallel"
       simple-model:
-        description: "Model for a small/simple batch when model-hint=auto."
+        description: "Builder model when model-hint=auto (the design default; Opus is reserved for the nightly audits — opt into it per-run via model-hint=opus)."
         type: string
         default: "sonnet"
-      complex-model:
-        description: "Model for a high-tier / large / security batch when model-hint=auto."
-        type: string
-        default: "opus"
       base-max-turns:
         description: "Turn budget floor for the build session; scaled up by issue count, then by speed."
         type: number
@@ -138,7 +134,6 @@ jobs:
           MODEL_HINT: ${{ inputs.model-hint }}
           SPEED: ${{ inputs.speed }}
           SIMPLE_MODEL: ${{ inputs.simple-model }}
-          COMPLEX_MODEL: ${{ inputs.complex-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
         run: |
           set -euo pipefail
@@ -194,22 +189,21 @@ jobs:
             | ($chosen.set | sort_by(.number) | .[0:$n]) as $picked
             | { tier: $chosen.tier,
                 numbers: ($picked | map(.number)),
-                count: ($picked | length),
-                bodysize: ($picked | map((.body // "") | length) | add // 0) }')
+                count: ($picked | length) }')
 
           tier=$(echo "$plan" | jq -r '.tier')
           numbers=$(echo "$plan" | jq -c '.numbers')
           count=$(echo "$plan" | jq -r '.count')
-          bodysize=$(echo "$plan" | jq -r '.bodysize')
           echo "selected tier=$tier count=$count issues=$numbers"
 
-          # Model: model-hint=auto picks from BATCH complexity (high tier, a big batch, or
-          # lots of prose earns the complex model); any other value forces that model.
+          # Model: auto = the builder's design model (sonnet) — three-loop-pipeline.md reserves
+          # scarce Opus budget for the nightly deep-audit/org-consistency passes, and Sonnet is
+          # near-Opus on codegen with CI + security-review gating every resulting PR. Opus for
+          # the builder is opt-in via model-hint (e.g. model-hint=opus), never automatic — an
+          # auto-escalation to opus here both contradicted that decision and failed at runtime
+          # (opus-via-OAuth is not exercised anywhere in this org; sonnet is proven by fixer).
           if [ "$MODEL_HINT" = "auto" ]; then
             model="$SIMPLE_MODEL"
-            if [ "$tier" = "high" ] || [ "$count" -ge 6 ] || [ "$bodysize" -ge 6000 ]; then
-              model="$COMPLEX_MODEL"
-            fi
           else
             model="$MODEL_HINT"
           fi
