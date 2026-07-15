@@ -322,17 +322,30 @@ jobs:
       # step does it. Gated on tsconfig.json — a non-TS repo (e.g. suxrouter) skips entirely.
       # Installs real deps (npm ci) BEFORE the Claude session starts so the language server
       # resolves actual project types from turn one, not bare syntax.
-      - name: Set up TypeScript language server (if this repo is TS-shaped)
+      # Split out so the npm download cache (setup-node `cache: npm`, the same pattern
+      # audit.yml/health.yml use) can key off the lockfile — it warms both `npm ci` and the
+      # global language-server install, so the win is registry-flakiness resilience first,
+      # a few seconds second. Gated on tsconfig via a detect step: a non-TS repo (suxrouter)
+      # skips node setup + install entirely and has no lockfile for the cache to hash.
+      - name: Detect TS repo
+        id: detect
+        run: |
+          if [ -f tsconfig.json ]; then echo "ts=true" >> "$GITHUB_OUTPUT"; else echo "ts=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up Node with npm cache
+        if: steps.detect.outputs.ts == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: npm
+
+      - name: Set up TypeScript language server
         id: lsp
+        if: steps.detect.outputs.ts == 'true'
         run: |
           set -euo pipefail
-          if [ -f tsconfig.json ]; then
-            npm ci --no-audit --no-fund
-            npm install -g typescript-language-server typescript
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          fi
+          npm ci --no-audit --no-fund
+          npm install -g typescript-language-server typescript
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Claude — plan and build the batch into one PR
         id: claude
@@ -372,13 +385,28 @@ jobs:
                    benefit from a first fast pass on the easy majority, then a slower, more
                    careful second pass on the hard remainder once you've seen the rest of the
                    codebase — use that shape if it fits, don't force it if it doesn't.
-               Collate naturally across the batch: dedupe overlapping work, and drop an issue
-               from THIS PR if it turns out unbuildable, would conflict, or you're running short
-               on turns/time and it's the lowest-value remaining piece — note which and why in
-               your final message; a dropped issue keeps its claim released and gets retried
-               later (by this builder or a future one, possibly with a different model if it's
-               since been marked effort:large or security). Shipping most of the batch solidly
-               beats risking all of it on an over-ambitious plan.
+               Your scope is not fixed — REDUCE or EXPAND it as the work reveals itself:
+                 - REDUCE: drop an issue from THIS PR if it turns out unbuildable, would
+                   conflict, is already superseded by / redundant with another issue in this
+                   batch or work already merged, or you're running short on turns/time and it's
+                   the lowest-value remaining piece. Note which and why in your final message; a
+                   dropped issue keeps its claim released and gets retried later (by this builder
+                   or a future one, possibly on a different model if it's since been marked
+                   effort:large or security). If it's redundant/superseded rather than merely
+                   deferred, say so explicitly so it can be closed instead of endlessly retried.
+                 - EXPAND: if you finish the batch with clear turn AND wall-clock headroom
+                   (you're well under budget, not scraping the 30-min stop), you MAY pull in more
+                   open work rather than end early — a cold start costs more than a few extra
+                   issues on a warm session. Only take issues that (a) are open and buildable
+                   (trusted author; not already labelled `building`/`hold`/`needs-human`), and
+                   (b) fit the budget you have left. BEFORE touching one, CLAIM it first:
+                   `gh issue edit <n> --add-label building` — that's what stops a concurrent run
+                   grabbing the same issue; an unclaimed issue you build is a double-build waiting
+                   to happen. Prefer issues related to what you just built (same area/files) so
+                   the shared context pays off. Don't reach past what you can finish cleanly.
+               Collate naturally across whatever the final set is: dedupe overlapping work.
+               Shipping a solid PR beats risking it on an over-ambitious plan — expand only when
+               you have real headroom, trim the moment you don't.
 
             2. BUILD. Make the smallest correct change for each issue. Do NOT touch secrets, do
                NOT weaken a test to make it pass, do NOT touch code unrelated to these issues.
