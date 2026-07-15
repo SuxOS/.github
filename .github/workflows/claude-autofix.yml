@@ -83,14 +83,36 @@ jobs:
           draft=$(echo "$pr" | jq -r .isDraft)
           labels=$(echo "$pr" | jq -r '[.labels[].name] | join(",")')
           # gh's --json flag has no authorAssociation field for PRs; the REST API does.
-          assoc=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$num" -q '.author_association' 2>/dev/null || echo "NONE")
+          # Read the login too — the org bot (suxbot[bot]) is a first-class trusted author
+          # matched BY LOGIN, independent of whatever association an App-token PR resolves to
+          # (same read shape pr-drain.yml/issue-build.yml use).
+          meta=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$num" -q '{assoc: .author_association, login: .user.login}' 2>/dev/null || echo '{"assoc":"NONE","login":""}')
+          assoc=$(printf '%s' "$meta" | jq -r '.assoc // "NONE"')
+          login=$(printf '%s' "$meta" | jq -r '.login // ""')
           fork=$(echo "$pr" | jq -r .isCrossRepository)
-          echo "PR #$num  title=$title  labels=$labels  draft=$draft  author=$assoc  fork=$fork"
+          echo "PR #$num  title=$title  labels=$labels  draft=$draft  author=$assoc  login=$login  fork=$fork"
 
           # RCE GUARD: this job checks out and RUNS the PR's code with a write token
           # + the Claude OAuth token. Only ever do that for a trusted author's same-repo
           # branch — never a fork or external contributor's untrusted code.
-          case "$assoc" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "untrusted author ($assoc) → refuse to run PR code"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0;; esac
+          # The org bot (suxbot[bot]) is trusted by LOGIN: pipeline-authored PRs (issue-build,
+          # fixer) come from the suxbot App and resolve author_association=NONE because the App
+          # token lacks org `members: read` (the same starvation documented in issue-build.yml
+          # #185/#186), so association alone refuses every one of the pipeline's OWN PRs and
+          # Loop 3 never fixes their red CI. Matching by login is safe here: this is a PRIVATE
+          # org, no fork attacker can forge the suxbot[bot] login, and the not-a-fork check
+          # below still fires for everyone. Mirrors issue-build.yml / pr-drain.yml exactly.
+          case "$assoc" in
+            OWNER|MEMBER|COLLABORATOR)
+              ;;
+            *)
+              if [ "$login" = "suxbot[bot]" ]; then
+                echo "trusted org bot by login (assoc=$assoc) → allowed"
+              else
+                echo "untrusted author (assoc=$assoc login=$login) → refuse to run PR code"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              ;;
+          esac
           if [ "$fork" = "true" ]; then echo "cross-repo/fork PR → refuse to run PR code"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
           has(){ echo ",$labels," | grep -qi ",$1,"; }
@@ -162,8 +184,16 @@ jobs:
           fi
           git fetch origin "$BASE_BRANCH" --quiet
           base=$(git merge-base "origin/$BASE_BRANCH" HEAD)
-          attempts=$(git log --format='%an' "$base"..HEAD | grep -c -iE 'claude|github-actions|sux-bot|\[bot\]' || true)
-          echo "bot fix attempts so far: $attempts (cap $MAX_ATTEMPTS)"
+          # Count ONLY genuine autofix attempts: commits carrying the autofix trailer that the
+          # Claude step below is instructed to stamp on every commit it makes — NOT every bot
+          # commit. The old `%an | grep -i claude|bot` counted ANY bot-authored commit, which
+          # over-counts catastrophically on a bot-authored PR: issue-build's build commit(s) and
+          # fixer's commits are ALL bot-authored, so a pipeline PR tripped the cap on attempt
+          # zero (→ needs-human with no real fix ever attempted) the moment the login bypass
+          # above let autofix run on it. The trailer is written by this loop and nothing else,
+          # so `git log --grep` over the PR's own commits counts fix attempts and only those.
+          attempts=$(git log --grep='Claude-Autofix-Attempt:' --format='%H' "$base"..HEAD | grep -c . || true)
+          echo "autofix attempts so far: $attempts (cap $MAX_ATTEMPTS)"
           if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
             echo "cap reached → tagging needs-human and stopping"
             gh pr edit "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
@@ -200,9 +230,15 @@ jobs:
             find the ROOT cause, and fix it. This repo's gates must all pass:
               $GATES_SUMMARY
             Make the smallest correct change, re-run the gates locally, then commit and push
-            to this PR branch. Do NOT touch secrets, do NOT weaken a test to make it pass, and
-            do NOT change unrelated code. If the failure is a genuine design problem you can't
-            safely fix, leave a comment explaining it instead of forcing a change.
+            to this PR branch. In EVERY commit you make, add this exact trailer as a footer line
+            (after a blank line, at the end of the commit message):
+              Claude-Autofix-Attempt: true
+            This is REQUIRED on every commit — the fix loop counts these trailers to enforce its
+            safety cap (it stops after a bounded number of attempts and hands off to a human), so
+            a commit without it is invisible to the cap and can let the loop run past its limit.
+            Do NOT touch secrets, do NOT weaken a test to make it pass, and do NOT change
+            unrelated code. If the failure is a genuine design problem you can't safely fix,
+            leave a comment explaining it instead of forcing a change.
           # Autofix legitimately writes code and pushes to the PR branch (gated above to a
           # trusted author's same-repo, non-fork branch by the RCE guard), so tools stay broad
           # (no --allowedTools restriction) by design.
