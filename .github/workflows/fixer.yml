@@ -121,6 +121,9 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
+          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
         with:
           show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -202,6 +205,9 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
+          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
+          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
         with:
           show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
