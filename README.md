@@ -18,8 +18,16 @@ a proxy for spend/waste, since actual Claude token usage isn't queryable via the
 
 **Autonomy pipeline** (keeps the merge queue moving hands-off):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
-`waitch.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml` — the org-wide
-`budget-guard.yml` gate was retired; there's no `ACTIONS_BUDGET_PAUSED` var to set.
+`waitch.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml`
+
+**Budget & deep passes** (run directly in THIS repo — not reusables; see
+[docs/design/budget-and-cadence.md](docs/design/budget-and-cadence.md)):
+`budget-governor.yml` (every 6h: org-wide spend-proxy sweep → per-repo "Autonomy throttle"
+issues that scheduled Claude workloads read via the `check-throttle` action — the smarter
+successor to the retired binary `budget-guard.yml`) · `deep-audit.yml` (nightly opus pass
+over each repo's merged diff — the compensating control for the sonnet per-PR
+security-review) · `org-consistency.yml` (weekly opus cross-repo drift + refactor sweep,
+files findings into the backlog pipeline).
 
 **Backlog pipeline** (turns latent work into merged/staged PRs — propose → investigate → build):
 `fixer.yml` (propose issues w/ confidence) · `triage.yml` (independently verify + opt-out-queue

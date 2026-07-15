@@ -57,8 +57,14 @@ permissions:
   contents: read
   issues: write
 
+# Static group, deliberately (was keyed on issue number until 2026-07): a burst of
+# issue-opened events used to fan out PARALLEL full-queue triage sessions — each one an
+# Opus session racing the others over the same untriaged queue (observed: 77 executed runs
+# at ~4.6 min avg in ~1 day). One group serializes them; the per-issue claim gate inside
+# the run keeps a queued duplicate cheap. Callers should prefer a batch schedule over
+# issues: triggers — see docs/design/budget-and-cadence.md.
 concurrency:
-  group: triage-${{ github.workflow }}-${{ github.event.issue.number || 'bulk' }}
+  group: triage-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
@@ -86,8 +92,17 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → triage inert"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
 
+      # Budget governor signal (docs/design/budget-and-cadence.md). Triage drains the
+      # in-flight backlog, so it keeps running at yellow and stands down only at red.
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "red"
+
       - name: Mint app token
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: app-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -96,7 +111,7 @@ jobs:
 
       - name: Select untriaged issues
         id: select
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MAX_ISSUES: ${{ inputs.max-issues }}
@@ -133,14 +148,14 @@ jobs:
           echo "count=$count" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.select.outputs.count != '0'
         # Default (shallow) depth: allowedTools below is gh/issue/label only — no git,
         # so this job doesn't need history.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Claude — investigate and decide
         id: claude
-        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.select.outputs.count != '0'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ISSUE_NUMBERS: ${{ steps.select.outputs.numbers }}
@@ -200,7 +215,7 @@ jobs:
             --json-schema '{"type":"object","properties":{"decisions":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"type":{"type":"string","enum":["bug","enhancement","security","documentation"]},"confidence":{"type":"string","enum":["high","medium","low"]},"buildable":{"type":"boolean"},"reason":{"type":"string"},"research_note":{"type":"string"}},"required":["number","type","confidence","buildable","reason","research_note"],"additionalProperties":false}}},"required":["decisions"],"additionalProperties":false}'
 
       - name: Apply triage labels
-        if: steps.pre.outputs.go == 'true' && steps.select.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.select.outputs.count != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERDICT: ${{ steps.claude.outputs.structured_output }}

@@ -1,0 +1,179 @@
+name: Budget governor
+
+# The feedback loop that keeps automation inside ~80% of the Max 20x subscription
+# (docs/design/budget-and-cadence.md). Every 6 hours:
+#   1. Sweep `gh run list` across the org's repos for the trailing 7 days (App token —
+#      the repos are private, so the ambient GITHUB_TOKEN can't see them).
+#   2. Roll up wall-clock minutes for Claude-invoking workflows, split opus/sonnet by
+#      workflow name. Same caveat as pipeline-utilization.yml: wall-clock is a PROXY
+#      that correlates with subscription spend — it is not a bill. Calibrate the
+#      thresholds against claude.ai's usage page (see the design doc's ritual).
+#   3. Upsert one org-wide report issue in THIS repo, and a per-repo "Autonomy throttle"
+#      issue (body line `level: green|yellow|red`) in every managed repo. Scheduled
+#      Claude workloads read that signal via the check-throttle composite; merge gates
+#      never do. Throttle issues labeled `throttle-manual` are left untouched.
+#
+# Runs directly in this repo (like pin-consistency/self-check) — it is NOT a reusable.
+
+on:
+  schedule:
+    - cron: "13 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: budget-governor
+  cancel-in-progress: true
+
+env:
+  # Repos whose runs are scanned AND whose throttle issues are maintained.
+  REPOS: "sux suxrouter sux-fileops .github"
+  # Workflow-name → model classification (case-insensitive extended regexes).
+  # Post-redesign: triage + the deep passes run opus; everything else Claude-ish is sonnet.
+  CLAUDE_WF_RE: "claude|security review|fixer|triage|issue build|deep audit|org consistency"
+  OPUS_WF_RE: "triage|deep audit|org consistency"
+  # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
+  # design doc for how these were derived and how to calibrate them.
+  OPUS_BUDGET_MIN: "900"
+  TOTAL_BUDGET_MIN: "6000"
+  # Fraction of a budget at which the throttle goes yellow.
+  YELLOW_FRACTION: "0.75"
+  LOOKBACK_DAYS: "7"
+
+jobs:
+  govern:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # `owner:` with no per-repo scoping isn't used — enumerate exactly the repos this
+      # job reads runs from and writes issues to (same pattern as pin-consistency).
+      - name: Mint org-scoped app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: sux,suxrouter,sux-fileops,.github
+
+      - name: Sweep runs and compute utilization
+        id: sweep
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          since=$(date -u -d "-${LOOKBACK_DAYS} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-"${LOOKBACK_DAYS}"d +%Y-%m-%dT%H:%M:%SZ)
+
+          all="[]"
+          for r in $REPOS; do
+            if ! runs=$(gh run list --repo "SuxOS/$r" --limit 1000 --created ">=$since" \
+                --json workflowName,conclusion,status,startedAt,updatedAt); then
+              echo "::error::gh run list failed for SuxOS/$r — refusing to govern on partial data"
+              exit 1
+            fi
+            all=$(jq -c --arg repo "$r" '.[0] + [.[1][] | . + {repo: $repo}]' \
+              <<<"[$all, $runs]")
+          done
+
+          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" '
+            [ .[] | select(.status == "completed")
+              | select(.workflowName | test($cre; "i"))
+              | . + {mins: (((.updatedAt | fromdateiso8601) - (.startedAt | fromdateiso8601)) / 60),
+                     tier: (if (.workflowName | test($ore; "i")) then "opus" else "sonnet" end)} ]
+            | { opus_min:  ([.[] | select(.tier == "opus")  | .mins] | add // 0 | floor),
+                total_min: ([.[] | .mins] | add // 0 | floor),
+                by_repo_wf: (group_by({r: .repo, w: .workflowName})
+                  | map({repo: .[0].repo, workflow: .[0].workflowName, tier: .[0].tier,
+                         runs: length, mins: ([.[] | .mins] | add | floor),
+                         failed: ([.[] | select(.conclusion == "failure")] | length)})
+                  | sort_by(-.mins)) }' <<<"$all")
+
+          opus_min=$(jq -r '.opus_min' <<<"$rollup")
+          total_min=$(jq -r '.total_min' <<<"$rollup")
+
+          level=green
+          yellow_opus=$(awk -v b="$OPUS_BUDGET_MIN" -v f="$YELLOW_FRACTION" 'BEGIN{print int(b*f)}')
+          yellow_total=$(awk -v b="$TOTAL_BUDGET_MIN" -v f="$YELLOW_FRACTION" 'BEGIN{print int(b*f)}')
+          if [ "$opus_min" -ge "$yellow_opus" ] || [ "$total_min" -ge "$yellow_total" ]; then level=yellow; fi
+          if [ "$opus_min" -ge "$OPUS_BUDGET_MIN" ] || [ "$total_min" -ge "$TOTAL_BUDGET_MIN" ]; then level=red; fi
+
+          echo "opus_min=$opus_min total_min=$total_min level=$level"
+          {
+            echo "rollup<<EOF_GOV_ROLLUP"
+            printf '%s\n' "$rollup"
+            echo "EOF_GOV_ROLLUP"
+            echo "opus_min=$opus_min"
+            echo "total_min=$total_min"
+            echo "level=$level"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build report body
+        id: body
+        env:
+          ROLLUP: ${{ steps.sweep.outputs.rollup }}
+          OPUS_MIN: ${{ steps.sweep.outputs.opus_min }}
+          TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
+          LEVEL: ${{ steps.sweep.outputs.level }}
+        run: |
+          set -euo pipefail
+          rows=$(jq -r '.by_repo_wf[] |
+            "| \(.repo) | \(.workflow) | \(.tier) | \(.runs) | \(.mins) | \(.failed) |"' <<<"$ROLLUP")
+          body=$(printf '%s\n' \
+            "Auto-maintained by budget-governor.yml. Last updated $(date -u '+%Y-%m-%d %H:%M UTC'). Window: trailing ${LOOKBACK_DAYS} days." \
+            "" \
+            "**Throttle level: \`${LEVEL}\`** — opus-tier ${OPUS_MIN}/${OPUS_BUDGET_MIN} runner-min, all Claude workflows ${TOTAL_MIN}/${TOTAL_BUDGET_MIN} runner-min (yellow at ${YELLOW_FRACTION} of either budget)." \
+            "" \
+            "Wall-clock runner minutes are a **proxy** for subscription spend, not a bill — calibrate the budgets against claude.ai's usage page per docs/design/budget-and-cadence.md." \
+            "" \
+            "| Repo | Workflow | Tier | Runs | Minutes | Failed |" \
+            "|------|----------|------|-----:|--------:|-------:|" \
+            "$rows")
+          {
+            echo "body<<EOF_GOV_BODY"
+            printf '%s\n' "$body"
+            echo "EOF_GOV_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refresh org-wide report issue
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: open
+          update-mode: replace
+          title: "Autonomy budget report"
+          body: ${{ steps.body.outputs.body }}
+
+      - name: Set per-repo throttle issues
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          LEVEL: ${{ steps.sweep.outputs.level }}
+          OPUS_MIN: ${{ steps.sweep.outputs.opus_min }}
+          TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
+        run: |
+          set -euo pipefail
+          stamp=$(date -u '+%Y-%m-%d %H:%M UTC')
+          body=$(printf '%s\n' \
+            "level: ${LEVEL}" \
+            "" \
+            "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Trailing-7-day proxy spend: opus-tier ${OPUS_MIN}/${OPUS_BUDGET_MIN} runner-min, total ${TOTAL_MIN}/${TOTAL_BUDGET_MIN} runner-min. To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
+          for r in $REPOS; do
+            found=$(gh issue list --repo "SuxOS/$r" --state open --limit 100 --json number,title,labels \
+              | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
+            if [ -n "$found" ]; then
+              num=$(jq -r '.number' <<<"$found")
+              manual=$(jq -r '[.labels[].name] | contains(["throttle-manual"])' <<<"$found")
+              if [ "$manual" = "true" ]; then
+                echo "SuxOS/$r#$num is pinned (throttle-manual) — leaving as-is"
+                continue
+              fi
+              gh issue edit "$num" --repo "SuxOS/$r" --body "$body" >/dev/null
+              echo "SuxOS/$r#$num → level: $LEVEL"
+            else
+              url=$(gh issue create --repo "SuxOS/$r" --title "Autonomy throttle" --body "$body")
+              echo "created $url → level: $LEVEL"
+            fi
+          done

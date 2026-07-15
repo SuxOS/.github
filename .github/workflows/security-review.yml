@@ -30,7 +30,12 @@ on:
     inputs:
       model:
         type: string
-        default: "opus"
+        # sonnet, deliberately (was opus until 2026-07): this gate fires on every PR push —
+        # the highest-frequency Claude workflow in the org — and Sonnet is near-Opus on code
+        # review at a fraction of the subscription budget weight. The compensating control is
+        # deep-audit.yml: a nightly Opus pass over the day's MERGED diff that catches what the
+        # fast per-PR review missed. See docs/design/budget-and-cadence.md.
+        default: "sonnet"
       max-turns:
         type: number
         default: 22
