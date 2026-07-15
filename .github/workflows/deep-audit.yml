@@ -1,0 +1,157 @@
+name: Deep audit
+
+# The infrequent-expensive half of the security-review bargain (docs/design/
+# budget-and-cadence.md): the per-PR gate runs on sonnet at high frequency; this nightly
+# Opus pass re-reviews the day's MERGED diff per repo with fresh eyes and files anything
+# it finds as ordinary issues, which flow into the triage → issue-build pipeline.
+# Cheap-exits when nothing merged. Serialized (max-parallel: 1) so the Opus sessions
+# don't stack inside one 5-hour subscription window.
+#
+# Safe Outputs pattern (same as fixer.yml): the agent is read-only and returns findings
+# via structured output; a separate least-privileged step is the only thing that files
+# issues. Runs directly in this repo — NOT a reusable.
+
+on:
+  schedule:
+    - cron: "33 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read # check-throttle reads this repo's throttle issue
+
+concurrency:
+  group: deep-audit
+  cancel-in-progress: false
+
+env:
+  LOOKBACK_HOURS: "25" # cron is every 24h; 1h overlap beats a gap
+  MODEL: "opus"
+  MAX_TURNS: "25"
+
+jobs:
+  audit:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        repo: [sux, suxrouter, sux-fileops]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "yellow" # most deferrable work — skip on yellow or red
+
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → deep-audit inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint org-scoped app token
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: ${{ matrix.repo }}
+
+      - name: Checkout ${{ matrix.repo }}
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/${{ matrix.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Find the day's merged range
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: range
+        run: |
+          set -euo pipefail
+          base=$(git rev-list -n1 --first-parent --before="${LOOKBACK_HOURS} hours ago" HEAD || true)
+          head=$(git rev-parse HEAD)
+          if [ -z "$base" ] || [ "$base" = "$head" ]; then
+            echo "nothing merged in the last ${LOOKBACK_HOURS}h → cheap exit"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "auditing $base..$head ($(git rev-list --count "$base..$head") commits)"
+            {
+              echo "go=true"
+              echo "base=$base"
+              echo "head=$head"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Claude — deep-review the merged diff
+        id: claude
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.range.outputs.go == 'true'
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the nightly deep auditor for this repo. The fast per-PR security review
+            runs on a cheaper model; you are the stronger second pass over what actually
+            LANDED on the default branch in the last day.
+
+            Scope: `git diff ${{ steps.range.outputs.base }}..${{ steps.range.outputs.head }}`
+            (use git log/show over the same range for commit-level context). Read surrounding
+            code wherever the diff alone is ambiguous.
+
+            Hunt specifically for what a fast per-PR pass misses:
+              - Security: injection (shell/SQL/workflow expression), authZ/authN gaps, secret
+                or token leakage, path traversal, unsafe deserialization, SSRF, supply-chain
+                (new/changed action pins, dependencies).
+              - Cross-PR interactions: two independently-merged changes that are each fine but
+                wrong together.
+              - Correctness: edge cases, race conditions, silently-swallowed errors, wrong
+                assumptions about data shape that tests don't cover.
+
+            Before reporting: `gh issue list --limit 200 --state all` and skip anything an
+            existing issue already covers. Dedupe candidates against each other.
+
+            Do NOT file issues yourself — you have no write access. Return findings via the
+            structured output schema. Title: short, specific, imperative. Body: what/why,
+            file:line references, the merged range, and a suggested fix direction. Only
+            report findings you can point at concretely — no speculative padding. An empty
+            findings list is a GOOD outcome; do not invent work.
+          claude_args: >-
+            --max-turns ${{ env.MAX_TURNS }} --model ${{ env.MODEL }}
+            --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"security":{"type":"boolean"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["title","body","security","confidence"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+
+      # The ONLY step that files issues (Safe Outputs). Validates fields before writing.
+      - name: File findings as issues
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.range.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+          TARGET_REPO: SuxOS/${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
+          echo "findings: $(jq '.findings | length' <<<"$VERDICT")"
+          jq -c '.findings[]' <<<"$VERDICT" | while read -r f; do
+            title=$(jq -r '.title' <<<"$f")
+            body=$(jq -r '.body' <<<"$f")
+            security=$(jq -r '.security' <<<"$f")
+            conf=$(jq -r '.confidence' <<<"$f")
+            case "$conf" in high|medium|low) ;; *)
+              echo "::warning::skipping finding with unexpected confidence '$conf': $title"; continue ;;
+            esac
+            label_args=(--label bug --label "confidence:$conf")
+            [ "$security" = "true" ] && label_args+=(--label security)
+            body=$(printf '%s\n\n---\nFiled by deep-audit (nightly opus pass over the merged diff).' "$body")
+            url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}")
+            echo "filed: $url"
+          done

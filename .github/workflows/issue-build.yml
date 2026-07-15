@@ -50,10 +50,12 @@ on:
         default: "sonnet" # clustering is mechanical grouping — bulk tier is right
       build-model:
         type: string
-        # opus, deliberately: this is codegen that AUTO-MERGES for a confidence:high cluster.
-        # CI + security-review still gate it, but subtle-wrong-yet-passing code is exactly what a
-        # stronger model avoids. Codegen → opus (CLAUDE.md model doctrine).
-        default: "opus"
+        # sonnet, deliberately (was opus until 2026-07): build output is triple-gated — CI,
+        # security-review, and the confidence label set independently by Opus triage — and
+        # Sonnet is near-Opus on codegen at a fraction of the subscription budget weight.
+        # The scarce Opus budget goes to the unreviewed judgment (triage) and the nightly
+        # deep-audit instead. See docs/design/budget-and-cadence.md.
+        default: "sonnet"
       build-max-turns:
         type: number
         default: 60
@@ -92,8 +94,18 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
 
+      # Budget governor signal (docs/design/budget-and-cadence.md). Builds drain the
+      # in-flight backlog, so they keep running at yellow and stand down only at red.
+      # Gating the cluster job gates the whole workflow: no plan → empty build matrix.
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "red"
+
       - name: Mint app token
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: app-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -109,7 +121,7 @@ jobs:
       #     first claims everything, the rest hit this and exit in seconds with no LLM spend.
       - name: Reap stale claims and count the queue
         id: queue
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REAP_STALE_HOURS: "2"
@@ -138,14 +150,14 @@ jobs:
           echo "count=$qcount" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
         # Default (shallow) depth: this cluster job's allowedTools is gh/issue only — no
         # git — unlike the build job below, which genuinely needs full history.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Claude — cluster the backlog
         id: claude
-        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -193,7 +205,7 @@ jobs:
 
       - name: Cap cluster count and claim issues
         id: plan
-        if: steps.pre.outputs.go == 'true' && steps.queue.outputs.count != '0'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.queue.outputs.count != '0'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERDICT: ${{ steps.claude.outputs.structured_output }}

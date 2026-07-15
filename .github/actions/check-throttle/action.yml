@@ -1,0 +1,60 @@
+name: Check autonomy throttle
+description: >-
+  Read this repo's "Autonomy throttle" tracking issue (maintained org-wide by
+  budget-governor.yml) and decide whether a scheduled Claude workload should
+  run. FAIL-OPEN by design: no issue, an unreadable issue, or an unparseable
+  level all read as green — a governor outage must never stall the pipeline.
+  Merge gates (security-review, CI) must NOT use this action; a red light must
+  not jam the merge queue.
+
+inputs:
+  github-token:
+    description: Token with issues:read for this repo (the ambient GITHUB_TOKEN is fine).
+    required: true
+  defer-at:
+    description: >-
+      Throttle sensitivity. "yellow" = defer when the level is yellow OR red
+      (the most deferrable work: fixer, deep-audit, org-consistency).
+      "red" = defer only at red (backlog-draining work: triage, issue-build).
+    required: false
+    default: "red"
+
+outputs:
+  go:
+    description: '"true" when the workload should run, "false" when deferred.'
+    value: ${{ steps.check.outputs.go }}
+  level:
+    description: The throttle level read from the tracking issue (green/yellow/red).
+    value: ${{ steps.check.outputs.level }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read throttle level
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DEFER_AT: ${{ inputs.defer-at }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uo pipefail
+
+        # Fail-open: any failure in the lookup chain leaves level=green.
+        level=$(gh issue list --repo "$REPO" --state open --limit 100 --json title,body 2>/dev/null \
+          | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""' \
+          | grep -m1 -oE '^level: (green|yellow|red)$' | awk '{print $2}') || true
+        level=${level:-green}
+
+        go=true
+        case "$DEFER_AT" in
+          yellow) [ "$level" != "green" ] && go=false ;;
+          red)    [ "$level" = "red" ] && go=false ;;
+          *) echo "::warning::unknown defer-at '$DEFER_AT' — failing open"; ;;
+        esac
+
+        if [ "$go" = "false" ]; then
+          echo "::notice::autonomy throttle is $level → deferring this workload (defer-at: $DEFER_AT). See the 'Autonomy throttle' issue and docs/design/budget-and-cadence.md in SuxOS/.github."
+        fi
+        echo "level=$level" >> "$GITHUB_OUTPUT"
+        echo "go=$go" >> "$GITHUB_OUTPUT"

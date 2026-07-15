@@ -79,8 +79,18 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → fixer inert. Run 'claude setup-token' and add it as an org/repo secret to arm."; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
 
+      # Budget governor signal (docs/design/budget-and-cadence.md). Proposing NEW work is
+      # the most deferrable stage, so fixer stands down at yellow — the in-flight backlog
+      # keeps draining through triage/issue-build until red.
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "yellow"
+
       - name: Mint app token
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: app-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -88,18 +98,18 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       - name: Checkout
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
 
       - name: Record scan-start time
-        if: steps.pre.outputs.go == 'true' && inputs.auto-assign-agent == true
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.auto-assign-agent == true
         id: scan-start
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
 
       - name: Claude — scan and propose issues
         id: claude
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -166,7 +176,7 @@ jobs:
       # JSON schema already constrains them (belt-and-suspenders: a schema is the model's
       # contract, this is the pipeline's own gate on what it will actually write).
       - name: File proposed issues
-        if: steps.pre.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERDICT: ${{ steps.claude.outputs.structured_output }}
@@ -201,7 +211,7 @@ jobs:
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped
       # to this run's time window. See the workflow-level comment for why this needs a PAT.
       - name: Auto-assign freshly filed issues to a coding agent
-        if: steps.pre.outputs.go == 'true' && inputs.auto-assign-agent == true
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.auto-assign-agent == true
         env:
           GH_TOKEN: ${{ secrets.AGENT_ASSIGN_PAT }}
           ASSIGNEE: ${{ inputs.agent-assignee }}

@@ -1,0 +1,174 @@
+name: Org consistency sweep
+
+# Weekly Opus pass over ALL org repos checked out side by side, hunting what no single-repo
+# workflow can see: inter-repo drift and cross-repo refactor opportunities. Findings are
+# filed as ordinary issues in the affected repo and flow into the existing triage →
+# issue-build pipeline. Deterministic checks stay where they are (pin-consistency owns SHA
+# drift) — this pass is for the judgment-shaped inconsistencies a script can't express.
+# The infrequent-expensive tier of docs/design/budget-and-cadence.md.
+#
+# Safe Outputs pattern (same as fixer.yml): read-only agent, structured output, a separate
+# least-privileged step files the issues. Runs directly in this repo — NOT a reusable.
+
+on:
+  schedule:
+    - cron: "47 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read # check-throttle reads this repo's throttle issue
+
+concurrency:
+  group: org-consistency
+  cancel-in-progress: false
+
+env:
+  MODEL: "opus"
+  MAX_TURNS: "40"
+  # Issues may only be filed into these repos (validated in the filing step).
+  ALLOWED_REPOS: "sux suxrouter sux-fileops claude-config .github"
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          defer-at: "yellow" # most deferrable work — skip on yellow or red
+
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → org-consistency inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint org-scoped app token
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: sux,suxrouter,sux-fileops,claude-config,.github
+
+      - name: Checkout .github (this repo)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Checkout sux
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/sux
+          token: ${{ steps.app-token.outputs.token }}
+          path: repos/sux
+
+      - name: Checkout suxrouter
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/suxrouter
+          token: ${{ steps.app-token.outputs.token }}
+          path: repos/suxrouter
+
+      - name: Checkout sux-fileops
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/sux-fileops
+          token: ${{ steps.app-token.outputs.token }}
+          path: repos/sux-fileops
+
+      - name: Checkout claude-config
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/claude-config
+          token: ${{ steps.app-token.outputs.token }}
+          path: repos/claude-config
+
+      - name: Claude — cross-repo consistency and refactor sweep
+        id: claude
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the weekly org-consistency auditor. The workspace root is the org's
+            `.github` hub repo (reusable workflows + scaffold); the product repos are checked
+            out under `repos/sux`, `repos/suxrouter`, `repos/sux-fileops`, and
+            `repos/claude-config`. You see what no single-repo pass can: drift BETWEEN them.
+
+            Hunt, in priority order:
+              1. Caller-stub drift: each repo's `.github/workflows/*.yml` thin callers vs.
+                 what `scripts/scaffold-caller.sh` emits and what the reusable's inputs
+                 expect — missing stubs, stale `with:` overrides that now equal (or fight)
+                 the hub default, `required-gates` lists naming checks that don't exist in
+                 that repo, forked copies of workflows that exist as reusables.
+              2. Convention drift: same concept solved differently across repos (label
+                 taxonomies, branch naming, CLAUDE.md guidance that contradicts another
+                 repo's, node versions, lint/test entry points) where convergence is cheap.
+              3. Duplicated logic that wants extraction: near-identical code/scripts in two+
+                 repos (especially sux ↔ sux-fileops) that belongs in one place.
+              4. API-shape drift: suxrouter's vendored/consumed interfaces vs. what sux
+                 actually serves; docs describing cross-repo behavior that no longer matches.
+              5. Intra-repo refactor opportunities ONLY when they generalize across repos
+                 (fixing the class beats fixing the instance).
+
+            Deterministic pin/SHA drift is pin-consistency.yml's job — skip pure SHA
+            mismatches unless they change behavior.
+
+            Before reporting: `gh issue list --limit 200 --state all` in the affected repo
+            (use `--repo SuxOS/<name>`) and skip anything already covered. Dedupe candidates;
+            one root cause spanning three repos is ONE finding filed where the fix belongs.
+
+            Do NOT file issues yourself — you have no write access. Return findings via the
+            structured output schema: `repo` is the repo whose issue tracker should carry the
+            work; title short and imperative; body with concrete paths in EVERY affected
+            repo, why it matters, and a suggested direction. Only report what you can point
+            at concretely — an empty findings list is a fine outcome.
+          claude_args: >-
+            --max-turns ${{ env.MAX_TURNS }} --model ${{ env.MODEL }}
+            --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(gh issue list:*)"
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"repo":{"type":"string","enum":["sux","suxrouter","sux-fileops","claude-config",".github"]},"title":{"type":"string"},"body":{"type":"string"},"confidence":{"type":"string","enum":["high","medium","low"]}},"required":["repo","title","body","confidence"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+
+      # The ONLY step that files issues (Safe Outputs). Re-validates repo against the
+      # allowlist even though the schema already constrains it.
+      - name: File findings as issues
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERDICT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
+          echo "findings: $(jq '.findings | length' <<<"$VERDICT")"
+          jq -c '.findings[]' <<<"$VERDICT" | while read -r f; do
+            repo=$(jq -r '.repo' <<<"$f")
+            title=$(jq -r '.title' <<<"$f")
+            body=$(jq -r '.body' <<<"$f")
+            conf=$(jq -r '.confidence' <<<"$f")
+            ok=false
+            for a in $ALLOWED_REPOS; do [ "$repo" = "$a" ] && ok=true; done
+            if [ "$ok" != "true" ]; then
+              echo "::warning::skipping finding for unexpected repo '$repo': $title"; continue
+            fi
+            case "$conf" in high|medium|low) ;; *)
+              echo "::warning::skipping finding with unexpected confidence '$conf': $title"; continue ;;
+            esac
+            body=$(printf '%s\n\n---\nFiled by the weekly org-consistency sweep (SuxOS/.github).' "$body")
+            url=$(gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body" \
+              --label enhancement --label "confidence:$conf" \
+              || gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body")
+            echo "filed: $url"
+          done

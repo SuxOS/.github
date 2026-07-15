@@ -238,11 +238,15 @@ jobs:
     secrets: inherit
 YAML
 
+# Batch schedules, not issues: triggers (2026-07 redesign, docs/design/budget-and-cadence.md):
+# per-issue triggers fanned out one Opus session per event during fixer bursts. A staggered
+# batch keeps triage/build at a handful of sessions per day; stagger the minutes per repo so
+# concurrent repos don't stack sessions inside one 5-hour subscription window.
+
 emit triage <<YAML
 name: Triage
 on:
-  issues:
-    types: [opened, reopened]
+  schedule: [{ cron: "7 5,13,21 * * *" }]
   workflow_dispatch:
 jobs:
   triage:
@@ -253,12 +257,10 @@ YAML
 emit issue-build <<YAML
 name: Issue build
 on:
-  issues:
-    types: [labeled]
+  schedule: [{ cron: "7 2,8,14,20 * * *" }]
   workflow_dispatch:
 jobs:
   issue-build:
-    if: github.event_name != 'issues' || github.event.label.name == 'queued-for-build'
     uses: $REPO/.github/workflows/issue-build.yml@$REF
     with:
       gates-summary: "npm run type-check · npm test · npm run lint"

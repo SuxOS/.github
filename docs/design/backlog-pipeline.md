@@ -89,18 +89,21 @@ downstream runs for it; this is why every writer mints a SUX_BOT App token first
 
 ## Model per stage (right-sized by stakes)
 
-Model choice follows one rule: **opus where the output is high-stakes or takes effect
-unreviewed; sonnet where it's gated, bulk, or advisory** (matches the repo CLAUDE.md doctrine —
-opus for codegen / adversarial review, sonnet for mechanical fan-out). All are `model` inputs,
-so any caller can override.
+Model choice follows two axes since the 2026-07 budget redesign
+([docs/design/budget-and-cadence.md](budget-and-cadence.md)): **stakes** (the old rule —
+opus where output takes effect unreviewed) **and frequency** — high-frequency work runs on
+sonnet even when it gates, compensated by a low-frequency opus deep pass. All are `model`
+inputs, so any caller can override.
 
 | Stage | Model | Why |
 |---|---|---|
-| `triage` | **opus** | Its `confidence:high` call is what lets a build merge with NO human review — the most consequential judgment in the pipeline. |
-| `issue-build` / build | **opus** | Codegen that auto-merges for a high-confidence cluster. CI + security-review still gate it, but a stronger model avoids subtle-wrong-yet-passing code. |
+| `triage` | **opus** | Its `confidence:high` call is what lets a build merge with NO human review — the most consequential judgment in the pipeline. Low frequency (scheduled batch), so opus is affordable here. |
+| `deep-audit` (nightly) | **opus** | Second-pass review of the day's *merged* diff — the compensating control for sonnet gates below. |
+| `org-consistency` (weekly) | **opus** | Cross-repo judgment no single-repo pass can make. |
+| `issue-build` / build | sonnet | Codegen triple-gated by CI, security-review, and the opus-set confidence label. |
 | `issue-build` / cluster | sonnet | Mechanical grouping. |
 | `fixer` | sonnet | Bulk scan; every proposal is re-verified by triage downstream. |
-| `security-review` | opus | Gates merge on its findings. |
+| `security-review` | sonnet | The highest-frequency Claude workflow in the org (~every PR push); near-opus review quality, and the nightly opus deep-audit backstops it. |
 | `claude` review / `claude-autofix` | sonnet | Advisory (a human decides) / CI-gated + attempt-capped (deliberately cheap). |
 
 ## Bounding cost and chaos
