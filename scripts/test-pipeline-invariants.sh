@@ -7,14 +7,15 @@
 #      in its pull_request types, or a newly-scaffolded repo's review silently
 #      never re-runs when a draft PR is marked ready (GitHub counts a skipped
 #      required check as passing).
-# Run from repo root: bash .github/scripts/test-pipeline-invariants.sh
+# Runs from anywhere: resolves paths relative to this script's repo, not the CWD.
 set -euo pipefail
+cd "$(cd "$(dirname "$0")/.." && pwd)"   # repo root (scripts/ lives directly under it)
 fail=0
 note() { echo "  ok: $*"; }
 bad()  { echo "  FAIL: $*" >&2; fail=1; }
 
 echo "[1/2] security-review.yml high-blast pattern covers .github/actions/"
-pattern=$(grep -oE "grep -qiE '[^']+'" .github/.github/workflows/security-review.yml | head -1 | sed "s/^grep -qiE '//; s/'\$//")
+pattern=$(grep -oE "grep -qiE '[^']+'" .github/workflows/security-review.yml | head -1 | sed "s/^grep -qiE '//; s/'\$//")
 if [ -z "$pattern" ]; then
   bad "could not extract the high-blast grep pattern from security-review.yml — has the line moved/changed shape?"
 else
@@ -39,7 +40,7 @@ else
 fi
 
 echo "[2/2] scaffold-caller.sh's security-review template includes ready_for_review"
-stub=$(awk '/^emit security-review <<YAML/,/^YAML$/' .github/scripts/scaffold-caller.sh)
+stub=$(awk '/^emit security-review <<YAML/,/^YAML$/' scripts/scaffold-caller.sh)
 if printf '%s\n' "$stub" | grep -q 'ready_for_review'; then
   note "generated security-review stub includes ready_for_review"
 else

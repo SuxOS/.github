@@ -43,5 +43,5 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Assert cross-cutting pipeline invariants
-        run: bash .github/scripts/test-pipeline-invariants.sh
+        run: bash scripts/test-pipeline-invariants.sh
         shell: bash
