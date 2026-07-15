@@ -474,6 +474,18 @@ jobs:
                better than noise. This is strictly secondary: never spend build turns you need
                for the gates on it.
 
+               MEMORY: this repo's CLAUDE.md is your persistent memory across every future
+               build — it's auto-loaded into your context at the start of each run. If, while
+               building, you learned a DURABLE, non-obvious fact that future builds should know
+               and act on — a gotcha, a convention, a "always do X here / never do Y", a
+               constraint that isn't self-evident from the code — you MAY add a tight line or
+               two to the nearest CLAUDE.md IN THIS PR (not a separate observation). Rules: only
+               a genuinely durable, generalizable fact (not a note about this one issue); keep
+               it a sentence or two, in the file's existing voice; never delete or rewrite
+               existing guidance, only append; skip it entirely if nothing clears that bar (an
+               unchanged CLAUDE.md is the common, correct case). The PR's security-review + your
+               own gates still see the edit before it merges.
+
             If you get the gates passing, finish normally — a later step opens the PR. If you
             can't get them green (genuine design problem, missing context), do NOT push a broken
             commit — say so clearly in your final message and explain what's blocking it.

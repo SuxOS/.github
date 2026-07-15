@@ -40,10 +40,18 @@ permissions:
   actions: read
 
 jobs:
+  # OWNER comments trigger with NO `@claude` needed — "it's just you and me, read my comments"
+  # (operator, 2026-07-15). On this solo private org an OWNER comment is always the operator
+  # steering, so requiring a mention was pure friction. MEMBER/COLLABORATOR still need the
+  # explicit `@claude` (they aren't the operator). Cost stays bounded: sonnet, --max-turns,
+  # cancel-in-progress concurrency, and a fresh comment supersedes a stale one. Trivial "lgtm"
+  # comments will occasionally trigger a cheap no-op response; that's the accepted cost of not
+  # having to remember to type @claude.
   mention:
     if: >
       github.event.sender.type != 'Bot' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association) && (
+        (github.event.comment.author_association == 'OWNER' || github.event.review.author_association == 'OWNER') ||
         (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
         (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
         (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude'))
