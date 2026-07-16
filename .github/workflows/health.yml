@@ -41,6 +41,17 @@ on:
           `smoke-url`/`expected-status`; the check fails if any endpoint mismatches.
         type: string
         default: ""
+      sibling-repos:
+        description: >-
+          Space/comma/newline-separated PRIVATE sibling repo names (same org) that
+          this repo depends on via `file:../<name>` in package.json. Each is cloned
+          to `../<name>` before `npm ci` so the file: dep resolves on a clean runner
+          (this repo's own CI already does this; the canary needs the same). Requires
+          `SUX_BOT_APP_ID` / `SUX_BOT_PRIVATE_KEY` via `secrets: inherit`. Empty (the
+          default) skips the clone entirely, so callers with no private siblings are
+          unaffected.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -62,6 +73,46 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           cache: ${{ inputs.enabled && 'npm' || '' }}
+
+      # package.json can depend on "<pkg>": "file:../<name>" — a PRIVATE sibling repo,
+      # not a submodule — so a clean runner has no ../<name> and `npm ci` fails resolving
+      # the file: dep. This is exactly why the health canary went red the day sux adopted
+      # file:../suxlib while its own CI (which already clones the sibling) stayed green.
+      # Mint one read-only token scoped to just those repos from the same App identity
+      # automerge.yml/ci.yml already use, provided to this reusable workflow via the
+      # caller's `secrets: inherit`.
+      - name: Mint app token for private sibling repos
+        id: sibling-token
+        if: inputs.enabled && inputs.sibling-repos != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.sibling-repos }}
+          permission-contents: read
+
+      # $GITHUB_WORKSPACE is .../work/<repo>/<repo>, so ../<name> lands at
+      # .../work/<repo>/<name> — exactly where npm's file:../<name> resolution looks.
+      # Repo names come from the trusted caller stub (not event payload); passed via env
+      # and word-split, with commas normalized to spaces so any list form works.
+      - name: "Clone private sibling repos (file: deps)"
+        if: inputs.enabled && inputs.sibling-repos != ''
+        env:
+          SIBLING_TOKEN: ${{ steps.sibling-token.outputs.token }}
+          SIBLING_REPOS: ${{ inputs.sibling-repos }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          for repo in $(printf '%s' "$SIBLING_REPOS" | tr ',' ' '); do
+            git clone --depth 1 --branch main \
+              "https://x-access-token:${SIBLING_TOKEN}@github.com/${OWNER}/${repo}.git" "../${repo}"
+            # Install the sibling's own deps (so the depender's tsc/tests can resolve
+            # them through the file: dep) only when it actually has a package.json.
+            if [ -f "../${repo}/package.json" ]; then
+              npm --prefix "../${repo}" ci --omit=dev
+            fi
+          done
 
       - name: Install dependencies
         if: inputs.enabled
