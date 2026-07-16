@@ -30,7 +30,7 @@ run_case() {
   echo "  [$name] exit=$code"
 }
 
-echo "[1/5] both surfaces unreadable (403/network) -> fail OPEN (warn, exit 0)"
+echo "[1/8] both surfaces unreadable (403/network) -> fail OPEN (warn, exit 0)"
 run_case "both-403" '
   case "$2" in
     repos/*/branches/*/protection) return 1 ;;
@@ -42,7 +42,7 @@ else
   bad "expected exit 0 + ::warning:: when both surfaces 403, got exit=$code out=$out"
 fi
 
-echo "[2/5] rulesets readable, required gate missing -> fail CLOSED (error, exit 1)"
+echo "[2/8] rulesets readable, required gate missing -> fail CLOSED (error, exit 1)"
 run_case "rules-ok-missing-gate" '
   case "$2" in
     repos/*/branches/*/protection) return 1 ;;
@@ -54,7 +54,7 @@ else
   bad "expected exit 1 + ::error:: naming security-review, got exit=$code out=$out"
 fi
 
-echo "[3/5] rulesets readable, both gates present -> pass (exit 0, no error)"
+echo "[3/8] rulesets readable, both gates present -> pass (exit 0, no error)"
 run_case "rules-ok-all-present" '
   case "$2" in
     repos/*/branches/*/protection) return 1 ;;
@@ -66,7 +66,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[4/5] classic protection OK but rulesets unreadable -> still fails OPEN (rules_ok alone gates read_ok)"
+echo "[4/8] classic protection OK but rulesets unreadable -> still fails OPEN (rules_ok alone gates read_ok)"
 run_case "protection-ok-rules-403" '
   case "$2" in
     repos/*/branches/*/protection) echo "{\"required_status_checks\":{\"contexts\":[\"CI\",\"security-review\"]}}" ;;
@@ -78,7 +78,7 @@ else
   bad "expected exit 0 + ::warning:: (rules_ok drives read_ok, not protection), got exit=$code out=$out"
 fi
 
-echo "[5/5] rulesets return malformed JSON -> does not silently die under bash -e/pipefail"
+echo "[5/8] rulesets return malformed JSON -> does not silently die under bash -e/pipefail"
 run_case "rules-malformed-json" '
   case "$2" in
     repos/*/branches/*/protection) return 1 ;;
@@ -88,6 +88,42 @@ if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q '::error::'; then
   note "malformed ruleset JSON is treated as zero gates found -> missing-gates path, not a silent crash"
 else
   bad "expected a clean exit=1 with ::error:: (missing gates), not a silent bash -e death; got exit=$code out=$out"
+fi
+
+echo "[6/8] superset-named check (security-review-experimental) must NOT satisfy security-review -> fail CLOSED (#210)"
+run_case "superset-name-rejected" '
+  case "$2" in
+    repos/*/branches/*/protection) return 1 ;;
+    repos/*/rules/branches/*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"CI\"},{\"context\":\"security-review-experimental\"}]}}]" ;;
+  esac'
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q '::error::.*security-review'; then
+  note "a merely superset-named check does not satisfy the gate (substring-match hole closed)"
+else
+  bad "expected exit 1 + ::error:: naming security-review (superset name must not satisfy it), got exit=$code out=$out"
+fi
+
+echo "[7/8] prefix-drifted check ('audit / security-review') still satisfies gate -> pass (tolerance preserved)"
+run_case "prefix-drift-tolerated" '
+  case "$2" in
+    repos/*/branches/*/protection) return 1 ;;
+    repos/*/rules/branches/*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"CI\"},{\"context\":\"audit / security-review\"}]}}]" ;;
+  esac'
+if [ "$code" -eq 0 ] && ! printf '%s' "$out" | grep -q '::error::'; then
+  note "a job-name prefix (' / '-delimited) trailing segment still satisfies the gate"
+else
+  bad "expected exit 0 with no ::error:: (prefix drift tolerated), got exit=$code out=$out"
+fi
+
+echo "[8/8] prefix WITHOUT a ' / ' boundary ('pre-security-review') must NOT satisfy the gate -> fail CLOSED (#210)"
+run_case "unbounded-prefix-rejected" '
+  case "$2" in
+    repos/*/branches/*/protection) return 1 ;;
+    repos/*/rules/branches/*) echo "[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"CI\"},{\"context\":\"pre-security-review\"}]}}]" ;;
+  esac'
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q '::error::.*security-review'; then
+  note "a non-boundary prefix does not satisfy the gate"
+else
+  bad "expected exit 1 + ::error:: naming security-review (non-boundary prefix must not satisfy it), got exit=$code out=$out"
 fi
 
 [ "$fail" -eq 0 ] && { echo "assert-branch-protection: PASS"; exit 0; } || { echo "assert-branch-protection: FAIL"; exit 1; }
