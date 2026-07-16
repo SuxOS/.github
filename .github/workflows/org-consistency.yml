@@ -48,6 +48,23 @@ jobs:
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → org-consistency inert"; echo "go=false" >> "$GITHUB_OUTPUT"
           else echo "go=true" >> "$GITHUB_OUTPUT"; fi
 
+      # .github/managed-repos.json lives in this repo, so it must be checked out before
+      # it can be read — this also serves as the sweep agent's `.github` workspace, so
+      # the later steps don't check it out again.
+      - name: Checkout .github (this repo)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Managed-repo list (.github/managed-repos.json, single source of truth shared
+      # with pin-consistency.yml/deep-audit.yml/budget-governor.yml — see #233/#253)
+      # plus this repo itself.
+      - name: Load managed-repo list
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: repos
+        run: |
+          set -euo pipefail
+          echo "all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
       - name: Mint org-scoped app token
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: app-token
@@ -56,11 +73,7 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
           owner: SuxOS
-          repositories: sux,suxrouter,sux-fileops,claude-config,.github
-
-      - name: Checkout .github (this repo)
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+          repositories: ${{ steps.repos.outputs.all_csv }}
 
       - name: Checkout sux
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
