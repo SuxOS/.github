@@ -29,16 +29,32 @@ else
   missing=""
   while IFS= read -r gate; do
     [ -z "$gate" ] && continue
-    # Substring, not exact-line, match. REQUIRED_GATES (the caller's input
-    # default) and the live ruleset/branch-protection context names are two
-    # independently-edited lists — a required-checks job-name prefix (e.g. CI
-    # grouping a job as "audit / npm audit & SBOM") drifts them apart even
-    # though the gate is still genuinely required. Bit us live: fixing a
-    # ruleset context name to match reality broke this exact-match check
-    # against the still-bare REQUIRED_GATES default. Suffix/substring
-    # containment tolerates that drift without needing both lists kept in
-    # lockstep, while still catching an actually-missing gate.
-    if ! printf '%s\n' "$required" | grep -qF "$gate"; then
+    # Segment-boundary match, NOT arbitrary substring. REQUIRED_GATES (the
+    # caller's input default) and the live ruleset/branch-protection context
+    # names are two independently-edited lists — a required-checks job-name
+    # prefix (e.g. CI grouping a job as "audit / npm audit & SBOM") drifts them
+    # apart even though the gate is still genuinely required. Bit us live:
+    # fixing a ruleset context name to match reality broke a naive exact-match
+    # check against the still-bare REQUIRED_GATES default. So we must tolerate
+    # that prefix drift — but a plain `grep -qF "$gate"` substring test was too
+    # loose (issue #210): a live required check named `security-review-experimental`
+    # or `pre-security-review` would satisfy the `security-review` gate, silently
+    # defeating the fail-closed guarantee this action exists to provide.
+    #
+    # GitHub joins check-name segments with " / " (workflow / job / step), and
+    # the only observed drift is a *prefix* being prepended. So a gate matches a
+    # live context iff the context equals the gate outright, or the gate is a
+    # complete " / "-delimited trailing segment of it. That keeps the documented
+    # prefix-drift tolerance while rejecting a merely superset-named check.
+    matched=false
+    while IFS= read -r ctx; do
+      [ -z "$ctx" ] && continue
+      if [ "$ctx" = "$gate" ] || [ "${ctx%" / $gate"}" != "$ctx" ]; then
+        matched=true
+        break
+      fi
+    done <<< "$required"
+    if [ "$matched" != true ]; then
       missing="${missing:+$missing, }$gate"
     fi
   done <<< "$REQUIRED_GATES"
