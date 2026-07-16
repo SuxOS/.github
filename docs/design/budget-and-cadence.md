@@ -112,6 +112,21 @@ in-flight backlog keeps draining; red stops all scheduled Claude work.)
 Minutes are deliberately staggered across repos and offset from the top of the hour so
 batch sessions don't collide inside one 5-hour subscription window.
 
+### self (.github) — this repo's own pipeline
+
+This repo runs the backlog pipeline on *itself* too (`self-*.yml` stubs calling the same
+reusables listed above), so its own spend belongs in this table alongside the caller repos,
+not just as the infra hosting theirs:
+
+| Workflow | Cadence | Notes |
+|---|---|---|
+| `self-fixer.yml` | `37 8 * * *` (daily) | Broad sweep of this repo's own workflows/docs; `max-turns: 40`. |
+| `self-fixer-hourly.yml` | `5 * * * *` (hourly) | Shallow companion pass — `max-turns: 12`, fresh/cheap signal only, not a redundant full scan. Distinct workflow name → distinct concurrency group, so it never blocks on or races the daily run. See §3.1 of `three-loop-pipeline.md` for the general hourly-shallow/daily-deep pattern. |
+| `self-issue-build.yml` | `13 * * * *` (hourly) | The highest-frequency Claude-invoking cadence in the org. No language build/test gate here (this repo ships no app) — relies on `self-check.yml` (actionlint) + `pin-consistency.yml` + `self-security-review.yml` instead. |
+
+All three are still subject to `budget-governor.yml`'s throttle like any other caller — the
+table above is additive to the redesign's projected spend, not separately budgeted.
+
 ## Calibration
 
 The proxy thresholds are guesses until correlated with reality. Weekly ritual (or when the

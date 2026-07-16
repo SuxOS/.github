@@ -91,6 +91,9 @@ Everything `hold` used to share the stage with — `feature`, `chore-safe`, `aut
 still exist as **descriptive** metadata, but the merge decision reads only: **green +
 not-`hold` + not-draft.**
 
+For diagnosing a pipeline that looks stuck — which loop, which workflow, which `gh` commands
+to run before reaching for `hold` — see [`docs/runbooks/pipeline-wedged.md`](../runbooks/pipeline-wedged.md).
+
 ---
 
 ## 3. The three loops
@@ -154,6 +157,24 @@ Net: `fixer` (propose, cheap bulk) and `issue-build` (verify-binary + cluster + 
 survive; `triage`'s three-tier confidence machinery is deleted and its residual
 buildable/needs-human check folds into the front of `issue-build` (one fewer stage, one
 fewer Opus session class, one fewer label family).
+
+#### 3.1.0 Reusable pattern: hourly-shallow + daily-deep cadence pair (2026-07-15, #204)
+
+A proposer stage doesn't have to pick one cadence. `self-fixer-hourly.yml` calls the same
+`fixer.yml` reusable as `self-fixer.yml`, at a much tighter cadence (hourly vs. daily) and a
+much shallower budget (`max-turns: 12` vs. `40`) — the hourly pass only catches fresh,
+cheap-to-spot signal (recent commits/PRs, obvious TODOs), it does not redundantly re-sweep
+the whole repo the daily pass already covered. The two callers are separate workflow files,
+which gives them separate names and therefore separate concurrency groups (`fixer.yml`'s
+group key is `fixer-${{ github.workflow }}`) — the hourly pass never blocks on or races the
+daily one. Both still defer to `check-throttle` like any other proposer; an hourly cadence
+means the governor is consulted more often, not that it's bypassed.
+
+This generalizes beyond `fixer`: any proposer/scanner stage can be split into a cheap
+frequent caller and an expensive infrequent caller of the *same* reusable, each tuned by its
+own `with:` inputs, as long as the two callers have distinct workflow names (for the
+concurrency-group split) and the cheap one's budget is set low enough that it's genuinely
+catching only incremental signal rather than paying full-scan cost on a tight clock.
 
 #### 3.1.1 The builder also proposes — capture insight, don't waste it (2026-07-15)
 
