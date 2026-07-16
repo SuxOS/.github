@@ -62,6 +62,7 @@ on:
 permissions:
   contents: read
   issues: write
+  id-token: write
 
 concurrency:
   group: fixer-${{ github.workflow }}
@@ -316,9 +317,14 @@ jobs:
               // defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
               if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
 
-              const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
-              core.info(`filed: ${data.html_url}`);
-              filed.push(data.html_url);
+              try {
+                const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
+                core.info(`filed: ${data.html_url}`);
+                filed.push(data.html_url);
+              } catch (e) {
+                core.warning(`failed to file '${title}': ${e.message}`);
+                continue;
+              }
             }
             if (filed.length > 0) {
               await core.summary.addHeading("fixer: proposals filed", 3).addList(filed).write();

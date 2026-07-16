@@ -7,7 +7,7 @@ name: Self issue build
 # + self-security-review.yml instead of a language build/test suite.
 
 on:
-  schedule: [{ cron: "*/15 * * * *" }]
+  schedule: [{ cron: "13 * * * *" }] # hourly
   workflow_dispatch:
 
 jobs:

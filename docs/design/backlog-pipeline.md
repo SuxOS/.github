@@ -1,11 +1,10 @@
 # Backlog pipeline — propose → investigate → build → merge
 
 > **Superseded (2026-07-15) by [three-loop-pipeline.md](three-loop-pipeline.md).** That
-> design collapses the `triage.yml` confidence-tier stage and the `confidence:*` /
-> `queued-for-build` label taxonomy this doc describes as active — both were removed in
-> Phase 3 of the three-loop rework (see three-loop-pipeline.md §5's migration map).
-> Read the three-loop design for current intent; this remains as the changelog of the
-> pipeline's earlier shape.
+> design deleted `triage.yml` and the `confidence:high|medium|low` label taxonomy this doc
+> describes as current — issues now go straight from proposal to build, with no separate
+> Opus investigate stage or `queued-for-build`/`triaged` handoff. Read the three-loop design
+> for current intent; this remains as the changelog of the pipeline's earlier shape.
 
 The org-wide autonomous backlog pipeline: it turns a repo's latent work into merged
 (or human-staged) PRs with little-to-no hand-holding. Reusable workflows live in

@@ -42,12 +42,16 @@ jobs:
         shell: bash
 
   invariants:
-    name: pipeline invariants
+    name: scaffold-caller regression guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Assert cross-cutting pipeline invariants
-        run: bash scripts/test-pipeline-invariants.sh
+      - name: Assert scaffold-caller.sh security-review template regression
+        run: bash scripts/test-scaffold-caller-regression.sh
+        shell: bash
+
+      - name: Assert assert-branch-protection fail-open/fail-closed logic
+        run: bash scripts/test-assert-branch-protection.sh
         shell: bash

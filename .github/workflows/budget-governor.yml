@@ -29,8 +29,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Repos whose runs are scanned AND whose throttle issues are maintained.
-  REPOS: "sux suxrouter sux-fileops .github"
   # Workflow-name → model classification (case-insensitive extended regexes).
   # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
   # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
@@ -55,6 +53,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Repos whose runs are scanned AND whose throttle issues are maintained: the
+      # managed-repo list (.github/managed-repos.json, single source of truth shared
+      # with pin-consistency.yml/deep-audit.yml — see #233) plus this repo itself.
+      - name: Load managed-repo list
+        id: repos
+        run: |
+          set -euo pipefail
+          all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)
+          all_space=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)
+          echo "all_csv=$all_csv" >> "$GITHUB_OUTPUT"
+          echo "REPOS=$all_space" >> "$GITHUB_ENV"
+
       # `owner:` with no per-repo scoping isn't used — enumerate exactly the repos this
       # job reads runs from and writes issues to (same pattern as pin-consistency).
       - name: Mint org-scoped app token
@@ -64,7 +76,7 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
           owner: SuxOS
-          repositories: sux,suxrouter,sux-fileops,.github
+          repositories: ${{ steps.repos.outputs.all_csv }}
 
       - name: Sweep runs and compute utilization
         id: sweep
@@ -86,10 +98,14 @@ jobs:
               <<<"[$all, $runs]")
           done
 
-          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" '
-            [ .[] | select(.status == "completed")
+          # In-progress/queued runs are counted too (using elapsed-so-far, `now` -
+          # startedAt) — a wedged run must show up in the rollup while it's still
+          # burning minutes, not only retroactively once it finally completes.
+          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" --argjson now "$(date -u +%s)" '
+            [ .[] | select(.startedAt != null)
               | select(.workflowName | test($cre; "i"))
-              | . + {mins: (((.updatedAt | fromdateiso8601) - (.startedAt | fromdateiso8601)) / 60),
+              | . + {mins: ((((if .status == "completed" then (.updatedAt | fromdateiso8601) else $now end)
+                     - (.startedAt | fromdateiso8601)) / 60)),
                      tier: (if (.workflowName | test($ore; "i")) then "opus" else "sonnet" end)} ]
             | { opus_min:  ([.[] | select(.tier == "opus")  | .mins] | add // 0 | floor),
                 total_min: ([.[] | .mins] | add // 0 | floor),
@@ -176,7 +192,12 @@ jobs:
             gh label create tracking --repo "SuxOS/$r" --color ededed \
               --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
 
-            found=$(gh issue list --repo "SuxOS/$r" --state open --limit 100 --json number,title,labels \
+            # `--search` narrows server-side to matching issues instead of paging through
+            # every open issue in the repo, so this stays correct past the old --limit 100
+            # cap (#247) without needing a pagination loop. `in:title` still returns
+            # partial/fuzzy title matches, so the exact-match select below is required.
+            found=$(gh issue list --repo "SuxOS/$r" --state open --search "\"Autonomy throttle\" in:title" \
+                --limit 100 --json number,title,labels \
               | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
             if [ -n "$found" ]; then
               num=$(jq -r '.number' <<<"$found")

@@ -34,6 +34,9 @@ on:
         type: string
         default: "bot/docs-update"
 
+permissions:
+  contents: read
+
 concurrency:
   group: skill-sync-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -96,6 +99,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           MIRROR_PATH: ${{ inputs.mirror-path }}
           PR_BRANCH: ${{ inputs.pr-branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$(git status --porcelain)" ]; then
             echo "Plugin skill mirror already up to date." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -115,6 +119,6 @@ jobs:
             # shellcheck disable=SC2016  # backticks below are literal Markdown, not command substitution
             gh pr create \
               --title "docs: re-mirror plugin skill" \
-              --body "$(printf 'Automated source-derived re-mirror by the **Skill sync** workflow:\n\n- `%s` — re-mirrored from source\n\nRun: %s/%s/actions/runs/%s' "$MIRROR_PATH" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")"
+              --body "$(printf 'Automated source-derived re-mirror by the **Skill sync** workflow:\n\n- `%s` — re-mirrored from source\n\nRun: %s' "$MIRROR_PATH" "$RUN_URL")"
             echo "Opened new docs PR." | tee -a "$GITHUB_STEP_SUMMARY"
           fi
