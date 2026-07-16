@@ -103,7 +103,7 @@ jobs:
           fi
 
           if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
-            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt); then
+            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt,headRefName); then
             echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
             exit 1
           fi
