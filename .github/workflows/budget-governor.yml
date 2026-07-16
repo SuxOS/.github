@@ -86,10 +86,14 @@ jobs:
               <<<"[$all, $runs]")
           done
 
-          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" '
-            [ .[] | select(.status == "completed")
+          # In-progress/queued runs are counted too (using elapsed-so-far, `now` -
+          # startedAt) — a wedged run must show up in the rollup while it's still
+          # burning minutes, not only retroactively once it finally completes.
+          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" --argjson now "$(date -u +%s)" '
+            [ .[] | select(.startedAt != null)
               | select(.workflowName | test($cre; "i"))
-              | . + {mins: (((.updatedAt | fromdateiso8601) - (.startedAt | fromdateiso8601)) / 60),
+              | . + {mins: ((((if .status == "completed" then (.updatedAt | fromdateiso8601) else $now end)
+                     - (.startedAt | fromdateiso8601)) / 60)),
                      tier: (if (.workflowName | test($ore; "i")) then "opus" else "sonnet" end)} ]
             | { opus_min:  ([.[] | select(.tier == "opus")  | .mins] | add // 0 | floor),
                 total_min: ([.[] | .mins] | add // 0 | floor),
