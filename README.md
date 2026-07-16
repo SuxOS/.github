@@ -39,9 +39,10 @@ security-review) · `org-consistency.yml` (weekly opus cross-repo drift + refact
 files findings into the backlog pipeline).
 
 **Backlog pipeline** (turns latent work into merged PRs — propose → build):
-`fixer.yml` (propose work as typed issues) · `issue-build.yml` (select buildable issues,
-cluster n → m PRs, one build session per cluster, always ≥1, never waits; PRs auto-merge on
-green). The separate Opus `triage` stage and the `confidence:*` taxonomy were removed in the
+`fixer.yml` (propose work as typed issues) · `issue-build.yml` (select the top-priority open
+issues, one builder session over the batch, always ≥1, never waits; PRs auto-merge on
+green). The separate Opus `triage` stage, the `confidence:*` taxonomy, and the Claude
+`cluster` pass were removed in the
 three-loop rework — see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)
 (current design) and [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md)
 (historical). Caller-stub examples below.
@@ -136,7 +137,7 @@ jobs:
 ```
 
 ```yaml
-# issue-build.yml — select buildable issues, cluster + build. Batched cron, NOT a per-issue
+# issue-build.yml — select buildable issues, build. Batched cron, NOT a per-issue
 # `issues:` trigger — an issue-event stub fans out a session per event during fixer bursts
 # (SuxOS/.github#140).
 name: Issue build
@@ -189,8 +190,7 @@ repo (`bug` is a GitHub default label, so it needs no setup):
   missing/unreadable verdict (the reviewer didn't finish) is an advisory pass, not a hold;
   we'd rather ship and roll back than block merges on a flaky review run.
 - `needs-human` — not safe for unattended handling. `claude-autofix.yml` applies it
-  once its retry cap is hit; `issue-build.yml` applies it to issues its cluster pass judges
-  non-buildable (excluding them from future candidate selection).
+  once its retry cap is hit.
 - `feature` — net-new feature work; as of #152 this label no longer vetoes auto-merge
   (previously a hard human-only gate). A `feature`-labeled PR auto-merges under the same
   bar as any other — a safe-type title or one of `automerge`/`bug`/`security`/`chore-safe`,

@@ -161,6 +161,8 @@ jobs:
             label_args=(--label bug)
             [ "$security" = "true" ] && label_args+=(--label security)
             body=$(printf '%s\n\n---\nFiled by deep-audit (nightly opus pass over the merged diff).' "$body")
-            url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}")
+            if ! url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}"); then
+              echo "::warning::failed to file '$title' in $TARGET_REPO, skipping"; continue
+            fi
             echo "filed: $url"
           done
