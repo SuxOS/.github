@@ -38,3 +38,11 @@ Test against a real caller if the change touches trigger conditions, secrets, or
 `if:` logic — YAML workflow bugs don't show up in type-check/lint, only in an
 actual run. Prefer landing behind a caller repo's `workflow_dispatch` smoke test
 before it goes live on `schedule`/`issues` triggers across the whole org.
+
+A composite action's embedded `run:` shell block is directly unit-testable without
+a live `gh`: extract it with `yq -r '.runs.steps[] | select(.id == "X") | .run'
+action.yml`, then execute it via `bash -c "$extracted"` with a fake `gh` shim
+prepended to `PATH` and the action's `inputs:` set as env vars. This tests the
+actual shipped logic (no drift from a hand-copied stand-in) and needs no test
+framework — see `scripts/test-pipeline-invariants.sh` for worked examples
+(pr-eligibility, upsert-tracking-issue, flood-guard, check-throttle).
