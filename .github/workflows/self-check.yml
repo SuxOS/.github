@@ -55,3 +55,7 @@ jobs:
       - name: Assert assert-branch-protection fail-open/fail-closed logic
         run: bash scripts/test-assert-branch-protection.sh
         shell: bash
+
+      - name: Assert budget-governor live rate-limit signal
+        run: bash scripts/test-budget-governor-ratelimit.sh
+        shell: bash
