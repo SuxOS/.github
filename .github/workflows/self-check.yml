@@ -51,3 +51,7 @@ jobs:
       - name: Assert cross-cutting pipeline invariants
         run: bash scripts/test-pipeline-invariants.sh
         shell: bash
+
+      - name: Assert assert-branch-protection fail-open/fail-closed logic
+        run: bash scripts/test-assert-branch-protection.sh
+        shell: bash
