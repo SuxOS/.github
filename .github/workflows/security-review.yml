@@ -32,10 +32,6 @@ on:
       max-turns:
         type: number
         default: 22
-      job-name:
-        description: "Distinct check-run name so branch protection can require it separately from a plain 'review' job."
-        type: string
-        default: "security-review"
       prompt-context:
         description: "Optional repo-specific context prepended to the review prompt (e.g. deployment shape, blast radius). Empty to skip."
         type: string
@@ -62,7 +58,16 @@ concurrency:
 
 jobs:
   security-review:
-    name: ${{ inputs.job-name }}
+    # STATIC literal, NOT an expression. The check-run name must render even when this job
+    # is SKIPPED — and GitHub does NOT evaluate a reusable job's `name:` expression on skip,
+    # so a `${{ inputs.job-name }}` here rendered as the literal `inputs.job-name` on any
+    # skipped (draft) PR. That reported the required check under the WRONG name, so the
+    # ruleset's required `security-review / security-review` context never appeared and the
+    # PR stayed permanently BLOCKED (observed on the .github draft self-PR #269, 2026-07-16).
+    # With a static name the skipped check reports under the required name → GitHub's
+    # "skipped required check == passing" semantics apply and a draft is no longer wedged.
+    # Every caller's branch ruleset requires exactly this string; none passed a custom name.
+    name: security-review
     # Runs on EVERY non-draft PR regardless of author_association — this is a REQUIRED
     # merge gate, and GitHub treats a SKIPPED required check as PASSING. Any author-based
     # skip (as a prior version had, gating on trusted author_association / a `self-improve`
