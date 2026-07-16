@@ -413,6 +413,11 @@ solo tool.
 | `ci.yml` `audit.yml` `health.yml` | **keep** | Required checks — the actual merge gate. Unchanged. | — |
 | `pin-consistency.yml` `self-check.yml` `skill-sync.yml` `pipeline-utilization.yml` `claude.yml` | **keep** | Orthogonal to the three loops. Unchanged. | — |
 
+**Addendum (2026-07-15):** issue #189's resolution — the self-hosted repo (`.github`
+itself) now runs its own Loop 3 instance via `self-pr-auto-update.yml` /
+`self-pr-watch.yml` / `self-pr-drain.yml` (commit `358feed`, PR #191) — isn't reflected
+in the table above; those three self-hosted stub workflows aren't listed there.
+
 Net across Phases 0–3: **2 deleted (`waitch`, `triage`), 1 added (`pr-unstick`), 2
 simplified hard (`automerge`, `issue-build`), 4 trimmed (`fixer`, `deep-audit`,
 `org-consistency`, `budget-governor`), 2 confirmed-already-correct (`pr-auto-update`,
@@ -466,6 +471,11 @@ per-PR gate misses something.
 Rollback for any phase: `git revert` the phase's PR. Because callers pin
 `uses: …@main`, a revert propagates to every caller on the next run — same blast radius
 that makes this repo powerful makes the undo complete.
+
+**Addendum (2026-07-15):** issue #189 (self-hosted repo needed its own Loop 3 rebase/
+watch/drain backstop — see README § Self-hosted) was resolved after this phase log was
+written, via `self-pr-auto-update.yml` / `self-pr-watch.yml` / `self-pr-drain.yml`
+(commit `358feed`, PR #191). Not captured as its own phase above.
 
 ---
 

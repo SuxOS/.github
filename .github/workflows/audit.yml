@@ -99,12 +99,20 @@ jobs:
             console.log("No vulnerabilities at or above severity " + level + ".");
           '
 
+      # SBOM generation is advisory, not a merge gate (like the npm audit step above).
+      # `npm sbom` hard-errors (ESBOMPROBLEMS) on an unmet/invalid tree entry — e.g. a
+      # local `file:` dependency that isn't checked out in CI — which must not fail the
+      # required check. Treat a failed generation as advisory and skip the upload.
       - name: Generate SBOM (CycloneDX)
         if: inputs.enabled
-        run: npm sbom --sbom-format cyclonedx > sbom.cyclonedx.json
+        run: |
+          if ! npm sbom --sbom-format cyclonedx > sbom.cyclonedx.json; then
+            echo "::warning::npm sbom failed (e.g. unresolved file: dependency); treating as advisory."
+            rm -f sbom.cyclonedx.json
+          fi
 
       - name: Upload SBOM artifact
-        if: inputs.enabled
+        if: inputs.enabled && hashFiles('sbom.cyclonedx.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-cyclonedx
