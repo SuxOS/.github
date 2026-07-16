@@ -123,6 +123,16 @@ on:
         description: "Human-readable list of gates the change must pass before it pushes."
         type: string
         default: "the repo's lint/type-check/test/build commands"
+      needs-suxlib:
+        description: >-
+          This caller's package.json has a "file:../suxlib" dependency on the private
+          SuxOS/suxlib sibling repo, so the build sandbox must clone it before `npm ci`
+          (mirrors sux/.github/workflows/ci.yml's own "Clone suxlib" step — mint-app-token's
+          token is scoped to the calling repo only, not org-wide, despite the suxbot App
+          installation covering all repos). Opt-in and false by default: only a caller that
+          actually has this dependency should pay for (or risk) the extra clone.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -438,6 +448,36 @@ jobs:
           set -euo pipefail
           git checkout -B "$BRANCH"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      # mint-app-token (above) scopes its token to this calling repo only — despite the
+      # suxbot App installation covering every org repo, create-github-app-token defaults to
+      # `github.repository` when neither `owner:` nor `repositories:` is passed. A caller
+      # whose package.json has a "file:../suxlib" dependency (currently only `sux`) needs a
+      # second, explicitly suxlib-scoped token to clone that sibling before `npm ci` sees it —
+      # mirrors sux/.github/workflows/ci.yml's own "Clone suxlib" step verbatim. Gated on the
+      # opt-in `needs-suxlib` input so every other caller (suxrouter/sux-fileops/claude-config/
+      # suxlib itself) is unaffected by default.
+      - name: Mint app token for suxlib (private sibling dependency)
+        id: suxlib-token
+        if: inputs.needs-suxlib
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: suxlib
+          permission-contents: read
+
+      # $GITHUB_WORKSPACE is .../work/<repo>/<repo>, so ../suxlib lands where npm's
+      # file:../suxlib resolution looks.
+      - name: Clone suxlib (private sibling dependency)
+        if: inputs.needs-suxlib
+        env:
+          SUXLIB_TOKEN: ${{ steps.suxlib-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch main "https://x-access-token:${SUXLIB_TOKEN}@github.com/SuxOS/suxlib.git" ../suxlib
+          npm --prefix ../suxlib ci --omit=dev
 
       # Give the builder real symbol-aware navigation instead of grep-and-hope. Runner starts
       # clean each time (no local plugin config carries over), so nothing is set up unless this
