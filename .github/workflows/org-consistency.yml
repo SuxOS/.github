@@ -176,8 +176,10 @@ jobs:
               echo "::warning::skipping finding for unexpected repo '$repo': $title"; continue
             fi
             body=$(printf '%s\n\n---\nFiled by the weekly org-consistency sweep (SuxOS/.github).' "$body")
-            url=$(gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body" \
+            if ! url=$(gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body" \
               --label enhancement \
-              || gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body")
+              || gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body"); then
+              echo "::warning::failed to file '$title' in $repo, skipping"; continue
+            fi
             echo "filed: $url"
           done
