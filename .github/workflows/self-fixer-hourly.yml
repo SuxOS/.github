@@ -16,7 +16,7 @@ name: Self fixer (hourly, shallow)
 
 on:
   schedule:
-    - cron: "0 * * * *" # hourly, shallow
+    - cron: "5 * * * *" # hourly, shallow (offset to dodge top-of-hour rush)
   workflow_dispatch:
 
 jobs:
