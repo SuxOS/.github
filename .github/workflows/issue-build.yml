@@ -83,7 +83,14 @@ on:
           checkouts, small per-batch failure blast radius) while spend stays bounded and
           predictable rather than growing with an ever-larger single session.
         type: number
-        default: 4
+        # 4 -> 2 (2026-07-15, operator: "don't run too hot"): with max-issues/effort-budget
+        # shrunk to target 2-3 issues/batch, 4 concurrent batches meant up to 4 open PRs
+        # racing the same base at once — strict branch protection means any PR sitting open
+        # while a sibling merges risks a genuine (non-fast-forward) conflict, not just BEHIND,
+        # and pr-auto-update's rebase can't clear those (observed live: 7 PRs stuck `dirty`
+        # for 40+ minutes with no auto-resolver — closed and released back to backlog).
+        # 2 concurrent batches keeps real wall-clock parallelism while halving collision odds.
+        default: 2
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
