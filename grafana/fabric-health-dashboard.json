@@ -432,6 +432,87 @@
           "legendFormat": "{{service}}"
         }
       ]
+    },
+    {
+      "id": 9,
+      "title": "Disabled workflows by repo (non-exempt disabled_manually)",
+      "type": "timeseries",
+      "description": "A manual disable that isn't one of the workflow_call-only reusable definitions in .github — the class caught by manual audit (docs/design/2026-07-16-suxos-vx-next-arc.md §6, ledger R9).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (repo, workflow) (last_over_time(suxos_workflow_disabled[20m]))",
+          "legendFormat": "{{repo}}/{{workflow}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Disabled workflow expiry (>48h persisted, non-exempt)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "clear",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(min_over_time(suxos_workflow_disabled[48h]) == 1) or vector(0)"
+        }
+      ]
     }
   ]
 }

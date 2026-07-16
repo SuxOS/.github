@@ -44,6 +44,14 @@ on:
           Empty (default) skips edge checks entirely — inert, never fails the run.
         type: string
         default: ""
+      workflow-disabled-exempt:
+        description: >-
+          Comma-separated workflow file basenames that are exempt from
+          suxos_workflow_disabled{repo,workflow} alerting — the workflow_call-only
+          reusable definitions in this repo, which have no schedule/event trigger of
+          their own and so are routinely left `disabled_manually` by design.
+        type: string
+        default: "audit.yml,automerge.yml,ci.yml,claude-autofix.yml,claude.yml,fabric-health.yml,fixer.yml,health.yml,issue-build.yml,pipeline-utilization.yml,pr-auto-update.yml,pr-drain.yml,pr-unstick.yml,pr-watch.yml,security-review.yml,skill-sync.yml"
 
 permissions:
   contents: read
@@ -70,6 +78,7 @@ jobs:
           REPOS: ${{ inputs.repos }}
           EXCLUDE_LABELS: ${{ inputs.backlog-exclude-labels }}
           STUCK_IDLE_DAYS: ${{ inputs.stuck-idle-days }}
+          DISABLED_EXEMPT: ${{ inputs.workflow-disabled-exempt }}
         run: |
           set -euo pipefail
 
@@ -123,9 +132,22 @@ jobs:
               | map(sort_by(.createdAt) | last)
               | [ .[] | select(.conclusion == "failure") ] | length')
 
+            # --- Workflows: disabled_manually, excluding known-by-design reusable defs ---
+            if ! wfs=$(gh workflow list --repo "$slug" --all \
+                --json name,path,state 2>/dev/null); then
+              wfs="[]"
+            fi
+            disabled_json=$(printf '%s' "$wfs" | jq --arg ex "$DISABLED_EXEMPT" '
+              ($ex | split(",") | map(select(length>0))) as $excl
+              | [ .[] | select(.state == "disabled_manually")
+                  | select(((.path | split("/") | last) as $b | $excl | index($b)) | not)
+                  | {file: (.path | split("/") | last), name: .name} ]')
+
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
-              '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red}')
+              --argjson disabled "$disabled_json" \
+              '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
+                workflows_disabled: $disabled}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
           done
@@ -202,6 +224,10 @@ jobs:
               "suxos_pr_red_total,repo=\(.repo) value=\(.prs.red) \($ts)\n" +
               "suxos_pr_stuck_total,repo=\(.repo) value=\(.prs.stuck) \($ts)\n" +
               "suxos_workflow_red_total,repo=\(.repo) value=\(.workflow_red) \($ts)"' <<< "$status"
+            # One suxos_workflow_disabled{repo,workflow} series per non-exempt
+            # disabled_manually workflow — the dashboard flags any that persists >48h.
+            jq -r --arg ts "$ts" '.repos[] as $r | $r.workflows_disabled[]? |
+              "suxos_workflow_disabled,repo=\($r.repo),workflow=\(.file) value=1 \($ts)"' <<< "$status"
           } > prom-body.txt
           # Append optional edge deploy series from the smoke-check step.
           [ -f edge-metrics.txt ] && cat edge-metrics.txt >> prom-body.txt
