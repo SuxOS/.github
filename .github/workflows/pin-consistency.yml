@@ -100,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        repo: [sux, suxrouter, sux-fileops]
+        repo: [sux, suxrouter, sux-fileops, claude-config]
     steps:
       - name: Mint org-scoped app token
         id: app-token

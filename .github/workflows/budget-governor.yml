@@ -30,7 +30,7 @@ concurrency:
 
 env:
   # Repos whose runs are scanned AND whose throttle issues are maintained.
-  REPOS: "sux suxrouter sux-fileops .github"
+  REPOS: "sux suxrouter sux-fileops claude-config .github"
   # Workflow-name → model classification (case-insensitive extended regexes).
   # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
   # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
