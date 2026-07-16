@@ -82,6 +82,34 @@ jobs:
             rc=1
           fi
 
+          # ── DOCKER: a docker://image:tag ref (Docker Hub image, addressed by tag) is
+          # invisible to the owner/repo@ref regex above (no path shape before an @) and
+          # must be pinned to a digest — a mutable tag here is the same supply-chain hole
+          # as an unpinned owner/repo@ref.
+          docker_unpinned="$(grep -rhoE "uses:[[:space:]]*['\"]?docker://[^'\"[:space:]]+" \
+              .github/workflows/ .github/actions/*/action.yml 2>/dev/null \
+            | sed -E "s/uses:[[:space:]]*['\"]?//" \
+            | grep -vE '@sha256:[0-9a-fA-F]{64}$' || true)"
+          if [ -n "$docker_unpinned" ]; then
+            echo "::error::Docker action(s) not pinned to a sha256 digest (mutable tag):"
+            printf '%s\n' "$docker_unpinned" | sed 's/^/    /'
+            rc=1
+          fi
+
+          # ── LOCAL: a ./path/to/action ref (local composite action) has no @ref shape at
+          # all and starts with `.`, so the owner/repo@ref regex can't match it either. They're
+          # exempt-by-design (same rationale as the SuxOS/* exemption — the ref is this
+          # repo's own commit, there's nothing to pin) but are logged here so a local
+          # action isn't a silent, unconsidered blind spot in this gate.
+          local_refs="$(grep -rhoE "uses:[[:space:]]*['\"]?\./[^'\"[:space:]]+" \
+              .github/workflows/ .github/actions/*/action.yml 2>/dev/null \
+            | sed -E "s/uses:[[:space:]]*['\"]?//" \
+            | sort -u || true)"
+          if [ -n "$local_refs" ]; then
+            echo "Local composite action ref(s) found (exempt-by-design, no @ref to pin):"
+            printf '%s\n' "$local_refs" | sed 's/^/    /'
+          fi
+
           if [ "$rc" -ne 0 ]; then exit 1; fi
           echo "OK: every third-party action is SHA-pinned to a single, consistent commit."
 
