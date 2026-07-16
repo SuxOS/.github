@@ -187,7 +187,9 @@ repo (`bug` is a GitHub default label, so it needs no setup):
   `pr-auto-update.yml` won't update-branch it, `pr-drain.yml`/`pr-watch.yml` skip it.
   Auto-applied by `security-review.yml` only on a CONFIRMED critical/high finding — a
   missing/unreadable verdict (the reviewer didn't finish) is an advisory pass, not a hold;
-  we'd rather ship and roll back than block merges on a flaky review run.
+  we'd rather ship and roll back than block merges on a flaky review run. If the pipeline
+  looks stuck and it's not obvious whether `hold` (or something else) is why, see
+  [docs/runbooks/pipeline-wedged.md](docs/runbooks/pipeline-wedged.md).
 - `needs-human` — not safe for unattended handling. `claude-autofix.yml` applies it
   once its retry cap is hit; `issue-build.yml` applies it to issues its cluster pass judges
   non-buildable (excluding them from future candidate selection).
