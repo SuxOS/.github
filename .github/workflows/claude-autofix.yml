@@ -177,6 +177,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$MAX_ATTEMPTS" | grep -qE '^[0-9]+$'; then
@@ -192,13 +193,41 @@ jobs:
           # zero (→ needs-human with no real fix ever attempted) the moment the login bypass
           # above let autofix run on it. The trailer is written by this loop and nothing else,
           # so `git log --grep` over the PR's own commits counts fix attempts and only those.
-          attempts=$(git log --grep='Claude-Autofix-Attempt:' --format='%H' "$base"..HEAD | grep -c . || true)
-          echo "autofix attempts so far: $attempts (cap $MAX_ATTEMPTS)"
+          trailer_attempts=$(git log --grep='Claude-Autofix-Attempt:' --format='%H' "$base"..HEAD | grep -c . || true)
+          # Structural fallback: the trailer above is written purely by prompt instruction, so a
+          # run that forgets it (time pressure, an amend that drops it, --max-turns expiring
+          # before the trailer step) is invisible to a trailer-only count and the cap never
+          # trips. A run can't skip being run, so also count actual executions of this autofix
+          # job for this branch via the Actions API and cap on whichever count is higher — a
+          # missed trailer then degrades to over-counting (safe) instead of under-counting
+          # (unbounded spend, the failure mode this cap exists to prevent).
+          run_attempts=0
+          workflow_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -q '.workflow_id' 2>/dev/null || true)
+          if printf '%s' "$workflow_id" | grep -qE '^[0-9]+$'; then
+            api_count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?branch=${HEAD_BRANCH}&per_page=100" \
+              -q '.total_count' 2>/dev/null || true)
+            if printf '%s' "$api_count" | grep -qE '^[0-9]+$'; then run_attempts=$api_count; fi
+          fi
+          attempts=$trailer_attempts
+          if [ "$run_attempts" -gt "$attempts" ]; then attempts=$run_attempts; fi
+          echo "autofix attempts so far: $attempts (trailer=$trailer_attempts api-runs=$run_attempts, cap $MAX_ATTEMPTS)"
           if [ "$attempts" -ge "$MAX_ATTEMPTS" ]; then
             echo "cap reached → tagging needs-human and stopping"
-            gh pr edit "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
+            label_ok=true
+            comment_ok=true
+            gh pr edit "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || label_ok=false
             gh pr comment "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" \
-              --body "🤖 Auto-fix gave up after $attempts attempts — CI is still red. Tagging \`needs-human\`. (Remove the label to let the bot try again.)" 2>/dev/null || true
+              --body "🤖 Auto-fix gave up after $attempts attempts — CI is still red. Tagging \`needs-human\`. (Remove the label to let the bot try again.)" 2>/dev/null \
+              || gh pr comment "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" \
+                   --body "🤖 Auto-fix gave up after $attempts attempts — CI is still red. Tagging \`needs-human\`. (Remove the label to let the bot try again.)" 2>/dev/null \
+              || comment_ok=false
+            # This is the exact moment a human needs to be alerted that autofix gave up. A
+            # swallowed failure here (permissions blip, rate limit) leaves the PR red with no
+            # needs-human label and no comment — pr-drain.yml's stale sweep matches on that
+            # label, so an unnoticed failure here means the PR just silently rots. Surface it.
+            if [ "$label_ok" != "true" ] || [ "$comment_ok" != "true" ]; then
+              echo "::warning::cap-reached notification incomplete for PR #${{ steps.pre.outputs.pr }} (label_ok=$label_ok comment_ok=$comment_ok) — a human will NOT be alerted via the usual label/comment path"
+            fi
             echo "go=false" >> "$GITHUB_OUTPUT"
           else
             echo "go=true" >> "$GITHUB_OUTPUT"
