@@ -1,8 +1,20 @@
 name: PR drain — close-stale + reconcile (reusable)
 
-# Two drain gaps: pr-auto-update.yml handles the rebase-behind limb; this adds:
+# Three drain gaps: pr-auto-update.yml handles the rebase-behind limb; this adds:
 #   CLOSE-STALE — bot PRs (`self-improve`) and human-punted ones (`needs-human`) idle
 #     past STALE_DAYS get a heads-up comment and are closed. Opt out with `hold`/`keep`.
+#   DIRTY-CONFLICT — a builder PR (issue-build.yml, head branch `bot/issue-build-*`)
+#     with a REAL merge conflict (`mergeStateStatus == DIRTY`) has no rebase loop that
+#     resolves it: pr-auto-update.yml only fast-forwards a clean-but-behind branch,
+#     claude-autofix.yml targets failing CI (a conflict isn't a check-run failure so
+#     it's skipped), and pr-unstick.yml only watches `needs-human`-labelled PRs. Left
+#     alone it sits until CLOSE-STALE's stale-days threshold (days), orphaning
+#     issue-build's capacity the whole time (issue-build skips new batches while
+#     builder PRs are open) — see SuxOS/.github#237 / #239. This closes it immediately
+#     and strips `building` from its linked issues so they requeue for a fresh build on
+#     current main, which resolves the conflict in the overwhelming majority of cases
+#     (they arise from parallel drains touching the same file, not a real semantic
+#     clash).
 #   RECONCILE — a green, mergeable PR eligible under the same predicate automerge.yml
 #     uses (not-draft, not-hold, plus the shared pr-eligibility action) but never
 #     armed gets `gh pr merge --auto --squash`. Native auto-merge still
@@ -129,6 +141,56 @@ jobs:
             fi
             gh pr comment "$n" --body "🧹 Closing as stale — no activity in ${STALE_DAYS}+ days. This was a bot/needs-human PR; reopen it, or add \`keep\`/\`hold\` to retain it next time." 2>/dev/null || true
             gh pr close "$n" && echo "closed #$n" || echo "::warning::could not close #$n (see gh error above)"
+            echo "::endgroup::"
+            sleep 2
+          done
+
+          # ── DIRTY-CONFLICT ───────────────────────────────────────────────────────────
+          # Builder PRs only (head branch bot/issue-build-*) — a human or other bot PR
+          # with a real conflict is left for its author, not closed out from under them.
+          # `hold` still opts a PR out, same as CLOSE-STALE.
+          dirty=$(printf '%s' "$prs" | jq -r '
+            [.[] | select(.isDraft | not)
+              | select(.headRefName | startswith("bot/issue-build-"))
+              | select(.mergeStateStatus == "DIRTY")
+              | select(([.labels[].name] | index("hold")) | not)
+              | .number] | .[]')
+
+          echo "DIRTY-conflict candidate set: $(printf '%s' "$dirty" | tr '\n' ' ')"
+
+          for n in $dirty; do
+            echo "::group::DIRTY builder PR #$n"
+            # Re-read this PR's live state; skip if it no longer qualifies (a concurrent
+            # bot may have already rebased/closed it, or a human added `hold`).
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeStateStatus 2>/dev/null) \
+              || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
+            if ! printf '%s' "$live" | jq -e '
+                (.isDraft | not)
+                and (.headRefName | startswith("bot/issue-build-"))
+                and (.mergeStateStatus == "DIRTY")
+                and (([.labels[].name] | index("hold")) | not)' >/dev/null; then
+              echo "#$n no longer DIRTY-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would close #$n (DIRTY builder PR) and requeue its linked issues"
+              echo "::endgroup::"
+              continue
+            fi
+            gh pr comment "$n" --body "🧹 Closing — this builder PR has a real merge conflict with main (not just behind), and no existing loop resolves that short of a human. Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#237 / #239." 2>/dev/null || true
+            gh pr close "$n" && echo "closed #$n (DIRTY)" || echo "::warning::could not close #$n (see gh error above)"
+
+            # Strip `building` from every issue this PR claimed via a closing keyword, so
+            # issue-build.yml's selector picks them up on its next run instead of waiting
+            # on the reaper's REAP_STALE_HOURS backstop.
+            nums=$(printf '%s' "$live" | jq -r '.body // ""' \
+              | grep -ioE '\b(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+              | grep -oE '[0-9]+' || true)
+            for num in $nums; do
+              gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \
+                || echo "::warning::could not strip building from #$num"
+            done
             echo "::endgroup::"
             sleep 2
           done
