@@ -192,7 +192,12 @@ jobs:
             gh label create tracking --repo "SuxOS/$r" --color ededed \
               --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
 
-            found=$(gh issue list --repo "SuxOS/$r" --state open --limit 100 --json number,title,labels \
+            # `--search` narrows server-side to matching issues instead of paging through
+            # every open issue in the repo, so this stays correct past the old --limit 100
+            # cap (#247) without needing a pagination loop. `in:title` still returns
+            # partial/fuzzy title matches, so the exact-match select below is required.
+            found=$(gh issue list --repo "SuxOS/$r" --state open --search "\"Autonomy throttle\" in:title" \
+                --limit 100 --json number,title,labels \
               | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
             if [ -n "$found" ]; then
               num=$(jq -r '.number' <<<"$found")

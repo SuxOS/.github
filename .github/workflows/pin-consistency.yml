@@ -28,9 +28,13 @@ name: pin-consistency
 
 on:
   push:
-    paths: [".github/workflows/**", ".github/actions/**"]
   pull_request:
-    paths: [".github/workflows/**", ".github/actions/**"]
+  # No `paths:` filter: this is a REQUIRED status check (see branch ruleset), and a
+  # required context that never reports on a given head SHA leaves the PR permanently
+  # BLOCKED even with every real check green — GitHub has no "not applicable" state for
+  # required checks. A docs-only PR touches no workflow/action file, so a path filter
+  # here silently traps it forever (#241). The check itself is cheap (~10s grep), so
+  # always running it is worth the guaranteed report.
 
 permissions:
   contents: read
