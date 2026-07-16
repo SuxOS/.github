@@ -9,7 +9,7 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 
 - `sux` — the Cloudflare Worker MCP server this pipeline was extracted from.
 - `suxrouter` — OpenWrt/ucode router project.
-- `sux-fileops` — file-operations tooling.
+- `sux-fileops` — **retired** (absorbed into `suxlib`; de-registered from the pipeline, kept for history pending archive).
 - `claude-config` — shared Claude Code configuration.
 - `suxlib` — SuxOS v2 op-engine library (`@suxos/lib`), no Cloudflare Worker to deploy.
 - `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
