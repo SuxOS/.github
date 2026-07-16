@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/SuxOS/.github/main/contracts/residential-egress.schema.json",
+  "title": "SuxOS residential-egress contract (sux ↔ suxrouter)",
+  "description": "Slice-6 spike (docs/design/2026-07-16-suxos-vx-next-arc.md §5; docs/design/2026-07-16-residential-egress-contract.md). The seam between sux's edge/Worker code and suxrouter's rpcd/ucode firmware, extracted out of prose design docs (ideal-router-image.md, router-watchdog.md, home-node-connectivity.md live in sux) into one typed, conformance-checkable place. This is the schema ONLY — each side's CI validates its own surface against it; see scripts/contracts/*.stub.sh for the two conformance-check stubs this spike hands off. Fields marked TODO need the actual values pulled from the prose docs in a follow-up PR that also wires enforcement in both repos' CI.",
+  "type": "object",
+  "required": ["endpoints", "auth", "ssrf", "hostAllowlist", "statusSemantics"],
+  "properties": {
+    "endpoints": {
+      "type": "array",
+      "description": "Every HTTP(S) surface suxrouter's rpcd exposes that sux's edge calls, or vice versa.",
+      "items": {
+        "type": "object",
+        "required": ["name", "method", "path", "direction"],
+        "properties": {
+          "name": { "type": "string" },
+          "method": { "type": "string", "enum": ["GET", "POST", "PUT", "DELETE"] },
+          "path": { "type": "string" },
+          "direction": {
+            "type": "string",
+            "enum": ["sux-to-suxrouter", "suxrouter-to-sux"],
+            "description": "Which side originates the call."
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "TODO: fill from home-node-connectivity.md — the HMAC scheme (header name, signed fields, clock-skew tolerance) that authenticates calls across the seam.",
+      "required": ["scheme"],
+      "properties": {
+        "scheme": { "type": "string", "enum": ["hmac-sha256"] },
+        "headerName": { "type": "string" },
+        "signedFields": { "type": "array", "items": { "type": "string" } },
+        "clockSkewToleranceSeconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ssrf": {
+      "type": "object",
+      "description": "TODO: fill from ideal-router-image.md — the pass-through rules that keep the router from being turned into an open SSRF relay.",
+      "required": ["passThroughAllowed"],
+      "properties": {
+        "passThroughAllowed": { "type": "boolean" },
+        "deniedTargets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "CIDR ranges / hostnames the router must never proxy to (link-local, cloud metadata IPs, etc)."
+        }
+      }
+    },
+    "hostAllowlist": {
+      "type": "array",
+      "description": "TODO: fill from router-watchdog.md — the hosts the router is permitted to reach or forward for on behalf of sux.",
+      "items": { "type": "string" }
+    },
+    "statusSemantics": {
+      "type": "object",
+      "description": "Expected HTTP status codes and what each means across the seam, so both sides agree on error handling (this is the class that already produced the proxy empty-body incident).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["meaning"],
+        "properties": {
+          "meaning": { "type": "string" },
+          "bodyExpected": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
