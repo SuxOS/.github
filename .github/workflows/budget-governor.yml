@@ -54,6 +54,25 @@ env:
   # Fraction of a budget at which the throttle goes yellow.
   YELLOW_FRACTION: "0.75"
   LOOKBACK_DAYS: "7"
+  # The runner-minute token bucket above is a PROXY for subscription spend — it is
+  # blind to the actual Claude account five-hour usage window, which is metered by
+  # Anthropic on tokens/requests, not GH Actions runtime (the #236 blind spot: a
+  # short-wall-clock run can still exhaust the five-hour pool). claude-code-action logs
+  # a `rate_limit_event`/`resetsAt` epoch straight into the run log the moment it
+  # actually hits that ceiling — the one real (if only reactive, not predictive) signal
+  # of pool exhaustion available without a dedicated usage API. The scan below looks
+  # for that signal directly instead of only inferring it from runner-minutes, so a
+  # live rate-limit forces `red` immediately rather than waiting for the bucket to
+  # eventually reflect it (or never, if the hit was short wall-clock but token-heavy).
+  RATE_LIMIT_LOOKBACK_HOURS: "6"
+  RATE_LIMIT_MAX_RUNS_SCANNED: "30"
+  # Plausibility bound on a scanned resetsAt: a five-hour-window reset can sit at most
+  # ~5h past the moment the event was emitted, and scanned runs are at most
+  # RATE_LIMIT_LOOKBACK_HOURS old — so any resetsAt further out than this from `now` is
+  # garbage or forged log text (run logs contain untrusted diff/tool output; see the
+  # spoof-resistance note in scripts/classify-security-noverdict.sh). Discard it rather
+  # than let one bad value pin the whole org red until an arbitrary epoch.
+  RATE_LIMIT_MAX_FUTURE_HOURS: "6"
 
 jobs:
   govern:
@@ -184,6 +203,79 @@ jobs:
             echo "level=$level"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Scan recent failed Claude runs for a live five-hour rate-limit
+        id: ratelimit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          since=$(date -u -d "-${RATE_LIMIT_LOOKBACK_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-"${RATE_LIMIT_LOOKBACK_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
+
+          max_resets_at=0
+          scanned=0
+          for r in $REPOS; do
+            [ "$scanned" -ge "$RATE_LIMIT_MAX_RUNS_SCANNED" ] && break
+            runs=$(gh run list --repo "SuxOS/$r" --limit 50 --created ">=$since" \
+                --json databaseId,workflowName,conclusion 2>/dev/null \
+              | jq -c --arg cre "$CLAUDE_WF_RE" \
+                '[.[] | select(.conclusion == "failure") | select(.workflowName | test($cre; "i")) | .databaseId]') \
+              || { echo "::warning::gh run list (rate-limit scan) failed for SuxOS/$r — skipping"; continue; }
+            for id in $(jq -r '.[]' <<<"$runs"); do
+              [ "$scanned" -ge "$RATE_LIMIT_MAX_RUNS_SCANNED" ] && break
+              scanned=$((scanned + 1))
+              log=$(gh run view --repo "SuxOS/$r" "$id" --log-failed 2>/dev/null) || continue
+              # Take resetsAt ONLY from a line that itself carries the five_hour marker:
+              # a genuine rate_limit_event is one compact JSON line with both fields
+              # inside rate_limit_info (see scripts/test-classify-security-noverdict.sh
+              # for the shape). Run logs also contain untrusted text (diffs, tool
+              # output), so a stray "resetsAt" elsewhere in the log must never be read
+              # as the reset epoch. Same-line pairing + the plausibility cap below bound
+              # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
+              # no worse than an attacker genuinely exhausting the pool.
+              this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
+                | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+              [ -n "${this_reset:-}" ] || continue
+              # resetsAt may be epoch seconds or milliseconds (same normalization as
+              # pr-unstick.yml): 13+ digits is milliseconds.
+              if [ "${#this_reset}" -ge 13 ]; then this_reset=$(( this_reset / 1000 )); fi
+              if [ "$this_reset" -gt "$max_resets_at" ]; then
+                max_resets_at=$this_reset
+              fi
+            done
+          done
+
+          now=$(date -u +%s)
+          cap=$(( now + RATE_LIMIT_MAX_FUTURE_HOURS * 3600 ))
+          if [ "$max_resets_at" -gt "$cap" ]; then
+            echo "::warning::rate-limit scan: resetsAt=$max_resets_at is more than ${RATE_LIMIT_MAX_FUTURE_HOURS}h out — implausible for a five-hour window; ignoring"
+            max_resets_at=0
+          fi
+          if [ "$max_resets_at" -le "$now" ]; then
+            max_resets_at=0
+          fi
+          echo "live five-hour rate-limit scan: scanned=$scanned resets_at=$max_resets_at (now=$now)"
+          echo "resets_at=$max_resets_at" >> "$GITHUB_OUTPUT"
+
+      - name: Combine bucket headroom with the live rate-limit signal
+        id: final
+        env:
+          BUCKET_LEVEL: ${{ steps.sweep.outputs.level }}
+          RESETS_AT: ${{ steps.ratelimit.outputs.resets_at }}
+        run: |
+          set -euo pipefail
+          level="$BUCKET_LEVEL"
+          now=$(date -u +%s)
+          # A live rate_limit_event is definitive, present-tense proof the pool is
+          # exhausted right now — override the (lagging, proxy-based) bucket level
+          # outright rather than blend it in, and hold `red` until the account's own
+          # resetsAt epoch passes so inflow stays paced for the exact known window
+          # instead of only the next scheduled run 6h later.
+          if [ "${RESETS_AT:-0}" -gt "$now" ]; then
+            level="red"
+          fi
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+
       - name: Build report body
         id: body
         env:
@@ -192,19 +284,26 @@ jobs:
           TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
           OPUS_AVAIL_MIN: ${{ steps.sweep.outputs.opus_avail_min }}
           TOTAL_AVAIL_MIN: ${{ steps.sweep.outputs.total_avail_min }}
-          LEVEL: ${{ steps.sweep.outputs.level }}
+          LEVEL: ${{ steps.final.outputs.level }}
+          RESETS_AT: ${{ steps.ratelimit.outputs.resets_at }}
         run: |
           set -euo pipefail
           rows=$(jq -r '.by_repo_wf[] |
             "| \(.repo) | \(.workflow) | \(.tier) | \(.runs) | \(.mins) | \(.failed) |"' <<<"$ROLLUP")
+          rate_limit_note=""
+          if [ "${RESETS_AT:-0}" -gt 0 ]; then
+            rate_limit_note="**Live five-hour rate limit detected** — the account hit its Claude usage ceiling; forcing \`red\` until it resets at $(date -u -d "@${RESETS_AT}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "${RESETS_AT}" '+%Y-%m-%d %H:%M UTC')."
+          fi
           body=$(printf '%s\n' \
             "Auto-maintained by budget-governor.yml. Last updated $(date -u '+%Y-%m-%d %H:%M UTC'). Window: trailing ${LOOKBACK_DAYS} days." \
             "" \
             "**Throttle level: \`${LEVEL}\`** — token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, all Claude workflows ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (yellow when either drops to ${YELLOW_FRACTION} capacity or below, red at 0)." \
             "" \
+            "${rate_limit_note}" \
+            "" \
             "Raw trailing-${LOOKBACK_DAYS}-day sum (diagnostic only, does not drive the level): opus-tier ${OPUS_MIN} runner-min, all Claude workflows ${TOTAL_MIN} runner-min." \
             "" \
-            "Wall-clock runner minutes are a **proxy** for subscription spend, not a bill — calibrate the budgets against claude.ai's usage page per docs/design/budget-and-cadence.md. The bucket capacity/refill rate derive from the same \`*_BUDGET_MIN\`/\`YELLOW_FRACTION\` inputs as before; see docs/design/budget-governor-reconciliation.md for why the level now comes from bucket headroom instead of the raw sum." \
+            "Wall-clock runner minutes are a **proxy** for subscription spend, not a bill — calibrate the budgets against claude.ai's usage page per docs/design/budget-and-cadence.md. The bucket capacity/refill rate derive from the same \`*_BUDGET_MIN\`/\`YELLOW_FRACTION\` inputs as before; see docs/design/budget-governor-reconciliation.md for why the level now comes from bucket headroom instead of the raw sum. The live rate-limit scan (trailing ${RATE_LIMIT_LOOKBACK_HOURS}h of failed Claude-workflow runs, capped at ${RATE_LIMIT_MAX_RUNS_SCANNED} scanned) overrides the bucket to \`red\` whenever the account's own five-hour ceiling was actually hit, independent of runner-minutes." \
             "" \
             "| Repo | Workflow | Tier | Runs | Minutes | Failed |" \
             "|------|----------|------|-----:|--------:|-------:|" \
@@ -228,18 +327,23 @@ jobs:
       - name: Set per-repo throttle issues
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          LEVEL: ${{ steps.sweep.outputs.level }}
+          LEVEL: ${{ steps.final.outputs.level }}
           OPUS_MIN: ${{ steps.sweep.outputs.opus_min }}
           TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
           OPUS_AVAIL_MIN: ${{ steps.sweep.outputs.opus_avail_min }}
           TOTAL_AVAIL_MIN: ${{ steps.sweep.outputs.total_avail_min }}
+          RESETS_AT: ${{ steps.ratelimit.outputs.resets_at }}
         run: |
           set -euo pipefail
           stamp=$(date -u '+%Y-%m-%d %H:%M UTC')
+          rate_limit_line=""
+          if [ "${RESETS_AT:-0}" -gt 0 ]; then
+            rate_limit_line="Live five-hour rate limit detected — forcing red until $(date -u -d "@${RESETS_AT}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "${RESETS_AT}" '+%Y-%m-%d %H:%M UTC')."
+          fi
           body=$(printf '%s\n' \
             "level: ${LEVEL}" \
             "" \
-            "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, total ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (raw trailing-7-day sum: opus-tier ${OPUS_MIN}, total ${TOTAL_MIN}). To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
+            "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, total ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (raw trailing-7-day sum: opus-tier ${OPUS_MIN}, total ${TOTAL_MIN}). ${rate_limit_line} To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
           for r in $REPOS; do
             # gh issue create/edit --label errors on a label the repo doesn't have yet —
             # ensure it exists first (idempotent). Bookkeeping issues like this one carry
