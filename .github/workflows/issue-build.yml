@@ -53,26 +53,27 @@ on:
         # job is one shared checkout, one branch; the builder's own disjoint-files judgment is
         # the collision filter, not filesystem isolation) lets one builder carry a wide batch.
         # The governor stands the whole stage down at red before spend runs away. Was 8, 20,
-        # 40, 24; shrunk to 10 (2026-07-15, parallel-batches redesign) — now that `select` is
-        # the only serialized phase and `build` runs unlocked, real wall-clock throughput comes
-        # from MORE small concurrent batches (real per-runner isolation, small failure blast
-        # radius) rather than one big batch's internal subagent fan-out (shared checkout,
-        # trusted-not-verified disjointness). Dynamic expand (§3.1.5) still lets a builder push
-        # higher when the work in its own batch is light.
-        default: 10
+        # 40, 24, 10; shrunk to 3 (2026-07-15, operator: target 2-3 issues/batch) — now that
+        # `select` is the only serialized phase and `build` runs unlocked, real wall-clock
+        # throughput comes from MORE small concurrent batches (real per-runner isolation,
+        # small failure blast radius) rather than one big batch's internal subagent fan-out
+        # (shared checkout, trusted-not-verified disjointness). Dynamic expand (§3.1.5) still
+        # lets a builder push higher when the work in its own batch is light.
+        default: 3
       effort-budget:
         description: >-
-          Points budget for the bundle, oldest-first within the chosen tier: small=1,
-          medium=2 (the default for an issue with no effort:* label), large=4. Sized so
-          the batch reflects actual work, not just issue count — a few large issues fill
-          it as fast as many small ones. Selection stops at whichever of max-issues or
-          effort-budget is hit first (both are hard caps). Also the unit the `requeue` job
-          divides remaining backlog by to decide how many parallel batches to fire.
+          Points budget for the bundle, oldest-first within the chosen tier (spilling into
+          lower tiers once the top tier is exhausted — see select): small=1, medium=2 (the
+          default for an issue with no effort:* label), large=4. Sized so the batch reflects
+          actual work, not just issue count — a few large issues fill it as fast as many
+          small ones. Selection stops at whichever of max-issues or effort-budget is hit
+          first (both are hard caps). Also the unit the `requeue` job divides remaining
+          backlog by to decide how many parallel batches to fire.
         type: number
-        # 80 -> 48 -> 16 (2026-07-15, parallel-batches redesign): shrunk alongside max-issues
-        # so a typical backlog splits into ~2-3 concurrent batches instead of one big serial
-        # one — see max-issues above and `parallel-batches` below.
-        default: 16
+        # 80 -> 48 -> 16 -> 6 (2026-07-15, operator: target 2-3 issues/batch): shrunk alongside
+        # max-issues so a typical backlog splits into more concurrent small batches instead of
+        # one big serial one — see max-issues above and `parallel-batches` below.
+        default: 6
       parallel-batches:
         description: >-
           Max concurrent issue-build runs (this run plus requeued ones) for one repo.
@@ -296,21 +297,30 @@ jobs:
             const high = buildable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
             const med = buildable.filter((i) => i.labels.includes("priority:med"));
             const low = buildable.filter((i) => !high.includes(i) && !med.includes(i));
-            const [tier, set] = high.length > 0 ? ["high", high] : med.length > 0 ? ["med", med] : ["low", low];
 
-            // Greedy pack, oldest-first: keep adding while under BOTH caps (count, points).
+            // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding while
+            // under BOTH caps (count, points), spilling into the next tier once the current one
+            // is exhausted instead of stopping cold at tier boundaries. A thin HIGH tier (e.g.
+            // one security issue trickling in) used to starve the whole batch down to count=1
+            // even with a full MED/LOW backlog waiting (operator-observed 2026-07-15) — spillover
+            // fixes that while still always draining HIGH first. `tier` reports the highest tier
+            // actually represented in the picked set (drives the opus-escalation signal below).
             // Always take at least one issue even if its own points exceed the budget alone —
             // "always build at least one thing" (three-loop-pipeline.md) is never overridden
             // by the effort budget (verified: a lone effort:large issue still gets picked
             // even when its 4pts alone exceed a 2pt budget).
-            const sorted = [...set].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
             const picked = [];
             let points = 0;
-            for (const it of sorted) {
+            let tier = "low";
+            for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
               if (picked.length >= maxIssues) break;
-              if (picked.length === 0) { picked.push(it); points += it.pts; continue; }
-              if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
-              break;
+              const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
+              for (const it of sorted) {
+                if (picked.length >= maxIssues) break;
+                if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
+                if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
+                break;
+              }
             }
             // Escalate the MAIN model to opus for meaningful work: the whole HIGH tier
             // (security or priority:high) or any effort:large issue. Routine MED/LOW work
@@ -338,14 +348,17 @@ jobs:
             // Passed to the build session via CLAUDE_CODE_SUBAGENT_MODEL (see the build job).
             const subagentModel = modelHint === "auto" ? (model === "opus" ? "sonnet" : model) : model;
 
-            // Effort level scales with tier — the orchestrator picks model AND reasoning depth
-            // per build, deterministically, from the same tier signal (operator: "choose model
-            // and settings for agent and subagent for each build" automatically). High-tier
-            // (opus) work gets deep reasoning; the routine floor runs fast and cheap. Passed via
-            // CLAUDE_CODE_EFFORT_LEVEL. Only meaningful when model-hint is auto; a manual hint
-            // leaves effort at the model default (auto) so an explicit override isn't second-
-            // guessed. Opus 4.8 + Sonnet support low|medium|high|xhigh|max.
-            const effort = modelHint !== "auto" ? "auto" : sensedOpus ? "high" : tier === "med" ? "medium" : "low";
+            // Effort level scales with tier — the orchestrator picks reasoning depth per build,
+            // deterministically, from the same tier signal (operator: "choose model and
+            // settings for agent and subagent for each build" automatically). Independent of
+            // model-hint: effort was previously reset to "auto" whenever model-hint was
+            // pinned (every caller pins model-hint: sonnet, so effort silently never scaled
+            // past the model default — operator-observed 2026-07-15, "raise effort
+            // everywhere"). Bumped one notch org-wide on top of the fix: low tier now runs at
+            // the old med default, med at the old high ceiling, high/large-effort at max
+            // depth. Passed via CLAUDE_CODE_EFFORT_LEVEL. Opus 4.8 + Sonnet support
+            // low|medium|high|xhigh|max.
+            const effort = sensedOpus ? "xhigh" : tier === "med" ? "high" : "medium";
 
             // Turns scale with selected effort points (not raw issue count — a few large
             // issues cost as much attention as many small ones), then speed. 10 turns/point is
