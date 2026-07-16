@@ -66,6 +66,13 @@ env:
   # eventually reflect it (or never, if the hit was short wall-clock but token-heavy).
   RATE_LIMIT_LOOKBACK_HOURS: "6"
   RATE_LIMIT_MAX_RUNS_SCANNED: "30"
+  # Plausibility bound on a scanned resetsAt: a five-hour-window reset can sit at most
+  # ~5h past the moment the event was emitted, and scanned runs are at most
+  # RATE_LIMIT_LOOKBACK_HOURS old — so any resetsAt further out than this from `now` is
+  # garbage or forged log text (run logs contain untrusted diff/tool output; see the
+  # spoof-resistance note in scripts/classify-security-noverdict.sh). Discard it rather
+  # than let one bad value pin the whole org red until an arbitrary epoch.
+  RATE_LIMIT_MAX_FUTURE_HOURS: "6"
 
 jobs:
   govern:
@@ -218,16 +225,32 @@ jobs:
               [ "$scanned" -ge "$RATE_LIMIT_MAX_RUNS_SCANNED" ] && break
               scanned=$((scanned + 1))
               log=$(gh run view --repo "SuxOS/$r" "$id" --log-failed 2>/dev/null) || continue
-              if grep -q '"rateLimitType":"five_hour"' <<<"$log"; then
-                this_reset=$(grep -oE '"resetsAt":[0-9]+' <<<"$log" | grep -oE '[0-9]+' | sort -rn | head -1)
-                if [ -n "${this_reset:-}" ] && [ "$this_reset" -gt "$max_resets_at" ]; then
-                  max_resets_at=$this_reset
-                fi
+              # Take resetsAt ONLY from a line that itself carries the five_hour marker:
+              # a genuine rate_limit_event is one compact JSON line with both fields
+              # inside rate_limit_info (see scripts/test-classify-security-noverdict.sh
+              # for the shape). Run logs also contain untrusted text (diffs, tool
+              # output), so a stray "resetsAt" elsewhere in the log must never be read
+              # as the reset epoch. Same-line pairing + the plausibility cap below bound
+              # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
+              # no worse than an attacker genuinely exhausting the pool.
+              this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
+                | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+              [ -n "${this_reset:-}" ] || continue
+              # resetsAt may be epoch seconds or milliseconds (same normalization as
+              # pr-unstick.yml): 13+ digits is milliseconds.
+              if [ "${#this_reset}" -ge 13 ]; then this_reset=$(( this_reset / 1000 )); fi
+              if [ "$this_reset" -gt "$max_resets_at" ]; then
+                max_resets_at=$this_reset
               fi
             done
           done
 
           now=$(date -u +%s)
+          cap=$(( now + RATE_LIMIT_MAX_FUTURE_HOURS * 3600 ))
+          if [ "$max_resets_at" -gt "$cap" ]; then
+            echo "::warning::rate-limit scan: resetsAt=$max_resets_at is more than ${RATE_LIMIT_MAX_FUTURE_HOURS}h out — implausible for a five-hour window; ignoring"
+            max_resets_at=0
+          fi
           if [ "$max_resets_at" -le "$now" ]; then
             max_resets_at=0
           fi
