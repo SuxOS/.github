@@ -55,3 +55,7 @@ jobs:
       - name: Assert assert-branch-protection fail-open/fail-closed logic
         run: bash scripts/test-assert-branch-protection.sh
         shell: bash
+
+      - name: Assert security-review no-verdict classifier (infra retry vs diff fail-closed)
+        run: bash scripts/test-classify-security-noverdict.sh
+        shell: bash
