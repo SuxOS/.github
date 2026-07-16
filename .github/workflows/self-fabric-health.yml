@@ -1,0 +1,26 @@
+name: Self fabric health
+
+# Scheduled caller for the fabric health spine on THIS repo (the .github org locus).
+# Mirrors the self-* pattern (self-pr-watch.yml): the reusable workflow holds the
+# logic, this file owns the schedule + org repo list. Read-only; ships the fabric
+# snapshot to Grafana Cloud once per run (inert until the GRAFANA_* secrets exist).
+#
+# Cadence: every 15 min, matching the pipeline sweep cadence so the drain-to-zero
+# streak (min_over_time(suxos_backlog_zero[7d])) has enough resolution.
+
+on:
+  schedule: [{ cron: "*/15 * * * *" }]
+  workflow_dispatch:
+
+jobs:
+  spine:
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: read
+      checks: read
+    uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
+    with:
+      repos: "sux sux-fileops suxlib suxrouter claude-config .github"
+    secrets: inherit

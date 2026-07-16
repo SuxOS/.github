@@ -1,0 +1,164 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROM",
+      "label": "Prometheus",
+      "description": "The Grafana Cloud Prometheus (Mimir) datasource that receives the fabric-health spine's cron-pushed suxos_* metric snapshot.",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" }
+  ],
+  "title": "SuxOS — fabric health",
+  "uid": "suxos-fabric-health",
+  "description": "S1 of the SuxOS v2 fabric-stability spec. Cross-repo pipeline + edge health pushed once per cron tick by the fabric-health spine (.github/.github/workflows/fabric-health.yml) as suxos_* Influx line protocol into Grafana Cloud Prometheus. Lives beside the sux edge dashboards; Cloudflare Workers observability is linked, not rebuilt.",
+  "tags": ["suxos", "fabric", "prometheus"],
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "",
+  "refresh": "5m",
+  "time": { "from": "now-7d", "to": "now" },
+  "templating": { "list": [] },
+  "links": [
+    {
+      "title": "sux — metrics & SLO",
+      "type": "dashboards",
+      "tags": ["sux"],
+      "asDropdown": true,
+      "targetBlank": false
+    },
+    {
+      "title": "Cloudflare Workers observability",
+      "type": "link",
+      "url": "https://dash.cloudflare.com/?to=/:account/workers/observability",
+      "icon": "external link",
+      "targetBlank": true,
+      "tooltip": "Worker runtime logs/metrics for sux, suxrouter, sux-fileops (linked, not rebuilt)."
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Build backlog (open build-eligible issues, org-wide)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "suxos_pipeline_backlog", "legendFormat": "backlog" }]
+    },
+    {
+      "id": 2,
+      "title": "Stuck & red PRs by repo",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "suxos_pr_stuck_total", "legendFormat": "stuck {{repo}}" },
+        { "refId": "B", "expr": "suxos_pr_red_total", "legendFormat": "red {{repo}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Drain-to-zero streak (DoD: 7-day green)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "NOT MET", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "7-DAY STREAK", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [{ "refId": "A", "expr": "min_over_time(suxos_backlog_zero[7d])" }]
+    },
+    {
+      "id": 4,
+      "title": "Backlog now",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 }, { "color": "red", "value": 10 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [{ "refId": "A", "expr": "suxos_pipeline_backlog" }]
+    },
+    {
+      "id": 5,
+      "title": "Workflows red (last run)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "min": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [{ "refId": "A", "expr": "sum(suxos_workflow_red_total)" }]
+    },
+    {
+      "id": 6,
+      "title": "Budget throttle active",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "clear", "color": "green" } } },
+            { "type": "value", "options": { "1": { "text": "THROTTLED", "color": "yellow" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [{ "refId": "A", "expr": "suxos_budget_throttle_active" }]
+    },
+    {
+      "id": 7,
+      "title": "Workflows red by repo",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [{ "refId": "A", "expr": "sum by (repo) (suxos_workflow_red_total)", "legendFormat": "{{repo}}" }]
+    },
+    {
+      "id": 8,
+      "title": "Edge deploy OK by service",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "up", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [{ "refId": "A", "expr": "suxos_edge_deploy_ok", "legendFormat": "{{service}}" }]
+    }
+  ]
+}

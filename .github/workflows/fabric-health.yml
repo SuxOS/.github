@@ -1,0 +1,244 @@
+name: Fabric health spine (reusable)
+
+# S1 of the SuxOS v2 fabric-stability spec
+# (docs/design/2026-07-16-fabric-stability-v2-design.md).
+#
+# One cron pass that turns the fabric's state into ONE ground-truth artifact
+# (fabric-status.json) and ships it to Grafana Cloud the SAME way the sux edge
+# already does (sux/src/grafana.ts): a low-cardinality Prometheus snapshot as
+# Influx line protocol (suxos_* series) + a per-run event to the Loki stream
+# {service="suxos-fabric"}. The Grafana push is DORMANT until GRAFANA_PROM_URL /
+# GRAFANA_PROM_USER / GRAFANA_LOKI_TOKEN (and the Loki trio) are set — a clean
+# no-op otherwise, so this is safe to land before the secrets exist.
+#
+# Stateless by design: it emits point-in-time gauges (e.g. suxos_backlog_zero),
+# and the 7-day drain-to-zero streak in the Definition of Done is derived in
+# Prometheus from series history (min_over_time(suxos_backlog_zero[7d]) == 1),
+# NOT tracked in the workflow. No state to persist, nothing to corrupt.
+#
+# Read-only against every repo (no mutation). Caller (self-fabric-health.yml)
+# owns the schedule and passes the repo list + optional edge smoke checks:
+#   uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
+#   with: { repos: "sux sux-fileops suxlib suxrouter claude-config .github" }
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      repos:
+        description: "Space/newline-separated repo names in this org to survey."
+        type: string
+        default: "sux sux-fileops suxlib suxrouter claude-config .github"
+      backlog-exclude-labels:
+        description: "Comma-separated issue labels that make an open issue NOT build-eligible (held/blocked/tracking work is not backlog)."
+        type: string
+        default: "hold,blocked,throttle,tracking,epic"
+      stuck-idle-days:
+        description: "An open PR untouched for at least this many days counts as stuck."
+        type: string
+        default: "2"
+      edge-smoke-checks:
+        description: >-
+          Newline-separated `service=url=expected-status` triples for edge deploy
+          health (e.g. `sux=https://…/mcp=401`). Each emits suxos_edge_deploy_ok{service}.
+          Empty (default) skips edge checks entirely — inert, never fails the run.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: read
+  checks: read
+
+concurrency:
+  group: fabric-health-${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  spine:
+    name: Collect fabric health, emit status, ship to Grafana
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Collect cross-repo health into fabric-status.json
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          REPOS: ${{ inputs.repos }}
+          EXCLUDE_LABELS: ${{ inputs.backlog-exclude-labels }}
+          STUCK_IDLE_DAYS: ${{ inputs.stuck-idle-days }}
+        run: |
+          set -euo pipefail
+
+          now_epoch=$(date -u +%s)
+          stuck_before=$(date -u -d "-${STUCK_IDLE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-"${STUCK_IDLE_DAYS}"d +%Y-%m-%dT%H:%M:%SZ)
+
+          # jq filter reused per repo: mark a PR "stuck" if it is BEHIND/DIRTY, has a
+          # failing status rollup, or has been idle past the threshold.
+          repos_json="[]"
+          backlog_total=0
+
+          for repo in $REPOS; do
+            slug="${ORG}/${repo}"
+
+            # --- Backlog: open, non-PR issues that are build-eligible ---
+            if ! issues=$(gh issue list --repo "$slug" --state open --limit 200 \
+                --json number,labels 2>/dev/null); then
+              issues="[]"
+            fi
+            backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" '
+              ($ex | split(",") | map(select(length>0))) as $excl
+              | [ .[] | select((.labels | map(.name)) as $l | any($excl[]; . as $e | $l | index($e)) | not) ]
+              | length')
+
+            # --- PRs: open / red (failing checks) / stuck ---
+            if ! prs=$(gh pr list --repo "$slug" --state open --limit 200 \
+                --json number,mergeable,mergeStateStatus,statusCheckRollup,updatedAt 2>/dev/null); then
+              prs="[]"
+            fi
+            pr_stats=$(printf '%s' "$prs" | jq --arg before "$stuck_before" '
+              def failing: any(.statusCheckRollup[]?;
+                (.conclusion // .state // "") | ascii_upcase | . == "FAILURE" or . == "TIMED_OUT" or . == "ERROR");
+              {
+                open: length,
+                red: ([ .[] | select(failing) ] | length),
+                stuck: ([ .[] | select(
+                    (.mergeStateStatus // "") as $m
+                    | ($m == "BEHIND" or $m == "DIRTY")
+                    or (.updatedAt < $before)) ] | length)
+              }')
+
+            # --- Workflows: how many have a failing LAST run ---
+            if ! wfruns=$(gh run list --repo "$slug" --limit 200 \
+                --json workflowName,conclusion,status,createdAt 2>/dev/null); then
+              wfruns="[]"
+            fi
+            wf_red=$(printf '%s' "$wfruns" | jq '
+              [ .[] | select(.status == "completed") ]
+              | group_by(.workflowName)
+              | map(sort_by(.createdAt) | last)
+              | [ .[] | select(.conclusion == "failure") ] | length')
+
+            repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
+              --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
+              '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red}')
+            repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
+            backlog_total=$((backlog_total + backlog))
+          done
+
+          # --- Budget governor: throttle active if any open `throttle` issue in .github ---
+          if ! throttle=$(gh issue list --repo "${ORG}/.github" --state open \
+              --label throttle --json number 2>/dev/null); then
+            throttle="[]"
+          fi
+          throttle_active=$(printf '%s' "$throttle" | jq 'if length > 0 then 1 else 0 end')
+
+          backlog_zero=$([ "$backlog_total" -eq 0 ] && echo 1 || echo 0)
+
+          jq -n \
+            --argjson ts "$now_epoch" \
+            --argjson repos "$repos_json" \
+            --argjson backlog_total "$backlog_total" \
+            --argjson backlog_zero "$backlog_zero" \
+            --argjson throttle_active "$throttle_active" \
+            '{
+              schema: "suxos-fabric-status/v1",
+              generated_at_epoch: $ts,
+              backlog_total: $backlog_total,
+              backlog_zero: $backlog_zero,
+              budget_throttle_active: $throttle_active,
+              repos: $repos
+            }' > fabric-status.json
+
+          echo "backlog_total=$backlog_total backlog_zero=$backlog_zero throttle=$throttle_active"
+          echo "status-file=fabric-status.json" >> "$GITHUB_OUTPUT"
+
+      - name: Edge deploy smoke checks (optional)
+        id: edge
+        env:
+          EDGE_SMOKE_CHECKS: ${{ inputs.edge-smoke-checks }}
+        run: |
+          set -euo pipefail
+          : > edge-metrics.txt
+          if [ -z "${EDGE_SMOKE_CHECKS//[[:space:]]/}" ]; then
+            echo "no edge smoke checks configured — skipping"
+            exit 0
+          fi
+          ts="$(date -u +%s)000000000"
+          while IFS= read -r line; do
+            [ -z "${line//[[:space:]]/}" ] && continue
+            service="${line%%=*}"; rest="${line#*=}"
+            url="${rest%%=*}"; want="${rest##*=}"
+            got=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "$url" || echo "000")
+            ok=$([ "$got" = "$want" ] && echo 1 || echo 0)
+            echo "edge $service $url want=$want got=$got ok=$ok"
+            printf 'suxos_edge_deploy_ok,service=%s value=%s %s\n' "$service" "$ok" "$ts" >> edge-metrics.txt
+          done <<< "$EDGE_SMOKE_CHECKS"
+
+      - name: Ship snapshot to Grafana Cloud (Prometheus + Loki)
+        env:
+          GRAFANA_PROM_URL: ${{ secrets.GRAFANA_PROM_URL }}
+          GRAFANA_PROM_USER: ${{ secrets.GRAFANA_PROM_USER }}
+          GRAFANA_LOKI_URL: ${{ secrets.GRAFANA_LOKI_URL }}
+          GRAFANA_LOKI_USER: ${{ secrets.GRAFANA_LOKI_USER }}
+          GRAFANA_LOKI_TOKEN: ${{ secrets.GRAFANA_LOKI_TOKEN }}
+        run: |
+          set -euo pipefail
+          status=$(cat fabric-status.json)
+          ts="$(date -u +%s)000000000"  # Influx/Loki want nanosecond timestamps.
+
+          # --- Build the Influx line-protocol snapshot (suxos_* series) ---
+          {
+            printf 'suxos_pipeline_backlog value=%s %s\n' "$(jq '.backlog_total' <<< "$status")" "$ts"
+            printf 'suxos_backlog_zero value=%s %s\n' "$(jq '.backlog_zero' <<< "$status")" "$ts"
+            printf 'suxos_budget_throttle_active value=%s %s\n' "$(jq '.budget_throttle_active' <<< "$status")" "$ts"
+            printf 'suxos_collector_ok value=1 %s\n' "$ts"
+            jq -r --arg ts "$ts" '.repos[] |
+              "suxos_pr_open_total,repo=\(.repo) value=\(.prs.open) \($ts)\n" +
+              "suxos_pr_red_total,repo=\(.repo) value=\(.prs.red) \($ts)\n" +
+              "suxos_pr_stuck_total,repo=\(.repo) value=\(.prs.stuck) \($ts)\n" +
+              "suxos_workflow_red_total,repo=\(.repo) value=\(.workflow_red) \($ts)"' <<< "$status"
+          } > prom-body.txt
+          # Append optional edge deploy series from the smoke-check step.
+          [ -f edge-metrics.txt ] && cat edge-metrics.txt >> prom-body.txt
+
+          if [ -n "${GRAFANA_PROM_URL:-}" ] && [ -n "${GRAFANA_PROM_USER:-}" ] && [ -n "${GRAFANA_LOKI_TOKEN:-}" ]; then
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+              -u "${GRAFANA_PROM_USER}:${GRAFANA_LOKI_TOKEN}" \
+              -H "content-type: text/plain" \
+              --data-binary @prom-body.txt "$GRAFANA_PROM_URL" || echo "000")
+            echo "grafana prometheus push HTTP $code"
+            [ "${code:0:1}" = "2" ] || echo "::warning::grafana prometheus push non-2xx ($code) — dashboard may be stale"
+          else
+            echo "GRAFANA_PROM_* secrets unset — prometheus push inert (no-op)"
+          fi
+
+          # --- Ship one rollup event to the Loki stream {service="suxos-fabric"} ---
+          if [ -n "${GRAFANA_LOKI_URL:-}" ] && [ -n "${GRAFANA_LOKI_USER:-}" ] && [ -n "${GRAFANA_LOKI_TOKEN:-}" ]; then
+            red_total=$(jq '[.repos[].workflow_red] | add // 0' <<< "$status")
+            stuck_total=$(jq '[.repos[].prs.stuck] | add // 0' <<< "$status")
+            level=$([ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] && echo error || echo info)
+            line=$(jq -c '{backlog: .backlog_total, backlog_zero, throttle: .budget_throttle_active,
+              workflow_red: ([.repos[].workflow_red] | add // 0),
+              pr_stuck: ([.repos[].prs.stuck] | add // 0)}' <<< "$status")
+            body=$(jq -n --arg ts "$ts" --arg line "$line" --arg level "$level" \
+              '{streams: [{stream: {service: "suxos-fabric", level: $level}, values: [[$ts, $line]]}]}')
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
+              -u "${GRAFANA_LOKI_USER}:${GRAFANA_LOKI_TOKEN}" \
+              -H "content-type: application/json" \
+              --data-binary "$body" "$GRAFANA_LOKI_URL" || echo "000")
+            echo "grafana loki push HTTP $code"
+          else
+            echo "GRAFANA_LOKI_* secrets unset — loki push inert (no-op)"
+          fi
+
+      - name: Upload fabric-status.json (ground truth for the orient tool)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fabric-status
+          path: fabric-status.json
+          retention-days: 14
