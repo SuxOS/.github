@@ -40,6 +40,13 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 from series history: `min_over_time(suxos_backlog_zero[7d]) == 1` means backlog held
 at zero for 7 days. The dashboard's "Drain-to-zero streak" stat renders exactly this.
 
+> **Why the stat panels use `last_over_time(...[20m])`, not the bare series:** the
+> spine pushes every 15 min, but Prometheus treats a sample as stale after 5 min, so
+> an instant query at `now` reads "No data" for ~2/3 of every interval. Wrapping each
+> gauge in `last_over_time(<expr>[20m])` (window > the 15-min cadence) makes the stat
+> always show the most recent tick. Keep the window above the cron interval if you
+> change either.
+
 > **Influx naming caveat** (same as the edge): if panels show "No data", the
 > receiver may suffix series `_value` (`suxos_pipeline_backlog_value`). Add the
 > suffix to the panel queries if so.
