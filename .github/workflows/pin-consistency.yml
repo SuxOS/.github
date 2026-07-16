@@ -11,7 +11,7 @@
 #       `SuxOS/…@main` refs (our own reusable workflows / composite actions) are
 #       intentionally tracked at @main and are exempt.
 #
-#   consumers (sux, suxrouter, sux-fileops — ADVISORY, never fails a merge here):
+#   consumers (repos in .github/managed-repos.json — ADVISORY, never fails a merge here):
 #     Checks the same rules across the caller repos' own workflows, plus a
 #     canonical-SHA comparison for the two actions the whole org standardises on,
 #     and reports drift/unpinned refs as warnings. It cannot see other repos'
@@ -35,7 +35,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pin-consistency-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  managed-repos:
+    # Single source of truth for the consumers matrix below — see .github/managed-repos.json.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repos: ${{ steps.load.outputs.repos }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: load
+        run: echo "repos=$(jq -c '.repos' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
   check:
     name: pin-consistency
     runs-on: ubuntu-latest
@@ -93,6 +108,7 @@ jobs:
     # hard failure. NOTE: cross-repo reach depends on the SUX_BOT App being installed
     # on each target repo with `contents: read`; where it is not, that repo is skipped
     # with a warning rather than scanned.
+    needs: managed-repos
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -100,7 +116,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        repo: [sux, suxrouter, sux-fileops, claude-config]
+        repo: ${{ fromJSON(needs.managed-repos.outputs.repos) }}
     steps:
       - name: Mint org-scoped app token
         id: app-token

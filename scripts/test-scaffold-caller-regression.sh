@@ -26,4 +26,4 @@ else
   bad "scaffold-caller.sh's security-review template omits ready_for_review — a newly-scaffolded repo's required security gate will silently never re-run when a draft PR goes ready (GitHub counts a skipped required check as passing)"
 fi
 
-[ "$fail" -eq 0 ] && { echo "pipeline invariants: PASS"; exit 0; } || { echo "pipeline invariants: FAIL"; exit 1; }
+[ "$fail" -eq 0 ] && { echo "scaffold-caller regression guard: PASS"; exit 0; } || { echo "scaffold-caller regression guard: FAIL"; exit 1; }

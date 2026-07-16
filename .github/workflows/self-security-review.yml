@@ -2,7 +2,7 @@ name: Self security review
 
 # The safety gate for suxbot[bot]-authored PRs against THIS repo's own workflow
 # files (see self-fixer.yml). ready_for_review is required — see
-# scripts/test-pipeline-invariants.sh for why omitting it is a regression.
+# scripts/test-scaffold-caller-regression.sh for why omitting it is a regression.
 
 on:
   pull_request:
