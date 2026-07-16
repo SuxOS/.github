@@ -13,6 +13,10 @@ name: PR auto-update / self-drain (reusable)
 # GITHUB_TOKEN-attributed pushes (recursion prevention), so a GITHUB_TOKEN
 # update-branch changes the PR head SHA but never re-fires the required checks.
 #
+# Skips any PR labelled `autofix-in-progress` — claude-autofix.yml also pushes to PR
+# branches and holds that label for the duration of its run, so this avoids racing
+# it and dropping a losing push. See claude-autofix.yml's lock/unlock steps.
+#
 # Caller (needs its own push/schedule/dispatch triggers):
 #   uses: SuxOS/.github/.github/workflows/pr-auto-update.yml@main
 #   secrets: inherit
@@ -59,6 +63,7 @@ jobs:
               | select(.autoMergeRequest != null)
               | select(.mergeStateStatus == "BEHIND")
               | select(([.labels[].name] | index("hold")) | not)
+              | select(([.labels[].name] | index("autofix-in-progress")) | not)
               | .number'); then
             echo "::error::gh pr list failed (auth/API error) — cannot distinguish from no BEHIND PRs"
             exit 1

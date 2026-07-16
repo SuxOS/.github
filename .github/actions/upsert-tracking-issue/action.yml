@@ -77,14 +77,36 @@ runs:
           done
         fi
 
-        existing=$(gh issue list --repo "$REPO" --state open --limit "$LIST_LIMIT" --json number,title \
-          | jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+        # Exhaustive lookup: grow the page size and re-list until a page comes back
+        # shorter than requested (no more open issues) or a title match is found,
+        # instead of trusting a single bounded call. gh already paginates the
+        # underlying API internally for a given --limit; LIST_LIMIT is just the
+        # starting point so small repos stay a single call.
+        existing=""
+        limit="$LIST_LIMIT"
+        while :; do
+          page=$(gh issue list --repo "$REPO" --state open --limit "$limit" --json number,title) \
+            || { echo "::error::gh issue list failed while searching for tracking issue '$TITLE'"; exit 1; }
+          existing=$(printf '%s' "$page" | jq -r --arg t "$TITLE" '[.[] | select(.title == $t) | .number] | first // empty')
+          count=$(printf '%s' "$page" | jq 'length')
+          if [ -n "$existing" ] || [ "$count" -lt "$limit" ]; then
+            break
+          fi
+          limit=$((limit * 4))
+        done
 
         case "$MODE" in
           close)
             if [ -n "$existing" ]; then
-              gh issue comment "$existing" --repo "$REPO" --body "$BODY" || true
-              gh issue close "$existing" --repo "$REPO" && echo "closed tracking issue #$existing"
+              if ! gh issue comment "$existing" --repo "$REPO" --body "$BODY"; then
+                echo "::error::failed to comment on tracking issue #$existing"
+                exit 1
+              fi
+              if ! gh issue close "$existing" --repo "$REPO"; then
+                echo "::error::failed to close tracking issue #$existing"
+                exit 1
+              fi
+              echo "closed tracking issue #$existing"
             else
               echo "no open tracking issue to close"
             fi
@@ -93,21 +115,36 @@ runs:
           open)
             if [ -n "$existing" ]; then
               if [ "$UPDATE_MODE" = "replace" ]; then
-                gh issue edit "$existing" --repo "$REPO" --body "$BODY" && echo "refreshed tracking issue #$existing"
+                if ! gh issue edit "$existing" --repo "$REPO" --body "$BODY"; then
+                  echo "::error::failed to refresh tracking issue #$existing"
+                  exit 1
+                fi
+                echo "refreshed tracking issue #$existing"
               else
-                gh issue comment "$existing" --repo "$REPO" --body "$BODY" && echo "commented on tracking issue #$existing"
+                if ! gh issue comment "$existing" --repo "$REPO" --body "$BODY"; then
+                  echo "::error::failed to comment on tracking issue #$existing"
+                  exit 1
+                fi
+                echo "commented on tracking issue #$existing"
               fi
               if [ -n "$LABELS" ]; then
-                gh issue edit "$existing" --repo "$REPO" --add-label "$LABELS" || true
+                gh issue edit "$existing" --repo "$REPO" --add-label "$LABELS" \
+                  || echo "::warning::failed to label tracking issue #$existing (non-fatal)"
               fi
               echo "issue-number=$existing" >>"$GITHUB_OUTPUT"
             else
               if [ -n "$LABELS" ]; then
-                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS")
+                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "$LABELS") \
+                  || { echo "::error::failed to create tracking issue"; exit 1; }
               else
-                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY")
+                url=$(gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY") \
+                  || { echo "::error::failed to create tracking issue"; exit 1; }
               fi
               num=$(printf '%s' "$url" | grep -oE '[0-9]+$' || true)
+              if [ -z "$num" ]; then
+                echo "::error::created tracking issue but could not parse its number from url: $url"
+                exit 1
+              fi
               echo "opened tracking issue #$num"
               echo "issue-number=$num" >>"$GITHUB_OUTPUT"
             fi
