@@ -19,7 +19,7 @@ name: Fabric health spine (reusable)
 # Read-only against every repo (no mutation). Caller (self-fabric-health.yml)
 # owns the schedule and passes the repo list + optional edge smoke checks:
 #   uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
-#   with: { repos: "sux sux-fileops suxlib suxrouter claude-config .github" }
+#   with: { repos: "sux suxlib suxrouter claude-config .github" }
 #   secrets: inherit
 
 on:
@@ -28,7 +28,7 @@ on:
       repos:
         description: "Space/newline-separated repo names in this org to survey."
         type: string
-        default: "sux sux-fileops suxlib suxrouter claude-config .github"
+        default: "sux suxlib suxrouter claude-config .github"
       backlog-exclude-labels:
         description: "Comma-separated issue labels that make an open issue NOT build-eligible (held/blocked/tracking work is not backlog)."
         type: string

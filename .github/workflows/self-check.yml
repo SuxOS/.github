@@ -56,6 +56,10 @@ jobs:
         run: bash scripts/test-assert-branch-protection.sh
         shell: bash
 
+      - name: Assert security-review no-verdict classifier (infra retry vs diff fail-closed)
+        run: bash scripts/test-classify-security-noverdict.sh
+        shell: bash
+
       - name: Assert budget-governor live rate-limit signal
         run: bash scripts/test-budget-governor-ratelimit.sh
         shell: bash

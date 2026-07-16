@@ -1,7 +1,15 @@
-name: PR unstick — periodic retry for needs-human PRs (reusable)
+name: PR unstick — periodic retry for needs-human + security-review-retry PRs (reusable)
 
 # Long-lived unstuck mechanism (docs/design/three-loop-pipeline.md §3.3 extension,
 # 2026-07-15).
+#
+# Two independent stuck-states are swept here (see the two steps below):
+#   - `needs-human`         — the autofix ladder gave up; retry the free/cheap moves.
+#   - `security-review-retry` — the org security gate deferred on an account five-hour
+#     rate-limit (INFRA, not a finding); actively re-run the review instead of waiting on
+#     `main` to move (SuxOS/.github#272). This one DOES re-invoke the reviewer — but that
+#     run never reviewed the diff (the pool was exhausted), so it's the FIRST real review,
+#     not a wasted duplicate.
 #
 # The rebase/autofix ladder (pr-auto-update.yml -> claude-autofix.yml) already bounds
 # itself: claude-autofix.yml gives up after `max-attempts` bot commits and tags
@@ -166,6 +174,100 @@ jobs:
             else
               gh pr comment "$n" --body "$new_body" 2>/dev/null \
                 || echo "::warning::could not post the marker comment on PR #$n"
+            fi
+
+            echo "::endgroup::"
+            sleep 2
+          done
+
+      - name: Requeue security-review-retry PRs (rate-limit infra defers), honoring resetsAt
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          now=$(date -u +%s)
+
+          # security-review.yml's Gate parks an account five-hour rate-limit (INFRA, not a
+          # security finding) by leaving the PR ARMED (no `hold`) with a `security-review-retry`
+          # marker label and a RED security-review run — it never passes an unreviewed diff
+          # (SuxOS/.github#236 + #271). #271's requeue is incidental: it only re-fires when
+          # `main` moves (pr-auto-update rebases armed PRs → checks re-fire). This is the
+          # ACTIVE, main-churn-independent requeue (SuxOS/.github#272): re-run the failed
+          # security-review check directly, and drop the marker once it goes green. `hold`/
+          # `keep` are excluded — a real finding or an operator pin is not ours to auto-requeue.
+          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
+            --json number,isDraft,labels,headRefOid \
+            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | index("security-review-retry")) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+            echo "::error::gh pr list failed (security-review-retry) — aborting instead of treating as zero retry PRs"
+            exit 1
+          fi
+
+          count=$(echo "$prs" | jq 'length')
+          echo "security-review-retry candidates (not hold/keep): $count"
+          if [ "$count" -eq 0 ]; then exit 0; fi
+
+          for n in $(echo "$prs" | jq -r '.[].number'); do
+            echo "::group::PR #$n (security-review-retry)"
+            sha=$(echo "$prs" | jq -r --argjson n "$n" '.[] | select(.number == $n) | .headRefOid')
+
+            # Latest security-review run for the CURRENT head SHA. The reusable job is always
+            # named "security-review"; the caller workflow is "Security review" (scaffold-caller)
+            # or "Self security review" (this repo) — match either case-insensitively so a stale
+            # marker left on an already-synchronized head self-corrects to the fresh run.
+            if ! runs=$(gh run list --repo "$GH_REPO" --commit "$sha" \
+              --json databaseId,conclusion,status,workflowName,name,createdAt 2>/dev/null); then
+              echo "::warning::could not list runs for PR #$n head $sha — skipping this run"
+              echo "::endgroup::"; continue
+            fi
+            sr=$(echo "$runs" | jq -c '[.[] | select((((.workflowName // "") + " " + (.name // "")) | test("security[ -]?review"; "i")))] | sort_by(.createdAt) | last // empty')
+            if [ -z "$sr" ]; then
+              echo "no security-review run on head $sha yet — leaving it to the on-synchronize path"
+              echo "::endgroup::"; continue
+            fi
+
+            sr_status=$(echo "$sr" | jq -r '.status // ""')
+            sr_conclusion=$(echo "$sr" | jq -r '.conclusion // ""')
+
+            # Green again → the review recovered; drop the marker. This is the "remove the
+            # label on success" half of the requeue (security-review.yml itself never clears it).
+            if [ "$sr_conclusion" = "success" ]; then
+              gh pr edit "$n" --remove-label security-review-retry 2>/dev/null \
+                || echo "::warning::could not remove security-review-retry from PR #$n"
+              echo "#$n security-review is green again — removed security-review-retry"
+              echo "::endgroup::"; continue
+            fi
+
+            # Still queued/running → a rerun is already in flight; don't pile on.
+            if [ "$sr_status" != "completed" ]; then
+              echo "#$n security-review still '$sr_status' — waiting for it to finish"
+              echo "::endgroup::"; continue
+            fi
+
+            # Completed non-success (rate-limit red, or a genuine re-fail). Gate the rerun on
+            # the rate limit's resetsAt when the deferral comment carries one, so we don't just
+            # re-hit the same five-hour ceiling; absent one, proceed (the daily cadence already
+            # clears the five-hour window). resetsAt may be epoch seconds or milliseconds.
+            reset_epoch=0
+            if comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null); then
+              raw=$(echo "$comments" \
+                | jq -r '[.[] | select(.body | test("security[ -]?review"; "i")) | .body] | join("\n")' \
+                | grep -oiE 'resets?[-_ ]?at["=: ]*[0-9]{10,13}' | grep -oE '[0-9]{10,13}' | head -1 || true)
+              if [ -n "$raw" ]; then
+                if [ "${#raw}" -ge 13 ]; then reset_epoch=$(( raw / 1000 )); else reset_epoch="$raw"; fi
+              fi
+            fi
+            if [ "$reset_epoch" -gt 0 ] && [ "$now" -lt "$reset_epoch" ]; then
+              wait=$(( reset_epoch - now ))
+              echo "#$n rate limit resets in ${wait}s (resetsAt=$reset_epoch) — deferring rerun to a later sweep"
+              echo "::endgroup::"; continue
+            fi
+
+            rid=$(echo "$sr" | jq -r '.databaseId')
+            if gh run rerun "$rid" --repo "$GH_REPO" --failed 2>/dev/null; then
+              echo "#$n re-ran failed security-review run $rid — marker stays until the review is green"
+            else
+              echo "::warning::could not rerun security-review run $rid for PR #$n"
             fi
 
             echo "::endgroup::"
