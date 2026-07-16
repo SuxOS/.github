@@ -11,6 +11,7 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 - `suxrouter` — OpenWrt/ucode router project.
 - `sux-fileops` — file-operations tooling.
 - `claude-config` — shared Claude Code configuration.
+- `suxlib` — SuxOS v2 op-engine library (`@suxos/lib`), no Cloudflare Worker to deploy.
 - `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
 
 ## The two groups
