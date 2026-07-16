@@ -11,6 +11,7 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 - `suxrouter` — OpenWrt/ucode router project.
 - `sux-fileops` — file-operations tooling.
 - `claude-config` — shared Claude Code configuration.
+- `suxlib` — SuxOS v2 op-engine library (`@suxos/lib`), no Cloudflare Worker to deploy.
 - `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
 
 ## The two groups
@@ -59,6 +60,16 @@ arrangement, not the long-term shape. `self-pr-auto-update.yml` · `self-pr-watc
 `self-pr-drain.yml` complete Loop 3 on this repo too — without them, a second
 concurrent bot PR against `.github` flips BEHIND on merge with no rebase/visibility/
 drain backstop (issue #189).
+
+`gh workflow list --repo SuxOS/.github --all` shows the org's shared reusable
+workflows (`automerge.yml`, `fixer.yml`, `issue-build.yml`, `pr-auto-update.yml`,
+`pr-drain.yml`, `pr-watch.yml`, `security-review.yml`) as `disabled_manually`. This
+is **by design and harmless**: they were disabled to stop their own direct triggers
+from firing on this repo, but `workflow_call`/`uses:` reuse by other repos is
+unaffected by that state — disabling a workflow's direct triggers doesn't block
+other repos from calling it. Only the `self-*.yml` stubs above need to stay directly
+enabled for this repo's own pipeline to run; don't re-enable the shared reusables
+here on the strength of `gh workflow list` output alone.
 
 ### The three loops → workflows (the resolvable map)
 

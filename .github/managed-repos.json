@@ -1,0 +1,4 @@
+{
+  "_comment": "Single source of truth for the org's managed-repo list, referenced by pin-consistency.yml, deep-audit.yml, and budget-governor.yml so the three never drift from each other (see issue #233). '.github' itself is deliberately excluded — it's this repo, not a consumer of it.",
+  "repos": ["sux", "suxrouter", "sux-fileops", "claude-config", "suxlib"]
+}

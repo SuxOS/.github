@@ -188,4 +188,4 @@ check_fail_open "tracking issue body missing a level line" '"no level info here"
 check_fail_open "garbage suffix after level" '"level: red-ish\nmore text"'
 check_fail_open "wrong-case level line" '"Level: RED"'
 
-[ "$fail" -eq 0 ] && { echo "pipeline invariants: PASS"; exit 0; } || { echo "pipeline invariants: FAIL"; exit 1; }
+[ "$fail" -eq 0 ] && { echo "scaffold-caller regression guard: PASS"; exit 0; } || { echo "scaffold-caller regression guard: FAIL"; exit 1; }
