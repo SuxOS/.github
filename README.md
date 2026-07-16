@@ -28,7 +28,8 @@ a proxy for spend/waste, since actual Claude token usage isn't queryable via the
 **Autonomy pipeline** (keeps PRs moving hands-off — native GitHub auto-merge, not a merge
 queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)):
 `automerge.yml` · `pr-auto-update.yml` · `pr-drain.yml` · `pr-watch.yml` ·
-`pr-unstick.yml` · `claude.yml` · `claude-autofix.yml` · `skill-sync.yml`
+`pr-unstick.yml` · `claude.yml` · `claude-autofix.yml` (job-chained from each caller's
+`ci.yml`, not its own caller-stub file — see § `workflow_run` below) · `skill-sync.yml`
 
 **Budget & deep passes** (run directly in THIS repo — not reusables; see
 [docs/design/budget-and-cadence.md](docs/design/budget-and-cadence.md)):
@@ -229,13 +230,46 @@ gh label create self-improve -c ededed -d "Bot-authored PR trusted for auto-merg
 
 ### `workflow_run` — the one trigger that can't cross the `workflow_call` boundary
 
-`claude-autofix.yml` needs a `workflow_run: workflows: ["CI"]` trigger, and
-GitHub does not let a reusable `workflow_call` workflow declare that trigger
-for you — the caller repo's own `.github/workflows/claude-autofix.yml` stub
-must declare `on: workflow_run: workflows: ["CI"]` itself and then `uses:` this
-reusable file for the job body. Same idea applies to any other event trigger
-(`schedule`, `pull_request_target`, etc.) — those live in the caller's stub,
-`workflow_call` only supplies the reusable job.
+For most event triggers (`schedule`, `pull_request_target`, `issues`, etc.) the caller's
+own stub file declares the trigger and then `uses:` the reusable file for the job body —
+`workflow_call` can't re-expose those triggers itself.
+
+**`claude-autofix.yml` is the one exception, and it is deliberately NOT wired this way.**
+It used to have its own per-caller stub with `on: workflow_run: workflows: ["CI"]`, but
+that cross-workflow trigger structurally never fired for a PR-branch CI run (confirmed
+live, SuxOS/.github#260 — every historical run across sux/suxrouter/sux-fileops was tied
+to `main`, never a PR). It is now `workflow_call`-only, invoked as a **job chained inside
+each caller's own `ci.yml`** — no separate stub file, no `workflow_run`:
+
+```yaml
+# .github/workflows/ci.yml in a SuxOS caller repo — after the job that runs the gates
+jobs:
+  check: # (or whatever the gate job is named — lint, test, ...)
+    # ... existing steps ...
+
+  autofix:
+    needs: [check]
+    if: needs.check.result == 'failure' && github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    uses: SuxOS/.github/.github/workflows/claude-autofix.yml@main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+      head-branch: ${{ github.event.pull_request.head.ref }}
+      head-sha: ${{ github.event.pull_request.head.sha }}
+      base-branch: ${{ github.event.pull_request.base.ref }}
+    secrets: inherit
+```
+
+Same-workflow job chaining doesn't have `workflow_run`'s cross-workflow/branch reliability
+gap: the PR identity (number/branch/sha) is read straight from the caller's own
+`github.event.pull_request.*` at the point the gate job fails, and passed explicitly as
+`workflow_call` inputs — no reconstructing it from an asynchronous `workflow_run` event
+payload that may never arrive. `github.event_name == 'pull_request'` on the caller's own
+job keeps this from firing on a `push`/`merge_group` run of `ci.yml`.
 
 ## Two hard-won gotchas preserved from sux (read before editing these files)
 

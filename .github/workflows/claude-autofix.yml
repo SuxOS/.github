@@ -9,17 +9,60 @@ name: Claude autofix CI (reusable)
 # Runs on a Claude Pro/Max subscription (CLAUDE_CODE_OAUTH_TOKEN via 'claude setup-token'),
 # not a metered API key. Inert until that secret is set.
 #
-# Caller (needs its own `workflow_run: workflows: ["<caller's CI workflow name>"]` trigger —
-# workflow_run can't be re-exposed through workflow_call, so the caller repo owns this trigger
-# and calls this file from a thin wrapper job, or duplicates the workflow_run block pointing at
-# this reusable file directly. See README for the exact pattern):
-#   uses: SuxOS/.github/.github/workflows/claude-autofix.yml@main
-#   with: { ci-workflow-name: "CI", gates-summary: "..." }
-#   secrets: inherit
+# workflow_call-only by design (SuxOS/.github#260). This used to be triggered by a
+# `workflow_run: workflows: ["CI"]` listener in a separate per-caller stub file — that
+# cross-workflow trigger structurally never fired for a PR-branch CI run: every historical
+# run across sux/suxrouter/sux-fileops was tied to `main`, never a PR, confirmed by three
+# fresh live reproductions in one session (see the issue). Same-workflow job chaining does
+# not have that failure mode: the caller's own ci.yml adds a job that runs
+# `if: needs.<test-job>.result == 'failure'` and calls this file directly — no separate
+# caller-stub file, no workflow_run, no cross-workflow event-payload parsing. The PR
+# identity (number/branch/sha) that workflow_run used to hand over via
+# `github.event.workflow_run.*` is instead passed explicitly as workflow_call inputs, read
+# straight from the caller's own `github.event.pull_request.*` — simpler and more reliable
+# than reconstructing it from a workflow_run payload. Caller shape (add to ci.yml, right
+# after the job that runs the gates):
+#
+#   autofix:
+#     needs: [<test-job-id>]
+#     if: needs.<test-job-id>.result == 'failure' && github.event_name == 'pull_request'
+#     permissions:
+#       contents: write
+#       pull-requests: write
+#       issues: write
+#       actions: read
+#     uses: SuxOS/.github/.github/workflows/claude-autofix.yml@main
+#     with:
+#       pr-number: ${{ github.event.pull_request.number }}
+#       head-branch: ${{ github.event.pull_request.head.ref }}
+#       head-sha: ${{ github.event.pull_request.head.sha }}
+#       base-branch: ${{ github.event.pull_request.base.ref }}
+#       gates-summary: "..."
+#     secrets: inherit
+#
+# `github.event_name == 'pull_request'` on the caller's own job keeps this from firing on a
+# `push`/`merge_group` run of ci.yml, matching the original workflow_run design's
+# `github.event.workflow_run.event == 'pull_request'` filter.
 
 on:
   workflow_call:
     inputs:
+      pr-number:
+        description: "The PR number CI just failed on (github.event.pull_request.number in the caller)."
+        type: number
+        required: true
+      head-branch:
+        description: "The PR's head branch (github.event.pull_request.head.ref in the caller)."
+        type: string
+        required: true
+      head-sha:
+        description: "The commit CI ran against (github.event.pull_request.head.sha in the caller)."
+        type: string
+        required: true
+      base-branch:
+        description: "The PR's base branch (github.event.pull_request.base.ref in the caller)."
+        type: string
+        required: true
       max-attempts:
         type: string
         default: "6"
@@ -44,7 +87,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: autofix-${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  group: autofix-${{ github.workflow }}-${{ inputs.head-branch }}
   cancel-in-progress: true
 
 env:
@@ -52,33 +95,25 @@ env:
 
 jobs:
   autofix:
-    if: >
-      github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Preflight — resolve the PR, check the gate, count attempts
+      - name: Preflight — check the gate, count attempts
         id: pre
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_NUM: ${{ inputs.pr-number }}
           HAVE_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: |
           set -euo pipefail
           if [ "$HAVE_KEY" != "true" ]; then
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → autofix inert. Run 'claude setup-token' and add it to arm."; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
-          if ! prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --base "$BASE_BRANCH" --state open \
-                 --json number,labels,title,isDraft,isCrossRepository,headRefName,baseRefName); then
-            echo "::warning::gh pr list failed for head=$HEAD_BRANCH base=$BASE_BRANCH → cannot determine PR state, skipping (this is NOT a genuine 'no open PR')"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          matches=$(echo "$prs" | jq -c --arg h "$HEAD_BRANCH" --arg b "$BASE_BRANCH" '[.[] | select(.headRefName==$h and .baseRefName==$b)]')
-          count=$(echo "$matches" | jq 'length')
-          if [ "$count" -eq 0 ]; then echo "no open PR for $HEAD_BRANCH → $BASE_BRANCH → skip"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if [ "$count" -gt 1 ]; then echo "::warning::$count PRs match head=$HEAD_BRANCH base=$BASE_BRANCH → ambiguous, refusing to guess"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          pr=$(echo "$matches" | jq -c '.[0]')
-          num=$(echo "$pr" | jq -r .number)
+          if ! pr=$(gh pr view "$PR_NUM" --repo "$GITHUB_REPOSITORY" \
+                 --json number,state,labels,title,isDraft,isCrossRepository); then
+            echo "::warning::gh pr view failed for #$PR_NUM → cannot determine PR state, skipping (this is NOT a genuine 'no PR')"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          state=$(echo "$pr" | jq -r .state)
+          if [ "$state" != "OPEN" ]; then echo "PR #$PR_NUM is $state, not open → skip"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0; fi
           title=$(echo "$pr" | jq -r .title)
           draft=$(echo "$pr" | jq -r .isDraft)
           labels=$(echo "$pr" | jq -r '[.labels[].name] | join(",")')
@@ -86,11 +121,11 @@ jobs:
           # Read the login too — the org bot (suxbot[bot]) is a first-class trusted author
           # matched BY LOGIN, independent of whatever association an App-token PR resolves to
           # (same read shape pr-drain.yml/issue-build.yml use).
-          meta=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$num" -q '{assoc: .author_association, login: .user.login}' 2>/dev/null || echo '{"assoc":"NONE","login":""}')
+          meta=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUM" -q '{assoc: .author_association, login: .user.login}' 2>/dev/null || echo '{"assoc":"NONE","login":""}')
           assoc=$(printf '%s' "$meta" | jq -r '.assoc // "NONE"')
           login=$(printf '%s' "$meta" | jq -r '.login // ""')
           fork=$(echo "$pr" | jq -r .isCrossRepository)
-          echo "PR #$num  title=$title  labels=$labels  draft=$draft  author=$assoc  login=$login  fork=$fork"
+          echo "PR #$PR_NUM  title=$title  labels=$labels  draft=$draft  author=$assoc  login=$login  fork=$fork"
 
           # RCE GUARD: this job checks out and RUNS the PR's code with a write token
           # + the Claude OAuth token. Only ever do that for a trusted author's same-repo
@@ -121,8 +156,7 @@ jobs:
           # Structural gate passed; the shared safe-type/label/breaking predicate is
           # applied next via the pr-eligibility action (single source of truth).
           echo "go=true" >> "$GITHUB_OUTPUT"
-          echo "pr=$num" >> "$GITHUB_OUTPUT"
-          jq -cn --argjson n "$num" --arg t "$title" --arg l "$labels" \
+          jq -cn --argjson n "$PR_NUM" --arg t "$title" --arg l "$labels" \
             '[{number: $n, title: $t, labels: ($l | split(",") | map(select(. != "")))}]' \
             > "$RUNNER_TEMP/pr-eligibility.json"
           echo "prs-json=$(cat "$RUNNER_TEMP/pr-eligibility.json")" >> "$GITHUB_OUTPUT"
@@ -138,7 +172,7 @@ jobs:
         if: steps.pre.outputs.go == 'true'
         id: gate
         env:
-          PR_NUM: ${{ steps.pre.outputs.pr }}
+          PR_NUM: ${{ inputs.pr-number }}
           ELIGIBLE_NUMBERS: ${{ steps.eligible.outputs.eligible-numbers }}
         run: |
           set -euo pipefail
@@ -161,7 +195,7 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUM: ${{ steps.pre.outputs.pr }}
+          PR_NUM: ${{ inputs.pr-number }}
         # pr-auto-update.yml also pushes to PR branches (via `gh pr update-branch`) on
         # its own schedule; with no coordination the two can race and one push loses
         # with the fix silently dropped instead of retried. This label is a lightweight
@@ -176,14 +210,14 @@ jobs:
         if: steps.gate.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.head-sha }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Pin local branch to the checked-out commit
         if: steps.gate.outputs.go == 'true'
         env:
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_BRANCH: ${{ inputs.head-branch }}
         run: git checkout -B "$HEAD_BRANCH"
 
       - name: Attempt cap — stop looping after MAX_ATTEMPTS bot commits
@@ -191,8 +225,9 @@ jobs:
         id: cap
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BASE_BRANCH: ${{ inputs.base-branch }}
+          HEAD_BRANCH: ${{ inputs.head-branch }}
+          PR_NUM: ${{ inputs.pr-number }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$MAX_ATTEMPTS" | grep -qE '^[0-9]+$'; then
@@ -230,10 +265,10 @@ jobs:
             echo "cap reached → tagging needs-human and stopping"
             label_ok=true
             comment_ok=true
-            gh pr edit "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || label_ok=false
-            gh pr comment "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" \
+            gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || label_ok=false
+            gh pr comment "$PR_NUM" --repo "$GITHUB_REPOSITORY" \
               --body "🤖 Auto-fix gave up after $attempts attempts — CI is still red. Tagging \`needs-human\`. (Remove the label to let the bot try again.)" 2>/dev/null \
-              || gh pr comment "${{ steps.pre.outputs.pr }}" --repo "$GITHUB_REPOSITORY" \
+              || gh pr comment "$PR_NUM" --repo "$GITHUB_REPOSITORY" \
                    --body "🤖 Auto-fix gave up after $attempts attempts — CI is still red. Tagging \`needs-human\`. (Remove the label to let the bot try again.)" 2>/dev/null \
               || comment_ok=false
             # This is the exact moment a human needs to be alerted that autofix gave up. A
@@ -241,7 +276,7 @@ jobs:
             # needs-human label and no comment — pr-drain.yml's stale sweep matches on that
             # label, so an unnoticed failure here means the PR just silently rots. Surface it.
             if [ "$label_ok" != "true" ] || [ "$comment_ok" != "true" ]; then
-              echo "::warning::cap-reached notification incomplete for PR #${{ steps.pre.outputs.pr }} (label_ok=$label_ok comment_ok=$comment_ok) — a human will NOT be alerted via the usual label/comment path"
+              echo "::warning::cap-reached notification incomplete for PR #$PR_NUM (label_ok=$label_ok comment_ok=$comment_ok) — a human will NOT be alerted via the usual label/comment path"
             fi
             echo "go=false" >> "$GITHUB_OUTPUT"
           else
@@ -252,8 +287,8 @@ jobs:
         if: steps.gate.outputs.go == 'true' && steps.cap.outputs.go == 'true'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
-          CI_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CI_HEAD_BRANCH: ${{ inputs.head-branch }}
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GATES_SUMMARY: ${{ inputs.gates-summary }}
           ENABLE_PROMPT_CACHING_1H: "1"
           # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
@@ -292,5 +327,5 @@ jobs:
         if: always() && steps.gate.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUM: ${{ steps.pre.outputs.pr }}
+          PR_NUM: ${{ inputs.pr-number }}
         run: gh pr edit "$PR_NUM" --repo "$GITHUB_REPOSITORY" --remove-label autofix-in-progress 2>/dev/null || true

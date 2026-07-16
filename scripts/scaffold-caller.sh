@@ -64,6 +64,10 @@ emit() {
 
 # --- Gates -----------------------------------------------------------------
 
+# claude-autofix is job-chained here, not its own caller-stub file: workflow_run (the
+# only way a separate stub could listen for "CI failed") structurally never fires for a
+# PR-branch CI run (SuxOS/.github#260) — same-workflow job chaining doesn't have that
+# failure mode. github.event_name == 'pull_request' keeps it from firing on push/merge_group.
 emit ci <<YAML
 name: CI
 on:
@@ -74,6 +78,23 @@ jobs:
     uses: $REPO/.github/workflows/ci.yml@$REF
     with:
       wrangler-config: "$WRANGLER_CONFIG"
+    secrets: inherit
+
+  autofix:
+    needs: [ci]
+    if: needs.ci.result == 'failure' && github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    uses: $REPO/.github/workflows/claude-autofix.yml@$REF
+    with:
+      pr-number: \${{ github.event.pull_request.number }}
+      head-branch: \${{ github.event.pull_request.head.ref }}
+      head-sha: \${{ github.event.pull_request.head.sha }}
+      base-branch: \${{ github.event.pull_request.base.ref }}
+      gates-summary: "npm run type-check · npm test · npm run lint"
     secrets: inherit
 YAML
 
@@ -207,22 +228,6 @@ on:
 jobs:
   claude:
     uses: $REPO/.github/workflows/claude.yml@$REF
-    secrets: inherit
-YAML
-
-# workflow_run can't cross the workflow_call boundary — it must live here, and
-# workflows: ["CI"] must match the CI stub's `name:` above.
-emit claude-autofix <<YAML
-name: Claude autofix
-on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-jobs:
-  claude-autofix:
-    uses: $REPO/.github/workflows/claude-autofix.yml@$REF
-    with:
-      gates-summary: "npm run type-check · npm test · npm run lint"
     secrets: inherit
 YAML
 
