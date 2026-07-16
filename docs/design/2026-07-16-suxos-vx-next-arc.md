@@ -42,7 +42,7 @@ this cycle (production: `sux` main auto-deploys; `.github` main is the live pipe
 |---|---|---|
 | R1 | Local clones sit on stale **already-merged** branches (`sux`→#640, `suxlib`→#1) — exactly the audit-against-origin/main trap. | **Land** (hygiene): normalize all clones to `main`, prune gone branches. |
 | R2 | Uncommitted `sux` docs sweep renames the vault to `SuxOS/suxvault` — **a repo that does not exist**. Live truth: the vault is `colinxs/obsidian-vault` (pushed today). Docs must not lead reality. | **Park**: preserve the sweep on branch `docs/suxvault-rename-parked` (no PR); decision item below (§8-D1). |
-| R3 | Commit `0baa168` ("wire sux edge health into panel 8, suxos.net/mcp=401") stranded on a gone branch — PR #268 landed only its sibling commit. Main's dashboard has no edge-health panel. | **Land**: K3 rescue PR to `.github`. |
+| R3 | ~~Commit `0baa168` (edge health → panel 8) stranded on a gone branch~~ — **corrected post-audit**: #268's squash included *both* branch commits; the `edge-smoke-checks` line is live on main's `self-fabric-health.yml`. The audit's evidence grepped the dashboard JSON instead of the caller workflow the commit touches (invariant 4's verify-the-changed-file corollary). | **Already landed** (#268) — verified, no action. |
 | R4 | `sux` main's durable interpreter hardcodes `faithfulUnion` (durable.ts) while `suxlib` main ships `last-write-wins` + `field-merge` — a durable run of a moded op **silently degrades to faithful-union**. The slice-3 spec explicitly left this wiring as sux's follow-on. | **Land**: K1 — wire `runReconcile` dispatch + test. |
 | R5 | **Loop 3's autofix rung is dead org-wide at the caller level.** .github#263 made the reusable `workflow_call`-only (job-chained from the caller's `ci.yml`), but `sux`, `suxrouter`, `suxlib` all still carry the dead `workflow_run` stub and **no** caller chains it — hence the `startup_failure`s (suxlib#7, class .github#51) and a red-rebase loop that structurally never fires. | **Land**: K2 — adopt the documented job-chain in all three callers, delete the stubs. |
 | R6 | `sux-fileops` is retired in docs ("kept read-only for history") but **the pipeline still builds on it** (bot PRs #95–#108 merged today) — it is in `managed-repos.json` and runs its own fixer/issue-build crons. Retirement without de-registration. | **Land**: K4 — remove from `managed-repos.json` + strip its autonomy caller stubs. **Park**: actual archive is admin (§8-D2). |
@@ -65,9 +65,10 @@ this cycle (production: `sux` main auto-deploys; `.github` main is the live pipe
   explicit PR-identity inputs, `secrets: inherit`); delete the dead `claude-autofix.yml`
   workflow_run stubs. Closes suxlib#7 concretely and the #260/#263 migration debt; the
   red-rebase loop becomes real for the first time.
-- **K3 — `.github`: spine panel-8 rescue.** Re-land `0baa168` (sux edge health →
-  dashboard panel; collector probes `suxos.net/mcp` expecting 401) on a fresh branch.
-  Completes S1's "edge services green e2e" visibility (fabric DoD #3).
+- **K3 — `.github`: spine panel-8 rescue — resolved as already-landed.** The
+  cherry-pick of `0baa168` applied empty: #268's squash had carried it. Kept here
+  (struck through in R3) so the ledger records the false positive and its lesson
+  rather than silently editing history.
 - **K4 — `sux-fileops` de-registration.** Remove from `.github/managed-repos.json`;
   strip the repo's own fixer/fixer-hourly/issue-build/claude-autofix/pr-* caller stubs
   (keep ci/security-review/automerge so the stripping PR itself can land). The pipeline

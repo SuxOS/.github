@@ -95,14 +95,6 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: repos/suxrouter
 
-      - name: Checkout sux-fileops
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: SuxOS/sux-fileops
-          token: ${{ steps.app-token.outputs.token }}
-          path: repos/sux-fileops
-
       - name: Checkout claude-config
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
