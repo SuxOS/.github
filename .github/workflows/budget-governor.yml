@@ -29,8 +29,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Repos whose runs are scanned AND whose throttle issues are maintained.
-  REPOS: "sux suxrouter sux-fileops claude-config .github"
   # Workflow-name → model classification (case-insensitive extended regexes).
   # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
   # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
@@ -55,6 +53,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Repos whose runs are scanned AND whose throttle issues are maintained: the
+      # managed-repo list (.github/managed-repos.json, single source of truth shared
+      # with pin-consistency.yml/deep-audit.yml — see #233) plus this repo itself.
+      - name: Load managed-repo list
+        id: repos
+        run: |
+          set -euo pipefail
+          all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)
+          all_space=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)
+          echo "all_csv=$all_csv" >> "$GITHUB_OUTPUT"
+          echo "REPOS=$all_space" >> "$GITHUB_ENV"
+
       # `owner:` with no per-repo scoping isn't used — enumerate exactly the repos this
       # job reads runs from and writes issues to (same pattern as pin-consistency).
       - name: Mint org-scoped app token
@@ -64,7 +76,7 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
           owner: SuxOS
-          repositories: sux,suxrouter,sux-fileops,.github
+          repositories: ${{ steps.repos.outputs.all_csv }}
 
       - name: Sweep runs and compute utilization
         id: sweep
