@@ -23,4 +23,9 @@ jobs:
     uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
     with:
       repos: "sux sux-fileops suxlib suxrouter claude-config .github"
+      # Edge deploy health: sux is the only deployed Worker (suxos.net). Its /mcp
+      # endpoint is public-but-auth-gated, so 401 is the healthy signal (same probe
+      # the sux repo's own health.yml uses). Add more `service=url=status` lines here
+      # if suxrouter/sux-fileops ever deploy as their own Workers.
+      edge-smoke-checks: "sux=https://suxos.net/mcp=401"
     secrets: inherit
