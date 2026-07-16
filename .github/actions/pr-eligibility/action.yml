@@ -1,7 +1,7 @@
 name: PR auto-merge eligibility
 description: >-
   Single source of truth for the "safe to auto-merge" CORE predicate shared by
-  automerge.yml, claude-autofix.yml and pr-drain.yml: a conventional-commit
+  claude-autofix.yml and pr-drain.yml: a conventional-commit
   safe-type title OR an eligible label, AND not a breaking-change (!) title.
   Safe types: fix|security|perf|refactor|chore|docs|test|build|ci|revert.
   Eligible labels: automerge|bug|security|chore-safe. Caller-specific structural

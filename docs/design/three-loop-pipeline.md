@@ -1,6 +1,8 @@
 # Three-loop pipeline — design
 
-Status: **Phases 0–3 shipped (2026-07-15) — not yet exercised live (see §6).**
+Status: **Phases 0–3 shipped (2026-07-15), verified live 2026-07-16 — Loops 1 & 2 confirmed
+working end to end; Loop 3's `claude-autofix.yml` rung confirmed BROKEN org-wide
+(SuxOS/.github#260), the rest of Loop 3 mixed (see §6).**
 Supersedes the eligibility/confidence machinery in
 [`pipeline-eligibility-throughput-rework.md`](pipeline-eligibility-throughput-rework.md)
 and [`backlog-pipeline.md`](backlog-pipeline.md) where they conflict. This is the target
@@ -418,12 +420,12 @@ solo tool.
 |---|---|---|---|
 | `fixer.yml` | **keep** | Unchanged — cheap bulk proposer, already Safe-Outputs-scoped. | — |
 | `triage.yml` | **deleted** | 3-tier confidence + purity deleted; binary buildable/needs-human folded into `issue-build`'s cluster pass; standalone Opus triage session retired. | **done** |
-| `issue-build.yml` | **rewritten** | Selects open buildable candidates directly (no `queued-for-build` handoff); one read-only pass judges buildability + clusters by files/concept/time; always builds ≥1; purity + confidence + the automerge/needs-review labeling all gone. | **done** |
+| `issue-build.yml` | **rewritten** | Selects open buildable candidates directly (no `queued-for-build` handoff); one read-only pass judges buildability + clusters by files/concept/time; always builds ≥1; purity + confidence + the automerge/needs-review labeling all gone. | **done, verified live 2026-07-16 (§6)** |
 | `fixer.yml` | **trimmed** | Dropped the `confidence:*` self-assessment from its proposal schema/prompt/filing — just types now. | **done** |
-| `automerge.yml` | **simplify hard** | Eligibility → `not-draft AND not-hold`. Delete safe-type-title regex, label predicate, `author_association` tier, fork branches. | **done** |
-| `pr-auto-update.yml` | **keep** | Already cheap/idempotent on BEHIND; no cap needed (see §3.3's correction). | **done (no change needed)** |
-| `claude-autofix.yml` | **keep** | Already caps attempts + applies `needs-human`; the ladder was implicit but correct. | **done (no change needed)** |
-| `pr-unstick.yml` | **new** | Long-lived unstuck mechanism: periodic, cooldown+cycle-capped retry of free/cheap moves (rerun-failed, update-branch) on `needs-human` PRs. See §3.3. | **done** |
+| `automerge.yml` | **simplify hard** | Eligibility → `not-draft AND not-hold`. Delete safe-type-title regex, label predicate, `author_association` tier, fork branches. | **done, verified live 2026-07-16 (§6)** |
+| `pr-auto-update.yml` | **keep** | Already cheap/idempotent on BEHIND; no cap needed (see §3.3's correction). | **done (no change needed); NOT verified live — could not reach a real BEHIND state in the smoke-test repo (§6)** |
+| `claude-autofix.yml` | **keep** | Already caps attempts + applies `needs-human`; the ladder was implicit but correct. | **verified live 2026-07-16 — CONFIRMED BROKEN, never fires for a PR-branch CI failure (SuxOS/.github#260, §6)** |
+| `pr-unstick.yml` | **new** | Long-lived unstuck mechanism: periodic, cooldown+cycle-capped retry of free/cheap moves (rerun-failed, update-branch) on `needs-human` PRs. See §3.3. | **done, verified live 2026-07-16 (§6)** |
 | `pr-drain.yml` | **trim** | Keep close-stale (now the final backstop `pr-unstick.yml` falls back to). Drop the reconcile pass's re-arm logic if `automerge`'s new simplicity makes it redundant (verify before deleting). `feature` filter already dropped. | partially done; reconcile-redundancy check still open |
 | `pr-watch.yml` | **keep** | `flag-behind: true` stays correct without a queue. | — |
 | `waitch.yml` | **delete** | Merge-queue watcher for a queue we're not adopting. Dead. | **done** |
@@ -433,6 +435,11 @@ solo tool.
 | `deep-audit.yml` / `org-consistency.yml` (filing) | **trimmed** | Stopped filing findings with a `confidence:*` label (the label is retired). | **done** |
 | `ci.yml` `audit.yml` `health.yml` | **keep** | Required checks — the actual merge gate. Unchanged. | — |
 | `pin-consistency.yml` `self-check.yml` `skill-sync.yml` `pipeline-utilization.yml` `claude.yml` | **keep** | Orthogonal to the three loops. Unchanged. | — |
+
+**Addendum (2026-07-15):** issue #189's resolution — the self-hosted repo (`.github`
+itself) now runs its own Loop 3 instance via `self-pr-auto-update.yml` /
+`self-pr-watch.yml` / `self-pr-drain.yml` (commit `358feed`, PR #191) — isn't reflected
+in the table above; those three self-hosted stub workflows aren't listed there.
 
 Net across Phases 0–3: **2 deleted (`waitch`, `triage`), 1 added (`pr-unstick`), 2
 simplified hard (`automerge`, `issue-build`), 4 trimmed (`fixer`, `deep-audit`,
@@ -451,42 +458,133 @@ Each phase is independently shippable and revertible. Land behind a caller repo'
 
 - **Phase 0 — docs & threat model. ✅ done.** Landed this design; corrected the "PUBLIC"
   assumption in the older docs and in `triage.yml`/`automerge.yml` comments.
-- **Phase 1 — Loop 2 simplify. ✅ done.** Collapsed `automerge.yml` eligibility to
-  `not-draft AND not-hold` (deleted the safe-type-title regex, label predicate,
-  `author_association`/fork branches, and the now-unused `pr-eligibility` call in this
-  workflow); deleted `waitch.yml` and its scaffold/README references.
-  `security-review.yml` was checked and found already correct — it runs on every
-  non-draft PR regardless of author, so there was no fork/author branch to strip there.
-  **Not yet verified live** (needs a real green/held PR in a caller repo — see below).
-- **Phase 2 — Loop 3 ladder + long-lived unstick. ✅ done.** Traced the existing
-  `pr-auto-update.yml` → `claude-autofix.yml` sequence and found it was already a correct,
-  self-bounding ladder (see §3.3's correction) — no changes needed there. Built the piece
-  that was actually missing: `pr-unstick.yml`, a daily cooldown+cycle-capped sweep that
-  retries `needs-human` PRs with free/cheap moves (rerun-failed, update-branch) before
-  falling back to the operator or `pr-drain.yml`'s close-stale backstop. Wired into
-  `scaffold-caller.sh` and the README. **Not yet verified live.**
-- **Phase 3 — Loop 1 collapse. ✅ done.** Deleted `triage.yml` and the entire
-  `confidence:*` taxonomy (dead once auto-merge stopped reading labels in Phase 1). Rewrote
-  `issue-build.yml` to select open buildable candidates directly, judge buildability +
-  cluster in one read-only pass (deterministic apply preserves Safe Outputs), and always
-  build ≥1 — no purity gate, no waiting. Stripped confidence from `fixer.yml`,
-  `deep-audit.yml`, and `org-consistency.yml`'s filing; retuned `budget-governor.yml`'s
-  model regexes (Opus now only in the deep passes). **Not yet exercised live.**
+- **Phase 1 — Loop 2 simplify. ✅ done, ✅ verified live 2026-07-16.** Collapsed
+  `automerge.yml` eligibility to `not-draft AND not-hold` (deleted the safe-type-title
+  regex, label predicate, `author_association`/fork branches, and the now-unused
+  `pr-eligibility` call in this workflow); deleted `waitch.yml` and its scaffold/README
+  references. `security-review.yml` was checked and found already correct — it runs on
+  every non-draft PR regardless of author, so there was no fork/author branch to strip
+  there.
+  **Live evidence (SuxOS/sux-fileops):** opened a green, non-draft, non-held PR
+  ([#102](https://github.com/SuxOS/sux-fileops/pull/102)) — `automerge.yml` armed native
+  auto-merge and it merged unattended
+  ([run](https://github.com/SuxOS/sux-fileops/actions/runs/29490664999)). On a second PR
+  ([#103](https://github.com/SuxOS/sux-fileops/pull/103)), added `hold` — auto-merge
+  refused to arm (`autoMergeRequest: null` the whole time it was held); removed `hold` —
+  it armed and merged within a minute. Eligibility is confirmed to be exactly
+  `not-draft AND not-hold`, no author-trust gate. **Bug found + fixed along the way:**
+  sux-fileops was missing the `hold` (and `needs-human`/`feature`/`chore-safe`/`keep`/
+  `self-improve`) repo labels entirely — `security-review.yml`'s
+  `gh pr edit --add-label hold` was silently failing every time (`'hold' not found`,
+  swallowed by the documented `2>/dev/null || true` fail-open), so the one write-gate
+  this whole design is built on (§2.3) had never actually applied to a single PR in this
+  repo. Fixed by provisioning the labels per README's own "Required labels" list — not a
+  workflow-code bug, a caller-repo setup gap the fail-open design makes invisible until
+  someone checks for it.
+- **Phase 2 — Loop 3 ladder + long-lived unstick. ✅ done, ⚠️ partially verified live,
+  one step CONFIRMED BROKEN 2026-07-16.** Traced the existing `pr-auto-update.yml` →
+  `claude-autofix.yml` sequence and found it was already a correct, self-bounding ladder
+  (see §3.3's correction) — no changes needed there. Built the piece that was actually
+  missing: `pr-unstick.yml`, a daily cooldown+cycle-capped sweep that retries
+  `needs-human` PRs with free/cheap moves (rerun-failed, update-branch) before falling
+  back to the operator or `pr-drain.yml`'s close-stale backstop. Wired into
+  `scaffold-caller.sh` and the README.
+  **`pr-unstick.yml`: verified live.** Labelled `needs-human` on
+  [sux-fileops#104](https://github.com/SuxOS/sux-fileops/pull/104), manually dispatched
+  the caller
+  ([run](https://github.com/SuxOS/sux-fileops/actions/runs/29490560903)) — it re-ran the
+  failed check, rebased the branch onto main, removed `needs-human`, and upserted a
+  marker comment (`cycle=1`, timestamp) exactly as designed. **Finding:** sux-fileops's
+  `pr-unstick.yml` caller stub exposes `workflow_dispatch` as a bare trigger but does
+  **not** forward `cooldown-hours`/`max-cycles` as dispatch inputs — they're hardcoded in
+  the `with:` block, so a tester can't shorten the 24h cooldown for a repeat-cycle test
+  without editing the caller file. Not fixed in this pass (cosmetic — the one-shot test
+  above didn't need it); worth adding `workflow_dispatch.inputs` that fall through to
+  `with:` if someone needs to exercise cycle 2/3 live.
+  **`claude-autofix.yml`: verified live, and it does NOT work.** Opened a PR
+  ([sux-fileops#104](https://github.com/SuxOS/sux-fileops/pull/104)) with a real,
+  trivially-fixable TypeScript error and confirmed CI completed `conclusion: failure`
+  three separate times over ~10 minutes while `claude-autofix.yml` was enabled.
+  `claude-autofix.yml`'s `workflow_run: workflows: ["CI"]` trigger fired **zero** times —
+  not even a job-filtered "skipped" run entry. Checked its entire run history across all
+  three calling repos (`sux`, `suxrouter`, `sux-fileops`): every single historical run's
+  `head_branch` is `main`; it has never once fired for a PR branch, org-wide. This
+  directly contradicts this section's own "already caps attempts + applies
+  `needs-human`; the ladder was implicit but correct" claim — the autofix rung of the
+  ladder has never actually activated anywhere it's deployed. Filed as
+  [SuxOS/.github#260](https://github.com/SuxOS/.github/issues/260) with full evidence and
+  a suggested fix direction (replace the cross-workflow `workflow_run` listener with
+  same-workflow `workflow_call` job-chaining from each caller's `ci.yml`); not fixed here
+  because a trigger-mechanism change needs its own smoke-test cycle, which this session
+  didn't have runway left for.
+  **`pr-auto-update.yml` (BEHIND case): could not verify live.** sux-fileops's branch
+  ruleset has `strict_required_status_checks_policy: false`, so GitHub's
+  `mergeStateStatus` never reports `BEHIND` in this repo regardless of how far a PR's
+  base has drifted — the design's own premise for this step ("when branch protection is
+  strict…", §3.2) doesn't hold for the chosen smoke-test repo. Advancing `main` further
+  (e.g. a direct push, as originally suggested for this test) wouldn't have produced a
+  `BEHIND` state either, and would have violated sux-fileops's own CLAUDE.md ("never
+  commit to `main`"), so it was skipped rather than forced. Indirect partial evidence:
+  `pr-unstick.yml`'s `gh pr update-branch` call above did report "PR branch updated" for
+  #104 after two unrelated merges landed on main, i.e. the literal `update-branch` git
+  operation works — just not exercised via the strict-BEHIND code path `pr-auto-update`
+  targets. Needs a caller repo with a strict ruleset to verify that path specifically.
+- **Phase 3 — Loop 1 collapse. ✅ done, ✅ verified live end-to-end 2026-07-16.** Deleted
+  `triage.yml` and the entire `confidence:*` taxonomy (dead once auto-merge stopped
+  reading labels in Phase 1). Rewrote `issue-build.yml` to select open buildable
+  candidates directly, judge buildability + cluster in one read-only pass (deterministic
+  apply preserves Safe Outputs), and always build ≥1 — no purity gate, no waiting.
+  Stripped confidence from `fixer.yml`, `deep-audit.yml`, and `org-consistency.yml`'s
+  filing; retuned `budget-governor.yml`'s model regexes (Opus now only in the deep
+  passes).
+  **Live evidence (SuxOS/sux-fileops):** filed two small, real, unrelated issues
+  ([#105](https://github.com/SuxOS/sux-fileops/issues/105),
+  [#106](https://github.com/SuxOS/sux-fileops/issues/106)), manually dispatched
+  `issue-build.yml`
+  ([run](https://github.com/SuxOS/sux-fileops/actions/runs/29490280180)). The `select`
+  step's own log: `selected tier=low count=2 points=4/6 sensedOpus=false issues=[105,106]`
+  — both issues picked up with no confidence/purity gate, correctly tiered `low`
+  (neither is `priority:high`/`security`), packed by `effort:*` points against the
+  budget, sonnet model (no sensed-opus escalation). The `build` job opened one PR closing
+  both issues ([#107](https://github.com/SuxOS/sux-fileops/pull/107)), which then cleared
+  Loop 2 and auto-merged — the full Loop 1 → Loop 2 chain confirmed working end to end on
+  live GitHub API responses. Also observed, independent of this session's own test: two
+  pre-existing bot PRs ([#98](https://github.com/SuxOS/sux-fileops/pull/98),
+  [#100](https://github.com/SuxOS/sux-fileops/pull/100)) from the repo's normal schedule
+  runs, each batch-closing 2–3 issues, confirming this wasn't a one-off. **Bug found +
+  fixed:** sux-fileops's `issue-build.yml` caller stub additionally had an
+  `issues: types: [labeled]` trigger wired up, contradicting the reusable's own header
+  comment ("batched schedule + manual dispatch — NOT an `issues:` trigger; per-event
+  fan-out caused the 77-parallel-session incident, #140"). Confirmed via run history this
+  had actually fired real unscheduled builds on individual labeled issues. Removed in
+  [sux-fileops#103](https://github.com/SuxOS/sux-fileops/pull/103).
 
-**Before this is truly "shipped," not just "written":** actionlint + YAML-parse pass on
-every touched/new file and the invariants test is green, but none of Phases 1–3 have been
-exercised against a real PR/issue in a caller repo yet — no green PR to confirm auto-merge
-still arms, no held PR to confirm it doesn't, no `needs-human` PR to confirm
-`pr-unstick.yml`'s marker upsert behaves, and no real backlog to confirm the rewritten
-`issue-build` selects/clusters/claims correctly against live GitHub API responses (label
-races, the reaper, the candidate query). Per this repo's own CLAUDE.md: land behind a
-caller's `workflow_dispatch` smoke test before these hit `schedule` org-wide. The nightly
-`deep-audit` + weekly `org-consistency` Opus passes are the compensating control if a
-per-PR gate misses something.
+**Status: no longer "written but unverified."** Loop 2 (green→merge, hold gate) and Loop
+1 (collate & build, always-build-≥1, no purity gate) are now verified live end-to-end,
+with one real bug found and fixed in each (a caller-repo label-provisioning gap, and a
+stray per-event trigger). Loop 3 is mixed: the BEHIND→rebase and stuck→unstick rungs work
+(one fully verified, one structurally unreachable in the chosen test repo but indirectly
+evidenced); **the red→autofix rung (`claude-autofix.yml`) is confirmed non-functional
+everywhere it's deployed** (SuxOS/.github#260) — this is the one load-bearing gap left
+before Loop 3 can be called done. Evidence trail: SuxOS/sux-fileops PRs #102, #103, #104,
+#107; issues #105, #106; SuxOS/.github#260. The verification session found the pipeline's
+automation workflows already disabled in sux-fileops when it started (likely a concurrent,
+unrelated deprecation/absorption effort on that repo — a `docs/deprecation-notice`
+worktree appeared there mid-session) and temporarily re-enabled exactly the five workflows
+needed for these tests, restoring the original disabled state afterward; this doc's
+verification therefore reflects a point-in-time smoke test, not an assertion that the
+pipeline is currently live-armed in that repo. The nightly `deep-audit` + weekly
+`org-consistency` Opus passes remain the compensating control if a per-PR gate misses
+something.
 
 Rollback for any phase: `git revert` the phase's PR. Because callers pin
 `uses: …@main`, a revert propagates to every caller on the next run — same blast radius
 that makes this repo powerful makes the undo complete.
+
+**Addendum (2026-07-15):** issue #189 (self-hosted repo needed its own Loop 3 rebase/
+watch/drain backstop — see README § Self-hosted) was resolved after this phase log was
+written, via `self-pr-auto-update.yml` / `self-pr-watch.yml` / `self-pr-drain.yml`
+(commit `358feed`, PR #191). Not captured as its own phase above.
 
 ---
 

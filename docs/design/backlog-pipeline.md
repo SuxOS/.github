@@ -1,5 +1,11 @@
 # Backlog pipeline — propose → investigate → build → merge
 
+> **Superseded (2026-07-15) by [three-loop-pipeline.md](three-loop-pipeline.md).** That
+> design deleted `triage.yml` and the `confidence:high|medium|low` label taxonomy this doc
+> describes as current — issues now go straight from proposal to build, with no separate
+> Opus investigate stage or `queued-for-build`/`triaged` handoff. Read the three-loop design
+> for current intent; this remains as the changelog of the pipeline's earlier shape.
+
 The org-wide autonomous backlog pipeline: it turns a repo's latent work into merged
 (or human-staged) PRs with little-to-no hand-holding. Reusable workflows live in
 `SuxOS/.github/.github/workflows/`; each repo opts in with thin caller stubs.

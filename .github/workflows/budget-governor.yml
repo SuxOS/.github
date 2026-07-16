@@ -8,7 +8,14 @@ name: Budget governor
 #      workflow name. Same caveat as pipeline-utilization.yml: wall-clock is a PROXY
 #      that correlates with subscription spend — it is not a bill. Calibrate the
 #      thresholds against claude.ai's usage page (see the design doc's ritual).
-#   3. Upsert one org-wide report issue in THIS repo, and a per-repo "Autonomy throttle"
+#   3. Simulate a token bucket (capacity = budget, continuous linear refill) over the
+#      same trailing-window events, per tier, and derive the throttle level from the
+#      bucket's *current available headroom* rather than the raw trailing-window sum.
+#      See docs/design/budget-governor-reconciliation.md for why (cliff-edge sum vs.
+#      smoothed bucket) and the empirical comparison that motivated it. No new
+#      persisted state: the bucket is replayed fresh each run from the same event
+#      list the sweep already fetches.
+#   4. Upsert one org-wide report issue in THIS repo, and a per-repo "Autonomy throttle"
 #      issue (body line `level: green|yellow|red`) in every managed repo. Scheduled
 #      Claude workloads read that signal via the check-throttle composite; merge gates
 #      never do. Throttle issues labeled `throttle-manual` are left untouched.
@@ -29,8 +36,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Repos whose runs are scanned AND whose throttle issues are maintained.
-  REPOS: "sux suxrouter sux-fileops .github"
   # Workflow-name → model classification (case-insensitive extended regexes).
   # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
   # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
@@ -55,6 +60,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Repos whose runs are scanned AND whose throttle issues are maintained: the
+      # managed-repo list (.github/managed-repos.json, single source of truth shared
+      # with pin-consistency.yml/deep-audit.yml — see #233) plus this repo itself.
+      - name: Load managed-repo list
+        id: repos
+        run: |
+          set -euo pipefail
+          all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)
+          all_space=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)
+          echo "all_csv=$all_csv" >> "$GITHUB_OUTPUT"
+          echo "REPOS=$all_space" >> "$GITHUB_ENV"
+
       # `owner:` with no per-repo scoping isn't used — enumerate exactly the repos this
       # job reads runs from and writes issues to (same pattern as pin-consistency).
       - name: Mint org-scoped app token
@@ -64,7 +83,7 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
           owner: SuxOS
-          repositories: sux,suxrouter,sux-fileops,.github
+          repositories: ${{ steps.repos.outputs.all_csv }}
 
       - name: Sweep runs and compute utilization
         id: sweep
@@ -86,35 +105,82 @@ jobs:
               <<<"[$all, $runs]")
           done
 
-          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" '
-            [ .[] | select(.status == "completed")
-              | select(.workflowName | test($cre; "i"))
-              | . + {mins: (((.updatedAt | fromdateiso8601) - (.startedAt | fromdateiso8601)) / 60),
-                     tier: (if (.workflowName | test($ore; "i")) then "opus" else "sonnet" end)} ]
-            | { opus_min:  ([.[] | select(.tier == "opus")  | .mins] | add // 0 | floor),
-                total_min: ([.[] | .mins] | add // 0 | floor),
-                by_repo_wf: (group_by({r: .repo, w: .workflowName})
+          # In-progress/queued runs are counted too (using elapsed-so-far, `now` -
+          # startedAt) — a wedged run must show up in the rollup while it's still
+          # burning minutes, not only retroactively once it finally completes.
+          #
+          # Throttle level is driven by a token-bucket simulation, not a raw
+          # trailing-window sum. `opus_min`/`total_min` below are still the plain
+          # trailing-${LOOKBACK_DAYS}-day sum (kept for the report table — real
+          # diagnostic value, "how much ran this week"). `opus_avail_min`/
+          # `total_avail_min` are what actually sets `level`: each tier's events are
+          # replayed in time order as discrete debits against a bucket of capacity
+          # `<TIER>_BUDGET_MIN` that continuously refills at `budget / (LOOKBACK_DAYS
+          # * 1440)` tokens/minute (i.e. spend at exactly the budgeted average rate
+          # never drains it) — no persisted state, the whole trajectory is
+          # recomputed from this run's event list every time. This makes a burst
+          # register immediately (same as before) but recover continuously as the
+          # bucket refills, instead of staying pinned at whatever level it hit until
+          # the offending runs physically age out of the fixed trailing window (up
+          # to a full ${LOOKBACK_DAYS}-day stall after a single burst). See
+          # docs/design/budget-governor-reconciliation.md for the empirical
+          # comparison and rationale; the two `<TIER>_BUDGET_MIN`/`YELLOW_FRACTION`
+          # inputs keep their existing meaning and calibration ritual unchanged.
+          rollup=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg ore "$OPUS_WF_RE" \
+              --arg since "$since" --argjson now "$(date -u +%s)" \
+              --argjson opusBudget "$OPUS_BUDGET_MIN" --argjson totalBudget "$TOTAL_BUDGET_MIN" \
+              --argjson lookbackDays "$LOOKBACK_DAYS" --argjson yellowFrac "$YELLOW_FRACTION" '
+            def bucket_avail($capacity; $refillPerMin; $windowMin; $evs):
+              ($evs | sort_by(.atMin)) as $evs
+              | (reduce $evs[] as $e
+                   ({level: $capacity, lastMin: 0};
+                     (.level + (($e.atMin - .lastMin) * $refillPerMin)) as $refilled
+                     | { level: ([$capacity, ([$refilled - $e.cost, 0] | max)] | min),
+                         lastMin: $e.atMin })
+                ) as $s
+              | ([$capacity, ($s.level + (($windowMin - $s.lastMin) * $refillPerMin))] | min);
+
+            ($since | fromdateiso8601) as $sinceEpoch
+            | (($now - $sinceEpoch) / 60) as $windowMin
+            | [ .[] | select(.startedAt != null)
+                | select(.workflowName | test($cre; "i"))
+                | ((if .status == "completed" then (.updatedAt | fromdateiso8601) else $now end)) as $endEpoch
+                | . + {
+                    mins: (($endEpoch - (.startedAt | fromdateiso8601)) / 60),
+                    atMin: ([0, (($endEpoch - $sinceEpoch) / 60)] | max),
+                    tier: (if (.workflowName | test($ore; "i")) then "opus" else "sonnet" end)
+                  } ] as $events
+            | { opus_min:  ([$events[] | select(.tier == "opus")  | .mins] | add // 0 | floor),
+                total_min: ([$events[] | .mins] | add // 0 | floor),
+                opus_avail_min: (bucket_avail($opusBudget; ($opusBudget / ($lookbackDays * 1440)); $windowMin;
+                                    [$events[] | select(.tier == "opus") | {atMin, cost: .mins}]) | floor),
+                total_avail_min: (bucket_avail($totalBudget; ($totalBudget / ($lookbackDays * 1440)); $windowMin;
+                                    [$events[] | {atMin, cost: .mins}]) | floor),
+                by_repo_wf: ($events | group_by({r: .repo, w: .workflowName})
                   | map({repo: .[0].repo, workflow: .[0].workflowName, tier: .[0].tier,
                          runs: length, mins: ([.[] | .mins] | add | floor),
                          failed: ([.[] | select(.conclusion == "failure")] | length)})
-                  | sort_by(-.mins)) }' <<<"$all")
+                  | sort_by(-.mins)) }
+            | . + { level: (if (.opus_avail_min <= ($opusBudget * (1 - $yellowFrac)))
+                               or (.total_avail_min <= ($totalBudget * (1 - $yellowFrac)))
+                            then (if (.opus_avail_min <= 0) or (.total_avail_min <= 0) then "red" else "yellow" end)
+                            else "green" end) }' <<<"$all")
 
           opus_min=$(jq -r '.opus_min' <<<"$rollup")
           total_min=$(jq -r '.total_min' <<<"$rollup")
+          opus_avail_min=$(jq -r '.opus_avail_min' <<<"$rollup")
+          total_avail_min=$(jq -r '.total_avail_min' <<<"$rollup")
+          level=$(jq -r '.level' <<<"$rollup")
 
-          level=green
-          yellow_opus=$(awk -v b="$OPUS_BUDGET_MIN" -v f="$YELLOW_FRACTION" 'BEGIN{print int(b*f)}')
-          yellow_total=$(awk -v b="$TOTAL_BUDGET_MIN" -v f="$YELLOW_FRACTION" 'BEGIN{print int(b*f)}')
-          if [ "$opus_min" -ge "$yellow_opus" ] || [ "$total_min" -ge "$yellow_total" ]; then level=yellow; fi
-          if [ "$opus_min" -ge "$OPUS_BUDGET_MIN" ] || [ "$total_min" -ge "$TOTAL_BUDGET_MIN" ]; then level=red; fi
-
-          echo "opus_min=$opus_min total_min=$total_min level=$level"
+          echo "opus_min=$opus_min total_min=$total_min opus_avail_min=$opus_avail_min total_avail_min=$total_avail_min level=$level"
           {
             echo "rollup<<EOF_GOV_ROLLUP"
             printf '%s\n' "$rollup"
             echo "EOF_GOV_ROLLUP"
             echo "opus_min=$opus_min"
             echo "total_min=$total_min"
+            echo "opus_avail_min=$opus_avail_min"
+            echo "total_avail_min=$total_avail_min"
             echo "level=$level"
           } >> "$GITHUB_OUTPUT"
 
@@ -124,6 +190,8 @@ jobs:
           ROLLUP: ${{ steps.sweep.outputs.rollup }}
           OPUS_MIN: ${{ steps.sweep.outputs.opus_min }}
           TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
+          OPUS_AVAIL_MIN: ${{ steps.sweep.outputs.opus_avail_min }}
+          TOTAL_AVAIL_MIN: ${{ steps.sweep.outputs.total_avail_min }}
           LEVEL: ${{ steps.sweep.outputs.level }}
         run: |
           set -euo pipefail
@@ -132,9 +200,11 @@ jobs:
           body=$(printf '%s\n' \
             "Auto-maintained by budget-governor.yml. Last updated $(date -u '+%Y-%m-%d %H:%M UTC'). Window: trailing ${LOOKBACK_DAYS} days." \
             "" \
-            "**Throttle level: \`${LEVEL}\`** — opus-tier ${OPUS_MIN}/${OPUS_BUDGET_MIN} runner-min, all Claude workflows ${TOTAL_MIN}/${TOTAL_BUDGET_MIN} runner-min (yellow at ${YELLOW_FRACTION} of either budget)." \
+            "**Throttle level: \`${LEVEL}\`** — token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, all Claude workflows ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (yellow when either drops to ${YELLOW_FRACTION} capacity or below, red at 0)." \
             "" \
-            "Wall-clock runner minutes are a **proxy** for subscription spend, not a bill — calibrate the budgets against claude.ai's usage page per docs/design/budget-and-cadence.md." \
+            "Raw trailing-${LOOKBACK_DAYS}-day sum (diagnostic only, does not drive the level): opus-tier ${OPUS_MIN} runner-min, all Claude workflows ${TOTAL_MIN} runner-min." \
+            "" \
+            "Wall-clock runner minutes are a **proxy** for subscription spend, not a bill — calibrate the budgets against claude.ai's usage page per docs/design/budget-and-cadence.md. The bucket capacity/refill rate derive from the same \`*_BUDGET_MIN\`/\`YELLOW_FRACTION\` inputs as before; see docs/design/budget-governor-reconciliation.md for why the level now comes from bucket headroom instead of the raw sum." \
             "" \
             "| Repo | Workflow | Tier | Runs | Minutes | Failed |" \
             "|------|----------|------|-----:|--------:|-------:|" \
@@ -161,13 +231,15 @@ jobs:
           LEVEL: ${{ steps.sweep.outputs.level }}
           OPUS_MIN: ${{ steps.sweep.outputs.opus_min }}
           TOTAL_MIN: ${{ steps.sweep.outputs.total_min }}
+          OPUS_AVAIL_MIN: ${{ steps.sweep.outputs.opus_avail_min }}
+          TOTAL_AVAIL_MIN: ${{ steps.sweep.outputs.total_avail_min }}
         run: |
           set -euo pipefail
           stamp=$(date -u '+%Y-%m-%d %H:%M UTC')
           body=$(printf '%s\n' \
             "level: ${LEVEL}" \
             "" \
-            "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Trailing-7-day proxy spend: opus-tier ${OPUS_MIN}/${OPUS_BUDGET_MIN} runner-min, total ${TOTAL_MIN}/${TOTAL_BUDGET_MIN} runner-min. To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
+            "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, total ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (raw trailing-7-day sum: opus-tier ${OPUS_MIN}, total ${TOTAL_MIN}). To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
           for r in $REPOS; do
             # gh issue create/edit --label errors on a label the repo doesn't have yet —
             # ensure it exists first (idempotent). Bookkeeping issues like this one carry
@@ -176,7 +248,12 @@ jobs:
             gh label create tracking --repo "SuxOS/$r" --color ededed \
               --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
 
-            found=$(gh issue list --repo "SuxOS/$r" --state open --limit 100 --json number,title,labels \
+            # `--search` narrows server-side to matching issues instead of paging through
+            # every open issue in the repo, so this stays correct past the old --limit 100
+            # cap (#247) without needing a pagination loop. `in:title` still returns
+            # partial/fuzzy title matches, so the exact-match select below is required.
+            found=$(gh issue list --repo "SuxOS/$r" --state open --search "\"Autonomy throttle\" in:title" \
+                --limit 100 --json number,title,labels \
               | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
             if [ -n "$found" ]; then
               num=$(jq -r '.number' <<<"$found")

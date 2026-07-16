@@ -43,9 +43,12 @@ runs:
 
         # Fail-open: a lookup failure leaves count=0 → features_ok=true. The org bot
         # surfaces as "suxbot" in the PR author login in either the app/suxbot or
-        # suxbot[bot] form, so match the substring rather than an exact login.
+        # suxbot[bot] form, so match the substring rather than an exact login. A
+        # deleted/ghost GitHub account reports `author.login: null` — guard it before
+        # `test()` (which throws on non-string input) so one null-author PR can't crash
+        # the whole pipeline and silently zero the count for every OTHER open PR too.
         count=$(gh pr list --repo "$REPO" --state open --limit 100 --json author 2>/dev/null \
-          | jq '[.[] | select(.author.login | test("suxbot"))] | length') || true
+          | jq '[.[] | select(.author.login != null) | select(.author.login | test("suxbot"))] | length') || true
         count=${count:-0}
 
         features_ok=true

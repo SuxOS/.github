@@ -1,10 +1,23 @@
 name: PR drain — close-stale + reconcile (reusable)
 
-# Two drain gaps: pr-auto-update.yml handles the rebase-behind limb; this adds:
+# Three drain gaps: pr-auto-update.yml handles the rebase-behind limb; this adds:
 #   CLOSE-STALE — bot PRs (`self-improve`) and human-punted ones (`needs-human`) idle
 #     past STALE_DAYS get a heads-up comment and are closed. Opt out with `hold`/`keep`.
+#   DIRTY-CONFLICT — a builder PR (issue-build.yml, head branch `bot/issue-build-*`)
+#     with a REAL merge conflict (`mergeStateStatus == DIRTY`) has no rebase loop that
+#     resolves it: pr-auto-update.yml only fast-forwards a clean-but-behind branch,
+#     claude-autofix.yml targets failing CI (a conflict isn't a check-run failure so
+#     it's skipped), and pr-unstick.yml only watches `needs-human`-labelled PRs. Left
+#     alone it sits until CLOSE-STALE's stale-days threshold (days), orphaning
+#     issue-build's capacity the whole time (issue-build skips new batches while
+#     builder PRs are open) — see SuxOS/.github#237 / #239. This closes it immediately
+#     and strips `building` from its linked issues so they requeue for a fresh build on
+#     current main, which resolves the conflict in the overwhelming majority of cases
+#     (they arise from parallel drains touching the same file, not a real semantic
+#     clash).
 #   RECONCILE — a green, mergeable PR eligible under the same predicate automerge.yml
-#     uses but never armed gets `gh pr merge --auto --squash`. Native auto-merge still
+#     uses (not-draft, not-hold, plus the shared pr-eligibility action) but never
+#     armed gets `gh pr merge --auto --squash`. Native auto-merge still
 #     gates the actual merge on CI + branch protection — this only ARMS it. Before
 #     arming, this shares automerge.yml's branch-protection assertion (the
 #     assert-branch-protection composite action) so it never re-arms auto-merge when
@@ -90,24 +103,10 @@ jobs:
           fi
 
           if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
-            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt); then
+            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt,headRefName); then
             echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
             exit 1
           fi
-
-          # gh's --json flag has no authorAssociation field for PRs (it does for
-          # issues, but not pulls) — the REST API does, so fetch it per PR and merge
-          # it in rather than dropping the trust check downstream relies on. Also grab
-          # the author login: the org bot (suxbot[bot]) is a first-class trusted author
-          # matched by login, independent of whatever association an App-token PR resolves to.
-          assoc=$(printf '%s' "$prs" | jq -r '.[].number' | while read -r n; do
-            gh api "repos/${GH_REPO}/pulls/$n" -q '{number: .number, authorAssociation: .author_association, login: .user.login}' 2>/dev/null
-          done | jq -s '.')
-          prs=$(jq -c --argjson assoc "$assoc" '
-            ($assoc | INDEX(.number)) as $idx
-            | map(. + {authorAssociation: ($idx[.number|tostring].authorAssociation // "NONE"),
-                       authorLogin: ($idx[.number|tostring].login // "")})
-          ' <<<"$prs")
 
           stale=$(( STALE_DAYS * 86400 ))
 
@@ -146,24 +145,76 @@ jobs:
             sleep 2
           done
 
+          # ── DIRTY-CONFLICT ───────────────────────────────────────────────────────────
+          # Builder PRs only (head branch bot/issue-build-*) — a human or other bot PR
+          # with a real conflict is left for its author, not closed out from under them.
+          # `hold` still opts a PR out, same as CLOSE-STALE.
+          dirty=$(printf '%s' "$prs" | jq -r '
+            [.[] | select(.isDraft | not)
+              | select(.headRefName | startswith("bot/issue-build-"))
+              | select(.mergeStateStatus == "DIRTY")
+              | select(([.labels[].name] | index("hold")) | not)
+              | .number] | .[]')
+
+          echo "DIRTY-conflict candidate set: $(printf '%s' "$dirty" | tr '\n' ' ')"
+
+          for n in $dirty; do
+            echo "::group::DIRTY builder PR #$n"
+            # Re-read this PR's live state; skip if it no longer qualifies (a concurrent
+            # bot may have already rebased/closed it, or a human added `hold`).
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeStateStatus 2>/dev/null) \
+              || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
+            if ! printf '%s' "$live" | jq -e '
+                (.isDraft | not)
+                and (.headRefName | startswith("bot/issue-build-"))
+                and (.mergeStateStatus == "DIRTY")
+                and (([.labels[].name] | index("hold")) | not)' >/dev/null; then
+              echo "#$n no longer DIRTY-eligible (state changed) — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would close #$n (DIRTY builder PR) and requeue its linked issues"
+              echo "::endgroup::"
+              continue
+            fi
+            gh pr comment "$n" --body "🧹 Closing — this builder PR has a real merge conflict with main (not just behind), and no existing loop resolves that short of a human. Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#237 / #239." 2>/dev/null || true
+            gh pr close "$n" && echo "closed #$n (DIRTY)" || echo "::warning::could not close #$n (see gh error above)"
+
+            # Strip `building` from every issue this PR claimed via a closing keyword, so
+            # issue-build.yml's selector picks them up on its next run instead of waiting
+            # on the reaper's REAP_STALE_HOURS backstop.
+            nums=$(printf '%s' "$live" | jq -r '.body // ""' \
+              | grep -ioE '\b(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+              | grep -oE '[0-9]+' || true)
+            for num in $nums; do
+              gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \
+                || echo "::warning::could not strip building from #$num"
+            done
+            echo "::endgroup::"
+            sleep 2
+          done
+
           # ── RECONCILE ────────────────────────────────────────────────────────────────
           # RETAINED (three-loop-pipeline.md §5 open item, verified 2026-07-15): NOT redundant
           # with automerge.yml. automerge.yml is event-driven (pull_request_target) — it can't
           # self-heal a PR that reached green with no triggering event (missed/failed arm event,
           # PR predating the workflow). This periodic sweep is the only thing that arms those;
           # pr-watch.yml flags exactly that "green + auto-merge not armed" state as stuck.
-          # Structural filter only (green, unarmed, trusted, not held/feature). The
+          # Structural filter only (green, unarmed, not held/feature). The
           # drift-prone safe-type/label/breaking core predicate is applied by the
           # shared pr-eligibility action in the next step.
           # `feature` is intentionally NOT excluded — a feature PR reconciles iff it satisfies
-          # the shared eligibility predicate (next step), same bar as any other PR. Trust the
-          # org bot by login too, alongside association-trusted humans.
+          # the shared eligibility predicate (next step), same bar as any other PR.
+          # No author-trust check: automerge.yml deliberately dropped its
+          # authorAssociation/login gate (private repo, no anonymous-fork attacker —
+          # see automerge.yml's own predicate comment), so RECONCILE mirrors that
+          # not-draft/not-hold predicate rather than a stricter, stale one.
           candidates=$(printf '%s' "$prs" | jq -c '
             [ .[]
               | select(.isDraft | not)
               | select(.mergeStateStatus == "CLEAN")
               | select(.autoMergeRequest == null)
-              | select((.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) or (.authorLogin == "suxbot[bot]"))
               | ([.labels[].name]) as $l
               | select(($l | index("hold")) | not)
               | {number, title, labels: [.labels[].name]} ]')
@@ -196,13 +247,12 @@ jobs:
           set -uo pipefail
 
           # shellcheck disable=SC2016  # jq program; $l is a jq var, not shell
-          # Mirrors the batch filter: `feature` is not excluded, and the org bot is trusted by
-          # login alongside association-trusted authors.
+          # Mirrors the batch filter: `feature` is not excluded and there's no
+          # author-trust gate — see the batch filter's comment above for why.
           structural_filter='
             select(.isDraft | not)
             | select(.mergeStateStatus == "CLEAN")
             | select(.autoMergeRequest == null)
-            | select((.authorAssociation as $a | ["OWNER","MEMBER","COLLABORATOR"] | index($a)) or (.authorLogin == "suxbot[bot]"))
             | ([.labels[].name]) as $l
             | select(($l | index("hold")) | not)'
 
@@ -216,10 +266,7 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            meta=$(gh api "repos/${GH_REPO}/pulls/$n" -q '{assoc: .author_association, login: .user.login}' 2>/dev/null || echo '{"assoc":"NONE","login":""}')
-            assoc=$(printf '%s' "$meta" | jq -r '.assoc // "NONE"')
-            login=$(printf '%s' "$meta" | jq -r '.login // ""')
-            if ! printf '%s' "$pr_json" | jq -e --arg assoc "$assoc" --arg login "$login" '. + {authorAssociation: $assoc, authorLogin: $login} | '"$structural_filter" >/dev/null; then
+            if ! printf '%s' "$pr_json" | jq -e "$structural_filter" >/dev/null; then
               echo "#$n no longer arm-eligible (state changed) — skipping"
               echo "::endgroup::"
               continue

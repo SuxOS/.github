@@ -129,6 +129,7 @@ permissions:
   pull-requests: write
   issues: write
   actions: read
+  id-token: write
 
 # NO top-level concurrency: the whole run must NOT serialize, or parallel batches can't run.
 # Only `select` (the claim step) is serialized — see its job-level concurrency below — so two

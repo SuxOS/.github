@@ -30,12 +30,24 @@ env:
   MAX_TURNS: "25"
 
 jobs:
+  managed-repos:
+    # Single source of truth for the audit matrix below — see .github/managed-repos.json.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repos: ${{ steps.load.outputs.repos }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: load
+        run: echo "repos=$(jq -c '.repos' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
   audit:
+    needs: managed-repos
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        repo: [sux, suxrouter, sux-fileops]
+        repo: ${{ fromJSON(needs.managed-repos.outputs.repos) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -161,6 +173,8 @@ jobs:
             label_args=(--label bug)
             [ "$security" = "true" ] && label_args+=(--label security)
             body=$(printf '%s\n\n---\nFiled by deep-audit (nightly opus pass over the merged diff).' "$body")
-            url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}")
+            if ! url=$(gh issue create --repo "$TARGET_REPO" --title "$title" --body "$body" "${label_args[@]}"); then
+              echo "::warning::failed to file '$title' in $TARGET_REPO, skipping"; continue
+            fi
             echo "filed: $url"
           done
