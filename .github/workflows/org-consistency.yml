@@ -26,8 +26,6 @@ concurrency:
 env:
   MODEL: "opus"
   MAX_TURNS: "40"
-  # Issues may only be filed into these repos (validated in the filing step).
-  ALLOWED_REPOS: "sux suxrouter sux-fileops claude-config .github"
 
 jobs:
   sweep:
@@ -56,14 +54,20 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       # Managed-repo list (.github/managed-repos.json, single source of truth shared
-      # with pin-consistency.yml/deep-audit.yml/budget-governor.yml — see #233/#253)
-      # plus this repo itself.
+      # with pin-consistency.yml/deep-audit.yml/budget-governor.yml — see #233/#253).
+      # all_space feeds the ALLOWED_REPOS re-validation below; schema_enum feeds the
+      # structured-output json-schema `repo` enum — both derived here so neither can
+      # drift from this list independently again (#256).
       - name: Load managed-repo list
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: repos
         run: |
           set -euo pipefail
-          echo "all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)"
+            echo "all_space=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)"
+            echo "schema_enum=$(jq -c '(.repos + [".github"])' .github/managed-repos.json)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Mint org-scoped app token
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
@@ -166,7 +170,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ env.MAX_TURNS }} --model ${{ env.MODEL }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"repo":{"type":"string","enum":["sux","suxrouter","sux-fileops","claude-config",".github"]},"title":{"type":"string"},"body":{"type":"string"}},"required":["repo","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"repo":{"type":"string","enum":${{ steps.repos.outputs.schema_enum }}},"title":{"type":"string"},"body":{"type":"string"}},"required":["repo","title","body"],"additionalProperties":false}}},"required":["findings"],"additionalProperties":false}'
 
       # The ONLY step that files issues (Safe Outputs). Re-validates repo against the
       # allowlist even though the schema already constrains it.
@@ -175,6 +179,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERDICT: ${{ steps.claude.outputs.structured_output }}
+          ALLOWED_REPOS: ${{ steps.repos.outputs.all_space }}
         run: |
           set -euo pipefail
           if [ -z "${VERDICT:-}" ]; then echo "no structured output → nothing to file"; exit 0; fi
