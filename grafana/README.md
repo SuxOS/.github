@@ -33,8 +33,10 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | `suxos_pr_red_total` | `repo` | PRs with a failing check rollup |
 | `suxos_pr_stuck_total` | `repo` | PRs BEHIND/DIRTY or idle past the threshold |
 | `suxos_workflow_red_total` | `repo` | Workflows whose last completed run failed |
+| `suxos_workflow_disabled` | `repo`, `workflow` | `1` per disabled_manually/disabled_inactivity workflow (non-exempt) |
 | `suxos_edge_deploy_ok` | `service` | Edge smoke check passed (opt-in via input) |
 | `suxos_collector_ok` | — | Heartbeat / freshness (`1` each run) |
+| `suxos_collection_ok` | `repo`, `collector` | `1` when that repo's collector query succeeded, `0` on error (#305) |
 
 **Drain-to-zero streak (DoD):** not stored in the workflow — derived in Prometheus
 from series history: `min_over_time(suxos_backlog_zero[7d]) == 1` means backlog held
