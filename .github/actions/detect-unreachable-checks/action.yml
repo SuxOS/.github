@@ -1,0 +1,44 @@
+name: Detect required contexts that can never report on a PR head
+description: >-
+  Answers the inverse of assert-branch-protection: not "are the gates
+  required" but "can every required context actually report on this PR's
+  head". A required context that never produces a check-run (disabled
+  workflow, a path-filtered required workflow whose filter excludes this PR's
+  diff, or a PR opened before the context existed) blocks the PR forever with
+  no failing check to fix — invisible to pr-unstick.yml, which only re-runs
+  check-runs that already have a failure conclusion. Detects and explains
+  only: never reruns checks, never edits the PR, never changes which contexts
+  are required. Reads required contexts from /rules/branches/<base> only
+  (classic /branches/*/protection 404s org-wide for the App token). Gates on
+  a settle window (grace period + no in-flight check-runs on the head SHA) so
+  a fresh PR is never reported as jammed, and fails safe (warn, skip) on any
+  unreadable surface rather than risk a false jam report. Logic lives in
+  check.sh so scripts/test-detect-unreachable-checks.sh can exercise it
+  against a mocked `gh`, with no network.
+
+inputs:
+  github-token:
+    description: Token with repo read access to PRs, rulesets, check-runs, and workflows.
+    required: true
+  grace-minutes:
+    description: >-
+      Minutes since the head commit landed before a settled-but-unreported
+      required context is treated as a real jam rather than "still settling".
+    required: false
+    default: "30"
+  pr-limit:
+    description: Max open PRs to scan per run.
+    required: false
+    default: "50"
+
+runs:
+  using: composite
+  steps:
+    - name: Diff required(base) against reported(head) per open PR
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+        GRACE_MINUTES: ${{ inputs.grace-minutes }}
+        PR_LIMIT: ${{ inputs.pr-limit }}
+      run: ${{ github.action_path }}/check.sh
