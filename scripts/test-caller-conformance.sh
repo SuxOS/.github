@@ -134,5 +134,64 @@ assert_has "(c) security-review missing ready_for_review" "$d" "security-review 
 # 6. A repo with no .github/workflows at all is reported, not crashed.
 assert_has "no workflows dir at all" "$tmproot/does-not-exist" "no .github/workflows directory"
 
+# 7. `self` mode (#356): .github's own self-*.yml stubs are legitimately named
+#    self-<name>.yml, not <name>.yml — the naming-derived checks (a)/(c)/(d) and (b)'s
+#    generic non-canonical branch must NOT fire on that prefix alone.
+assert_self_has() {
+  local name="$1" dir="$2" pat="$3" out
+  out="$(bash "$check" "$name" "$dir" self 2>&1)"
+  if printf '%s\n' "$out" | grep -qE "$pat"; then
+    echo "ok   - $name"
+  else
+    echo "FAIL - $name (expected a warning matching: $pat)"; printf '%s\n' "$out" | sed 's/^/        /'
+    failures=$((failures + 1))
+  fi
+}
+assert_self_clean() {
+  local name="$1" dir="$2" out
+  out="$(bash "$check" "$name" "$dir" self 2>&1)"
+  if printf '%s\n' "$out" | grep -q '::warning::'; then
+    echo "FAIL - $name (expected no warnings)"; printf '%s\n' "$out" | sed 's/^/        /'
+    failures=$((failures + 1))
+  else
+    echo "ok   - $name"
+  fi
+}
+
+# 7a. Real .github/workflows/self-*.yml stubs (self-<name>.yml, self-fixer-30m.yml
+#     variants, …) must not false-positive on naming alone.
+assert_self_clean "self mode: real self-*.yml stubs conform" "$here/.github/workflows"
+
+# 7b. A dead self-*.yml stub on workflow_run IS still caught (the whole point of #356).
+d="$(fresh_copy self-dead-autofix)"
+cat > "$d/self-claude-autofix.yml" <<'YAML'
+name: Self claude autofix
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  autofix:
+    uses: SuxOS/.github/.github/workflows/claude-autofix.yml@main
+    secrets: inherit
+YAML
+assert_self_has "self mode: dead workflow_run self-stub caught" "$d" "dead stub 'self-claude-autofix\.yml' triggers on workflow_run"
+
+# 7c. A self-*.yml stub NOT on workflow_run (e.g. self-fixer-30m.yml-style cadence
+#     variant) must NOT be flagged as non-canonical just for not matching a bare
+#     scaffold-caller.sh name.
+d="$(fresh_copy self-variant)"
+cat > "$d/self-fixer-30m.yml" <<'YAML'
+name: Self fixer 30m
+on:
+  schedule: [{ cron: "*/30 * * * *" }]
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    secrets: inherit
+YAML
+assert_self_clean "self mode: non-workflow_run self-* variant not flagged" "$d"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"

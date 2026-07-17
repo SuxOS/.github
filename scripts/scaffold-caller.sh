@@ -203,17 +203,6 @@ jobs:
     secrets: inherit
 YAML
 
-emit pipeline-utilization <<YAML
-name: Pipeline utilization
-on:
-  schedule: [{ cron: "0 9 * * 1" }]
-  workflow_dispatch:
-jobs:
-  pipeline-utilization:
-    uses: $REPO/.github/workflows/pipeline-utilization.yml@$REF
-    secrets: inherit
-YAML
-
 emit claude <<YAML
 name: Claude
 on:
