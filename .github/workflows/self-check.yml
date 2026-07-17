@@ -67,3 +67,7 @@ jobs:
       - name: Assert budget-governor opus-tier workflow-name classification
         run: bash scripts/test-budget-governor-opus-classify.sh
         shell: bash
+
+      - name: Assert detect-unreachable-checks reachability guard logic
+        run: bash scripts/test-detect-unreachable-checks.sh
+        shell: bash

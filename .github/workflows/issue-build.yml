@@ -319,7 +319,7 @@ jobs:
             const pointsFor = (labels) => (labels.includes("effort:large") ? 4 : labels.includes("effort:small") ? 1 : 2);
 
             const high = buildable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
-            const med = buildable.filter((i) => i.labels.includes("priority:med"));
+            const med = buildable.filter((i) => !high.includes(i) && i.labels.includes("priority:med"));
             const low = buildable.filter((i) => !high.includes(i) && !med.includes(i));
 
             // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding while
@@ -796,6 +796,8 @@ jobs:
           MAX_ISSUES: ${{ inputs.max-issues }}
           PARALLEL_BATCHES: ${{ inputs.parallel-batches }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
+          INCLUDE: ${{ inputs.include }}
+          EXCLUDE: ${{ inputs.exclude }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -803,6 +805,8 @@ jobs:
             const maxIssues = Math.max(1, Number(process.env.MAX_ISSUES) || 10);
             const cap = Math.max(1, Number(process.env.PARALLEL_BATCHES) || 1);
             const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
+            const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
+            const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
 
             // UNCLAIMED buildable count — the same predicate `select` uses, both now sourced
             // from the nonbuildable-labels composite action (#317) so they can't drift.
@@ -831,6 +835,8 @@ jobs:
               const labels = i.labels.map((l) => l.name);
               if (nonBuildableLabels.some((l) => labels.includes(l))) return false;
               if (referencedByOpenPr.has(i.number)) return false;
+              if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
+              if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return isTrusted(i.user, i.author_association);
             }).length;
 

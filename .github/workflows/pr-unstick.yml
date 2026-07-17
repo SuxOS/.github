@@ -57,6 +57,14 @@ on:
         description: "Max open needs-human PRs to consider per run."
         type: string
         default: "50"
+      reachability-grace-minutes:
+        description: >-
+          Minutes since a PR's head commit before a required context that
+          still hasn't reported is treated as a real jam (SuxOS/.github#323)
+          rather than "still settling" — a fresh PR must never report as
+          jammed.
+        type: string
+        default: "30"
 
 permissions:
   contents: write
@@ -286,3 +294,17 @@ jobs:
             echo "::endgroup::"
             sleep 2
           done
+
+      # Answers the INVERSE question from the two sweeps above: those retry a
+      # check-run that already has a failure conclusion; this finds a required
+      # context that has NO conclusion because it never ran at all (disabled
+      # workflow, path-filtered required workflow, onboarding window) — a PR
+      # blocked forever with no failing check to fix, invisible to both sweeps
+      # above (SuxOS/.github#323). Detects and explains only: never reruns
+      # checks, never edits the PR.
+      - name: Detect required contexts that can never report on an open PR's head
+        uses: SuxOS/.github/.github/actions/detect-unreachable-checks@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          grace-minutes: ${{ inputs.reachability-grace-minutes }}
+          pr-limit: ${{ inputs.pr-limit }}
