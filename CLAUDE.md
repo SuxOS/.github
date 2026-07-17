@@ -46,6 +46,13 @@ on the runner but its default 80-col config flags nearly every pre-existing line
 here and is *not* the gate. Each script is wired into `self-check.yml` by explicit
 name, not a glob, so adding a new one means adding its step there too.
 
+Nothing gates `grafana/*.json` beyond JSON syntax — no PromQL linting — so reason
+dashboard-query edits by hand (extract each `expr` and sanity-check it against
+sample series). Fabric-health collectors follow a **collection-integrity contract**
+(#305): a `gh` query must never fail-silent to a healthy-looking zero — emit
+`suxos_collection_ok{repo,collector}` (0 on error) and gate any derived signal that
+would otherwise read green (esp. `backlog_zero`, which feeds the 7-day DoD streak).
+
 A composite action's embedded `run:` shell block is directly unit-testable without
 a live `gh`: extract it with `yq -r '.runs.steps[] | select(.id == "X") | .run'
 action.yml`, then execute it via `bash -c "$extracted"` with a fake `gh` shim
