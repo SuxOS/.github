@@ -144,7 +144,14 @@ jobs:
                 point at — don't cold-scan the whole repo file-by-file.
               - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
                 wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
-                items not actually implemented).
+                items not actually implemented). Don't stop at the safe, incremental ones —
+                also propose at least one genuinely ambitious idea per pass when you see a real
+                opening: a capability the repo's architecture clearly enables but nobody has
+                built yet, a bigger reframe of an existing rough edge, a direction the docs
+                gesture at but no issue tracks. "Large" effort is fine and expected here — size
+                it honestly, don't downscope an idea just to make it sound safer to propose. It
+                still needs the same real basis as anything else (point at the code/doc that
+                makes it plausible); audacious is not a license to invent.
               - Missing tests/docs: exported functions with no coverage where the repo has a
                 clear test convention; README/CLAUDE.md describing behavior the code no longer
                 matches.
@@ -234,7 +241,14 @@ jobs:
                 point at — don't cold-scan the whole repo file-by-file.
               - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
                 wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
-                items not actually implemented).
+                items not actually implemented). Don't stop at the safe, incremental ones —
+                also propose at least one genuinely ambitious idea per pass when you see a real
+                opening: a capability the repo's architecture clearly enables but nobody has
+                built yet, a bigger reframe of an existing rough edge, a direction the docs
+                gesture at but no issue tracks. "Large" effort is fine and expected here — size
+                it honestly, don't downscope an idea just to make it sound safer to propose. It
+                still needs the same real basis as anything else (point at the code/doc that
+                makes it plausible); audacious is not a license to invent.
               - Missing tests/docs: exported functions with no coverage where the repo has a
                 clear test convention; README/CLAUDE.md describing behavior the code no longer
                 matches.
