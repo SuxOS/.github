@@ -30,9 +30,14 @@ on:
         type: string
         default: "sux suxlib suxrouter claude-config .github"
       backlog-exclude-labels:
-        description: "Comma-separated issue labels that make an open issue NOT build-eligible (held/blocked/tracking work is not backlog)."
+        description: >-
+          Comma-separated issue labels that make an open issue NOT build-eligible
+          (held/blocked/tracking work is not backlog), ADDITIONAL to the
+          nonbuildable-labels composite action's shared floor (building, hold,
+          needs-human, tracking — issue-build.yml's buildable predicate), which
+          is always applied regardless of this input so the two can't drift (#317).
         type: string
-        default: "hold,blocked,throttle,tracking,epic,needs-human,building"
+        default: "hold,blocked,throttle,epic"
       stuck-idle-days:
         description: "An open PR untouched for at least this many days counts as stuck."
         type: string
@@ -70,6 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Non-buildable labels
+        id: nonbuildable
+        uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
+
       - name: Collect cross-repo health into fabric-status.json
         id: collect
         env:
@@ -77,6 +86,7 @@ jobs:
           ORG: ${{ github.repository_owner }}
           REPOS: ${{ inputs.repos }}
           EXCLUDE_LABELS: ${{ inputs.backlog-exclude-labels }}
+          NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           STUCK_IDLE_DAYS: ${{ inputs.stuck-idle-days }}
           DISABLED_EXEMPT: ${{ inputs.workflow-disabled-exempt }}
         run: |
@@ -99,8 +109,8 @@ jobs:
                 --json number,labels 2>/dev/null); then
               issues="[]"
             fi
-            backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" '
-              ($ex | split(",") | map(select(length>0))) as $excl
+            backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" --arg nb "$NONBUILDABLE_LABELS" '
+              ((($ex | split(",")) + ($nb | split(","))) | map(select(length>0))) as $excl
               | [ .[] | select((.labels | map(.name)) as $l | any($excl[]; . as $e | $l | index($e)) | not) ]
               | length')
 

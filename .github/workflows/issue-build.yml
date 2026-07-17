@@ -193,6 +193,10 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      - name: Non-buildable labels
+        id: nonbuildable
+        uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
+
       # Real JS via the org's already-pinned actions/github-script (matches audit.yml /
       # sux/deploy.yml / sux/health.yml), not jq-in-bash. This was the most complex shell in
       # the pipeline (a jq reduce doing greedy bin-packing) — bash/jq quoting and word-splitting
@@ -214,6 +218,7 @@ jobs:
           SPEED: ${{ inputs.speed }}
           SIMPLE_MODEL: ${{ inputs.simple-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
+          NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -223,6 +228,7 @@ jobs:
             const reapHours = Number(process.env.REAP_STALE_HOURS);
             const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
             const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
+            const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
 
             // Keyed on the IMMUTABLE numeric user.id, not the mutable login — a login is
             // renameable and a freed handle is reclaimable (security-review finding, #186).
@@ -286,7 +292,7 @@ jobs:
               // this exclusion it reads as ordinary buildable backlog and gets "built" as if
               // it were a feature request (confirmed live: SuxOS/sux#499 was the ONLY issue
               // this filter returned as buildable before the label existed).
-              if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
+              if (nonBuildableLabels.some((l) => labels.includes(l))) return false;
               // Already covered by an open PR (see step 0) — the durable cross-run dedup that
               // makes parallel/fast-requeue batches safe, and that also covers issues whose
               // `building` claim was stripped by the old release-at-PR-open behaviour.
@@ -774,6 +780,10 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      - name: Non-buildable labels
+        id: nonbuildable
+        uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
+
       # A plain GITHUB_TOKEN cannot dispatch new workflow runs — GitHub blocks that
       # specifically to prevent runaway self-triggering loops — hence the app token above,
       # same as select/build already use to mutate issues/PRs across a run boundary.
@@ -785,16 +795,18 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           MAX_ISSUES: ${{ inputs.max-issues }}
           PARALLEL_BATCHES: ${{ inputs.parallel-batches }}
+          NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const { owner, repo } = context.repo;
             const maxIssues = Math.max(1, Number(process.env.MAX_ISSUES) || 10);
             const cap = Math.max(1, Number(process.env.PARALLEL_BATCHES) || 1);
+            const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
 
-            // UNCLAIMED buildable count — the same predicate select uses (kept in sync manually;
-            // both are short and a shared module isn't worth the indirection in a single-file
-            // reusable). "Unclaimed" is the key word: an issue that a concurrent batch has
+            // UNCLAIMED buildable count — the same predicate `select` uses, both now sourced
+            // from the nonbuildable-labels composite action (#317) so they can't drift.
+            // "Unclaimed" is the key word: an issue that a concurrent batch has
             // already `building`-claimed, or that an open PR already covers, is NOT more work to
             // dispatch for — counting it would spawn batches that find nothing to do. Re-read
             // fresh (not select's stale output): build/other concurrent runs just changed state.
@@ -817,7 +829,7 @@ jobs:
             const unclaimed = all.filter((i) => {
               if (i.pull_request) return false;
               const labels = i.labels.map((l) => l.name);
-              if (["building", "hold", "needs-human", "tracking"].some((l) => labels.includes(l))) return false;
+              if (nonBuildableLabels.some((l) => labels.includes(l))) return false;
               if (referencedByOpenPr.has(i.number)) return false;
               return isTrusted(i.user, i.author_association);
             }).length;

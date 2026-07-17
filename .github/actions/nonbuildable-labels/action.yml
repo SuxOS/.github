@@ -1,0 +1,23 @@
+name: Non-buildable issue labels
+description: >-
+  Single source of truth for the labels that mark an open issue as NOT
+  eligible for automated pipeline work, shared by issue-build.yml's
+  buildable-issue predicate (both the `select` and `requeue` jobs) and
+  fabric-health.yml's backlog-eligible predicate, so the two structurally
+  cannot drift out of sync the way they did in #310 (same antipattern class
+  as the managed-repo-list dedup, #233). A caller may still exclude
+  ADDITIONAL labels of its own that aren't about buildability (e.g.
+  fabric-health's blocked/throttle/epic) — only this shared floor is
+  centralized here.
+
+outputs:
+  labels:
+    description: Comma-separated label list.
+    value: ${{ steps.emit.outputs.labels }}
+
+runs:
+  using: composite
+  steps:
+    - id: emit
+      shell: bash
+      run: echo "labels=building,hold,needs-human,tracking" >> "$GITHUB_OUTPUT"
