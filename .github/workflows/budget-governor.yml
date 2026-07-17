@@ -47,12 +47,18 @@ env:
   #    #172) for high-tier/effort:large work, but the workflow name doesn't change, so those
   #    runner-minutes are counted as sonnet here.
   #  - a caller repo that overrides fixer's `model` input back to sonnet is now over-counted
-  #    as opus, since fixer matches OPUS_WF_RE by name regardless of the input. self-fixer-
-  #    hourly.yml is special-cased out below (pinned to sonnet, #292) since it runs 24x/day —
-  #    frequent enough to trip the opus throttle on a pure mis-count; any other such caller
-  #    still rides the imprecision above.
+  #    as opus, since fixer matches OPUS_WF_RE by name regardless of the input. Every current
+  #    sonnet-pinned self-fixer-*.yml cadence tier (self-fixer-30m.yml "Self fixer (30m,
+  #    bugs+feats)", self-fixer-bugs.yml "Self fixer (15m, bugs only)") is special-cased out
+  #    below by its `(<duration>m` name suffix, since each runs frequently enough to trip the
+  #    opus throttle on a pure mis-count; any other such caller still rides the imprecision
+  #    above. Only the bare "Self fixer" name (the deep/1h tier, opus by default) and
+  #    fixer.yml's own reusable-def name still classify as opus. This lookahead is a name-
+  #    substring guess, not a `model:` read — see scripts/test-budget-governor-opus-classify.sh,
+  #    which MUST be updated (and re-run) whenever a self-fixer-*.yml is renamed or a cadence
+  #    tier is added/removed (#307, #308 were this same regression resurrected by a rename).
   CLAUDE_WF_RE: "claude|security review|fixer|issue build|deep audit|org consistency"
-  OPUS_WF_RE: "deep audit|org consistency|fixer(?! \\(hourly)"
+  OPUS_WF_RE: "deep audit|org consistency|fixer(?! ?\\((?:\\d+m|hourly))"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
   OPUS_BUDGET_MIN: "900"
