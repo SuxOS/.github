@@ -102,3 +102,25 @@ jobs:
           fi
           echo "### Caller-stub conformance — $REPO" >> "$GITHUB_STEP_SUMMARY"
           bash scripts/check-caller-conformance.sh "$REPO" consumer/.github/workflows
+
+  self-conformance:
+    # #356: .github is deliberately excluded from managed-repos.json (it's this repo, not a
+    # consumer of it), so the cross-repo `conformance` matrix above never reaches it — yet its
+    # OWN self-*.yml stubs wire the reusables via `uses: SuxOS/.github/.github/workflows/X.yml@main`
+    # and can carry the same R5/#263 dead-`workflow_run` drift the sweep checks every consumer for
+    # (the pipeline runs itself through these stubs — it is not exempt). Runs the prefix-independent
+    # dead-stub-only slice against them, once (no matrix needed). ADVISORY, same fail-safe posture
+    # as the cross-repo job — findings are warnings + a step-summary row, never a merge failure.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout .github (self-stub source)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Check .github self-*.yml stubs for dead workflow_run drift (advisory)
+        run: |
+          set -euo pipefail
+          echo "### Caller-stub conformance — .github (self-* stubs)" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/check-caller-conformance.sh --dead-stub-only ".github" .github/workflows

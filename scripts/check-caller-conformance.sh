@@ -13,7 +13,15 @@
 # posture as pin-consistency.yml's `consumers` job — so a false positive can't jam anyone's
 # queue. A non-conformance is that repo's own thing to fix, surfaced here as a signal.
 #
-# Usage: check-caller-conformance.sh <repo-label> <consumer-workflows-dir>
+# Usage: check-caller-conformance.sh [--dead-stub-only] <repo-label> <consumer-workflows-dir>
+#
+# --dead-stub-only (#356): the .github self-stub pass. Scans ONLY `<dir>/self-*.yml` and runs
+# ONLY the (b) dead-`workflow_run` detection below — the one slice that is prefix-independent
+# (it keys off `uses:` + `workflow_run:`, not the canonical stub NAME), so .github's own
+# `self-<name>.yml` stubs are held to the R5/#263 anti-drift invariant without false-positiving
+# the name-based (a)/(c)/(d) checks that the self- prefix would break. `.github` is deliberately
+# absent from managed-repos.json (it's this repo, not a consumer), so the cross-repo sweep never
+# reaches it — this mode closes that gap.
 #
 # The canonical inputs are DERIVED from this repo so they can't drift: the stub set is the
 # `emit NAME` list in scripts/scaffold-caller.sh, so adding/removing a stub there updates
@@ -28,8 +36,11 @@
 # linter) — it covers the highest-severity, unambiguous cases.
 set -euo pipefail
 
-REPO_LABEL="${1:?usage: check-caller-conformance.sh <repo-label> <consumer-workflows-dir>}"
-WFDIR="${2:?usage: check-caller-conformance.sh <repo-label> <consumer-workflows-dir>}"
+DEAD_STUB_ONLY=0
+if [ "${1:-}" = "--dead-stub-only" ]; then DEAD_STUB_ONLY=1; shift; fi
+
+REPO_LABEL="${1:?usage: check-caller-conformance.sh [--dead-stub-only] <repo-label> <consumer-workflows-dir>}"
+WFDIR="${2:?usage: check-caller-conformance.sh [--dead-stub-only] <repo-label> <consumer-workflows-dir>}"
 ROOT="${CALLER_CONFORMANCE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCAFFOLD="$ROOT/scripts/scaffold-caller.sh"
 
@@ -51,6 +62,30 @@ CANON_STUBS="$(grep -oE '^emit [a-z][a-z0-9-]*' "$SCAFFOLD" | awk '{print $2}' |
 if [ ! -d "$WFDIR" ]; then
   warn "no .github/workflows directory — no SuxOS caller stubs wired at all"
   echo "[$REPO_LABEL] conformance: $count finding(s)"
+  exit 0
+fi
+
+# --dead-stub-only (#356): the .github self-stub pass. Scan ONLY self-*.yml and flag the single
+# prefix-independent class — a stub that wires a SuxOS reusable but triggers on `workflow_run`
+# (the R5/#263 dead-autofix class: workflow_call can't re-expose workflow_run, and autofix is
+# job-chained inside ci.yml, so no SuxOS caller stub should ever listen on it). No canonical-NAME
+# comparison runs here, so `.github`'s self-<name>.yml naming can't false-positive the (a)/(c)/(d)
+# checks. Scoping to self-*.yml also skips the reusable definitions themselves, whose header
+# comments carry an example `# uses: SuxOS/.github/...@main` line.
+if [ "$DEAD_STUB_ONLY" -eq 1 ]; then
+  for f in "$WFDIR"/self-*.yml "$WFDIR"/self-*.yaml; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" "$f" || continue
+    grep -qE '^[[:space:]]*workflow_run:' "$f" || continue
+    reuses="$(grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" "$f" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+    warn "dead self-stub '$base' triggers on workflow_run (wires: ${reuses}) — the R5/#263 class; a SuxOS caller stub must never listen on workflow_run (workflow_call can't re-expose it, and autofix is job-chained in ci.yml). Remove it."
+  done
+  if [ "$count" -eq 0 ]; then
+    echo "[$REPO_LABEL] OK: no dead workflow_run self-stubs (self-*.yml)."
+  else
+    echo "[$REPO_LABEL] self-stub conformance: $count advisory finding(s) above (not blocking)."
+  fi
   exit 0
 fi
 

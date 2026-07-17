@@ -134,5 +134,102 @@ assert_has "(c) security-review missing ready_for_review" "$d" "security-review 
 # 6. A repo with no .github/workflows at all is reported, not crashed.
 assert_has "no workflows dir at all" "$tmproot/does-not-exist" "no .github/workflows directory"
 
+# ---------------------------------------------------------------------------
+# --dead-stub-only mode (#356): the .github self-stub pass. Scans ONLY self-*.yml and flags
+# ONLY the prefix-independent R5/#263 dead-workflow_run class — no name-based (a)/(c)/(d) checks.
+# ---------------------------------------------------------------------------
+
+# assert_dso_{has,clean,not}: same as the plain asserts but invoke the check in --dead-stub-only
+# mode (the flag is a leading arg before <repo-label> <dir>).
+assert_dso_has() {
+  local name="$1" dir="$2" pat="$3" out
+  out="$(bash "$check" --dead-stub-only "$name" "$dir" 2>&1)"
+  if printf '%s\n' "$out" | grep -qE "$pat"; then echo "ok   - $name"
+  else echo "FAIL - $name (expected a warning matching: $pat)"; printf '%s\n' "$out" | sed 's/^/        /'; failures=$((failures + 1)); fi
+}
+assert_dso_clean() {
+  local name="$1" dir="$2" out
+  out="$(bash "$check" --dead-stub-only "$name" "$dir" 2>&1)"
+  if printf '%s\n' "$out" | grep -q '::warning::'; then
+    echo "FAIL - $name (expected no warnings)"; printf '%s\n' "$out" | sed 's/^/        /'; failures=$((failures + 1))
+  else echo "ok   - $name"; fi
+}
+assert_dso_not() {
+  local name="$1" dir="$2" pat="$3" out
+  out="$(bash "$check" --dead-stub-only "$name" "$dir" 2>&1)"
+  if printf '%s\n' "$out" | grep -qE "$pat"; then
+    echo "FAIL - $name (unexpected warning matching: $pat)"; printf '%s\n' "$out" | sed 's/^/        /'; failures=$((failures + 1))
+  else echo "ok   - $name"; fi
+}
+
+# A .github-shaped self-stub tree: healthy self-<name>.yml stubs on schedule/push triggers,
+# self-check.yml (self-CI, wires no reusable), plus a non-self reusable file whose HEADER
+# COMMENT carries an example `# uses: SuxOS/...@main` line (must be ignored — not a self- stub).
+selftree="$tmproot/selftree"
+mkdir -p "$selftree"
+cat > "$selftree/self-fixer.yml" <<'YAML'
+name: Fixer
+on:
+  schedule: [{ cron: "29 * * * *" }]
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    secrets: inherit
+YAML
+cat > "$selftree/self-check.yml" <<'YAML'
+name: Self-check
+on:
+  pull_request:
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps: [{ uses: "actions/checkout@v7" }]
+YAML
+cat > "$selftree/audit.yml" <<'YAML'
+# A reusable definition, e.g. wired by a caller as:
+#   uses: SuxOS/.github/.github/workflows/audit.yml@main
+name: Audit
+on:
+  workflow_call:
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo audit" }]
+YAML
+
+# 7. Healthy self-stub tree — no dead workflow_run stub → clean.
+assert_dso_clean "(dso) healthy self-stub tree conforms" "$selftree"
+
+# 7b. The scaffold's canonical (non-self) set has NO self-*.yml files → clean in this mode.
+assert_dso_clean "(dso) canonical scaffold set has no self- stubs" "$healthy"
+
+# 8. Add the R5/#263 dead class: a self- stub on workflow_run wiring a reusable → flagged.
+d="$tmproot/selftree-dead"; rm -rf "$d"; cp -r "$selftree" "$d"
+cat > "$d/self-autofix.yml" <<'YAML'
+name: Self autofix
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  autofix:
+    uses: SuxOS/.github/.github/workflows/claude-autofix.yml@main
+    secrets: inherit
+YAML
+assert_dso_has "(dso) dead workflow_run self-stub flagged" "$d" "dead self-stub 'self-autofix\.yml' triggers on workflow_run"
+assert_dso_has "(dso) dead self-stub names the wired reusable" "$d" "wires: claude-autofix\.yml"
+
+# 8b. The healthy self-fixer stub (schedule trigger) is NOT collateral-flagged.
+#     (Patterns match the "dead self-stub 'X'" warning form, not a bare filename, so they can't
+#     collide with a REPO_LABEL that happens to contain the filename — warn() prints the label.)
+assert_dso_not "(dso) scheduled self-fixer stub not flagged" "$d" "dead self-stub 'self-fixer\.yml'"
+
+# 8c. The non-self reusable file (comment-only uses:) is NOT scanned even though it matches uses:.
+assert_dso_not "(dso) non-self reusable file ignored" "$d" "dead self-stub 'audit\.yml'"
+
+# 8d. self-check.yml (wires no SuxOS reusable) is NOT flagged.
+assert_dso_not "(dso) self-check.yml (no reusable) not flagged" "$d" "dead self-stub 'self-check\.yml'"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"
