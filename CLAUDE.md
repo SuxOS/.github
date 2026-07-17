@@ -48,7 +48,12 @@ name, not a glob, so adding a new one means adding its step there too.
 
 Nothing gates `grafana/*.json` beyond JSON syntax — no PromQL linting — so reason
 dashboard-query edits by hand (extract each `expr` and sanity-check it against
-sample series). Fabric-health collectors follow a **collection-integrity contract**
+sample series). `scripts/test-dashboard-queries.sh` (#339, wired into
+`self-check.yml`) now gates the deterministic slice: every `expr`'s `suxos_*`
+metric/label reference must exist in the surface `fabric-health.yml` emits, and an
+age-span subquery window must stay strictly wider than its threshold (#320) — but
+it is NOT a full PromQL linter, so the by-hand reasoning still stands for anything
+it can't check (e.g. aggregating an emit-only-when-disabled series, #291). Fabric-health collectors follow a **collection-integrity contract**
 (#305): a `gh` query must never fail-silent to a healthy-looking zero — emit
 `suxos_collection_ok{repo,collector}` (0 on error) and gate any derived signal that
 would otherwise read green (esp. `backlog_zero`, which feeds the 7-day DoD streak).
