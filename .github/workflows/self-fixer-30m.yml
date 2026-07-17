@@ -1,14 +1,12 @@
-name: Self fixer (hourly, shallow)
+name: Self fixer (30m, bugs+feats)
 
-# Second caller of the same proposer reusable as self-fixer.yml, at a much tighter cadence
-# and a much shallower scan. self-fixer.yml's daily run is tuned for a broad sweep of this
-# repo's own workflows/docs; this one runs hourly with max-turns low enough to only catch
-# fresh, cheap-to-spot signal (recent commits/PRs, obvious TODOs) — not a redundant full scan.
-# Distinct workflow name -> distinct concurrency group (fixer.yml's group key is
-# `fixer-${{ github.workflow }}`), so this never blocks on or races the daily caller.
-# Safe by construction: the reusable's own throttle check (check-throttle, defer-at: yellow)
-# already stands this down under budget pressure, same as every other proposer-stage caller —
-# an hourly cadence just means it checks in more often, not that it bypasses the governor.
+# Mid tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer.yml 1h deep).
+# Runs every 30m with scope: bugs-feats — bugs plus ordinary feature/gap ideas, no push for
+# an ambitious one (that's the 1h deep tier's job). Distinct workflow name -> distinct
+# concurrency group (fixer.yml's group key is `fixer-${{ github.workflow }}`), so this never
+# blocks on or races the other tiers. Safe by construction: the reusable's own throttle check
+# (check-throttle, defer-at: yellow) already stands this down under budget pressure, same as
+# every other proposer-stage caller.
 # Same TEMPORARY note as self-fixer.yml: this lets suxbot[bot] author PRs editing this repo's
 # own shared workflow files; self-issue-build.yml/self-automerge.yml/self-security-review.yml
 # are the matching build/merge/gate stages.
@@ -16,7 +14,7 @@ name: Self fixer (hourly, shallow)
 
 on:
   schedule:
-    - cron: "5 * * * *" # hourly, shallow (offset to dodge top-of-hour rush)
+    - cron: "14,44 * * * *" # every 30m, offset to dodge top-of-hour rush
   workflow_dispatch:
 
 jobs:
@@ -27,6 +25,7 @@ jobs:
       id-token: write
     uses: SuxOS/.github/.github/workflows/fixer.yml@main
     with:
-      model: sonnet # pinned: this is the cheap 24x/day tripwire, not the bulk-scan tier fixer.yml defaults to
-      max-turns: 12 # shallow: fresh/cheap signal only, not a full-repo re-sweep
+      model: sonnet # pinned: this is the cheap 48x/day tier, not the bulk-scan tier fixer.yml defaults to
+      max-turns: 15
+      scope: bugs-feats
     secrets: inherit

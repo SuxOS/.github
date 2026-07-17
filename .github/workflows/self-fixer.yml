@@ -10,7 +10,11 @@ name: Self fixer
 # stages and self-security-review.yml for the gate that still applies to them.
 
 on:
-  schedule: [{ cron: "37 8 * * *" }]
+  schedule:
+    # Deep tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer-hourly.yml
+    # (renamed self-fixer-30m.yml) 30m): bugs + feature ideas + an explicit push for at least
+    # one ambitious/large idea per pass.
+    - cron: "29 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -29,4 +33,5 @@ jobs:
       # Full-repo sweep across this repo's workflows/docs needs more than the default 25
       # turns to read broadly before proposing (same tuning as sux's fixer stub).
       max-turns: 40
+      scope: deep
     secrets: inherit
