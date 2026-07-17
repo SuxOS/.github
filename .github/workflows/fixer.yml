@@ -43,6 +43,16 @@ on:
       max-turns:
         type: number
         default: 120
+      scope:
+        description: >-
+          What this pass looks for — lets callers run a tight, cheap bug-only sweep often and
+          a broad, ambitious-idea sweep less often without duplicating this whole workflow.
+          `bugs`: correctness bugs only, skip feature ideas entirely (for a tight cadence).
+          `bugs-feats`: bugs plus ordinary feature/gap ideas, no push for ambitious ones.
+          `deep`: bugs plus feature ideas, explicitly including at least one ambitious/large
+          idea per pass when there's a real basis for one.
+        type: string
+        default: "deep"
       auto-assign-agent:
         description: >-
           After filing, assign each freshly-created issue to a coding agent via GitHub's
@@ -138,25 +148,32 @@ jobs:
             do NOT do the work and do NOT open any PR (the builder, a separate workflow, decides
             what actually gets built and ships it).
 
-            What to look for:
-              - Correctness bugs: read code in areas of recent churn
-                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
-                point at — don't cold-scan the whole repo file-by-file.
-              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
-                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
-                items not actually implemented). Don't stop at the safe, incremental ones —
-                also propose at least one genuinely ambitious idea per pass when you see a real
+            This pass's scope: `${{ inputs.scope }}`.
+              - `bugs`: correctness bugs ONLY. Do not propose feature ideas, missing
+                tests/docs, or dead-code cleanup this pass — a tight, cheap, frequent sweep.
+              - `bugs-feats`: correctness bugs plus ordinary feature/gap ideas (see below).
+                Propose incremental ideas only — do not reach for an ambitious one this pass.
+              - `deep`: correctness bugs plus feature ideas, AND you should specifically look
+                for at least one genuinely ambitious idea this pass when there's a real
                 opening: a capability the repo's architecture clearly enables but nobody has
                 built yet, a bigger reframe of an existing rough edge, a direction the docs
                 gesture at but no issue tracks. "Large" effort is fine and expected here — size
                 it honestly, don't downscope an idea just to make it sound safer to propose. It
                 still needs the same real basis as anything else (point at the code/doc that
-                makes it plausible); audacious is not a license to invent.
+                makes it plausible); ambitious is not a license to invent.
+
+            What to look for (subject to the scope above):
+              - Correctness bugs: read code in areas of recent churn
+                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
+                point at — don't cold-scan the whole repo file-by-file. Always in scope.
+              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
+                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
+                items not actually implemented). Skip entirely under `bugs` scope.
               - Missing tests/docs: exported functions with no coverage where the repo has a
                 clear test convention; README/CLAUDE.md describing behavior the code no longer
-                matches.
+                matches. Skip under `bugs` scope.
               - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
-                newer part of the repo already replaced.
+                newer part of the repo already replaced. Skip under `bugs` scope.
 
             Before proposing: `gh issue list --limit 300 --state all` and skip anything an
             existing issue already covers (don't even comment, unless you found materially new
@@ -235,25 +252,32 @@ jobs:
             do NOT do the work and do NOT open any PR (the builder, a separate workflow, decides
             what actually gets built and ships it).
 
-            What to look for:
-              - Correctness bugs: read code in areas of recent churn
-                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
-                point at — don't cold-scan the whole repo file-by-file.
-              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
-                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
-                items not actually implemented). Don't stop at the safe, incremental ones —
-                also propose at least one genuinely ambitious idea per pass when you see a real
+            This pass's scope: `${{ inputs.scope }}`.
+              - `bugs`: correctness bugs ONLY. Do not propose feature ideas, missing
+                tests/docs, or dead-code cleanup this pass — a tight, cheap, frequent sweep.
+              - `bugs-feats`: correctness bugs plus ordinary feature/gap ideas (see below).
+                Propose incremental ideas only — do not reach for an ambitious one this pass.
+              - `deep`: correctness bugs plus feature ideas, AND you should specifically look
+                for at least one genuinely ambitious idea this pass when there's a real
                 opening: a capability the repo's architecture clearly enables but nobody has
                 built yet, a bigger reframe of an existing rough edge, a direction the docs
                 gesture at but no issue tracks. "Large" effort is fine and expected here — size
                 it honestly, don't downscope an idea just to make it sound safer to propose. It
                 still needs the same real basis as anything else (point at the code/doc that
-                makes it plausible); audacious is not a license to invent.
+                makes it plausible); ambitious is not a license to invent.
+
+            What to look for (subject to the scope above):
+              - Correctness bugs: read code in areas of recent churn
+                (`git log --since=30.days --stat`) and anything TODO/FIXME/XXX/HACK comments
+                point at — don't cold-scan the whole repo file-by-file. Always in scope.
+              - Feature ideas: gaps, rough edges, half-finished work (a flag defined but never
+                wired up, a stubbed function, a config option with no effect, PLAN.md/ROADMAP
+                items not actually implemented). Skip entirely under `bugs` scope.
               - Missing tests/docs: exported functions with no coverage where the repo has a
                 clear test convention; README/CLAUDE.md describing behavior the code no longer
-                matches.
+                matches. Skip under `bugs` scope.
               - Dead/stale code: unused exports, commented-out blocks, deprecated patterns a
-                newer part of the repo already replaced.
+                newer part of the repo already replaced. Skip under `bugs` scope.
 
             Before proposing: `gh issue list --limit 300 --state all` and skip anything an
             existing issue already covers (don't even comment, unless you found materially new
