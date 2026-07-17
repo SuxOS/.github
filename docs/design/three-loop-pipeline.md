@@ -158,23 +158,32 @@ survive; `triage`'s three-tier confidence machinery is deleted and its residual
 buildable/needs-human check folds into the front of `issue-build` (one fewer stage, one
 fewer Opus session class, one fewer label family).
 
-#### 3.1.0 Reusable pattern: hourly-shallow + daily-deep cadence pair (2026-07-15, #204)
+#### 3.1.0 Reusable pattern: tiered cadence split (2026-07-15, #204; retiered to 3 tiers in PR #297)
 
-A proposer stage doesn't have to pick one cadence. `self-fixer-hourly.yml` calls the same
-`fixer.yml` reusable as `self-fixer.yml`, at a much tighter cadence (hourly vs. daily) and a
-much shallower budget (`max-turns: 12` vs. `40`) — the hourly pass only catches fresh,
-cheap-to-spot signal (recent commits/PRs, obvious TODOs), it does not redundantly re-sweep
-the whole repo the daily pass already covered. The two callers are separate workflow files,
-which gives them separate names and therefore separate concurrency groups (`fixer.yml`'s
-group key is `fixer-${{ github.workflow }}`) — the hourly pass never blocks on or races the
-daily one. Both still defer to `check-throttle` like any other proposer; an hourly cadence
-means the governor is consulted more often, not that it's bypassed.
+A proposer stage doesn't have to pick one cadence. This repo's own pipeline calls the same
+`fixer.yml` reusable from three separate caller workflows, each tuned by its own `with:`
+inputs to trade cadence against scan depth:
 
-This generalizes beyond `fixer`: any proposer/scanner stage can be split into a cheap
-frequent caller and an expensive infrequent caller of the *same* reusable, each tuned by its
-own `with:` inputs, as long as the two callers have distinct workflow names (for the
-concurrency-group split) and the cheap one's budget is set low enough that it's genuinely
-catching only incremental signal rather than paying full-scan cost on a tight clock.
+- `self-fixer-bugs.yml` — every 15m, `scope: bugs`, sonnet, `max-turns: 10`. Correctness
+  bugs only, no feature ideas — the tightest, cheapest tripwire.
+- `self-fixer-30m.yml` — every 30m, `scope: bugs-feats`, sonnet, `max-turns: 15`. Bugs plus
+  ordinary feature/gap ideas.
+- `self-fixer.yml` — hourly, `scope: deep`, opus, `max-turns: 40`. The broad, expensive
+  sweep of this repo's own workflows/docs, plus an explicit push for at least one
+  ambitious/large idea per pass.
+
+Each is a separate workflow file, which gives it a separate name and therefore a separate
+concurrency group (`fixer.yml`'s group key is `fixer-${{ github.workflow }}`) — none of the
+three ever blocks on or races another. All three still defer to `check-throttle` like any
+other proposer; a tighter cadence means the governor is consulted more often, not that it's
+bypassed. See `budget-and-cadence.md`'s self (.github) cadence table for the current crons.
+
+This generalizes beyond `fixer`: any proposer/scanner stage can be split into cheap frequent
+callers and an expensive infrequent caller of the *same* reusable, each tuned by its own
+`with:` inputs, as long as every caller has a distinct workflow name (for the
+concurrency-group split) and the cheap tiers' budgets are set low enough that they're
+genuinely catching only incremental signal rather than paying full-scan cost on a tight
+clock.
 
 #### 3.1.1 The builder also proposes — capture insight, don't waste it (2026-07-15)
 

@@ -120,12 +120,19 @@ not just as the infra hosting theirs:
 
 | Workflow | Cadence | Notes |
 |---|---|---|
-| `self-fixer.yml` | `37 8 * * *` (daily) | Broad sweep of this repo's own workflows/docs; `max-turns: 40`. |
-| `self-fixer-hourly.yml` | `5 * * * *` (hourly) | Shallow companion pass — `max-turns: 12`, fresh/cheap signal only, not a redundant full scan. Distinct workflow name → distinct concurrency group, so it never blocks on or races the daily run. See §3.1 of `three-loop-pipeline.md` for the general hourly-shallow/daily-deep pattern. |
+| `self-fixer-bugs.yml` | `9,24,39,54 * * * *` (15m) | Tightest tier — `scope: bugs`, sonnet, `max-turns: 10`. Correctness bugs only, no feature ideas; cheap-to-spot fresh signal, not a repo re-sweep. |
+| `self-fixer-30m.yml` | `14,44 * * * *` (30m) | Middle tier — `scope: bugs-feats`, sonnet, `max-turns: 15`. Bugs plus ordinary feature/gap ideas. |
+| `self-fixer.yml` | `29 * * * *` (hourly) | Deep tier — `scope: deep`, opus (the reusable's default), `max-turns: 40`. Broad sweep of this repo's own workflows/docs, plus an explicit push for at least one ambitious/large idea per pass. |
 | `self-issue-build.yml` | `13 * * * *` (hourly) | The highest-frequency Claude-invoking cadence in the org. No language build/test gate here (this repo ships no app) — relies on `self-check.yml` (actionlint) + `pin-consistency.yml` + `self-security-review.yml` instead. |
 
-All three are still subject to `budget-governor.yml`'s throttle like any other caller — the
+All four are still subject to `budget-governor.yml`'s throttle like any other caller — the
 table above is additive to the redesign's projected spend, not separately budgeted.
+
+Note: the deep/opus tier (`self-fixer.yml`) now runs hourly (24x/day) rather than the
+daily cadence this table originally described — a substantive change from this section's
+own doctrine above (§ "the expensive deep pass should be low-frequency") that hasn't been
+re-justified here yet; treat it as a budget-cadence decision worth revisiting, not settled
+precedent. See PR #297 for the 3-tier split and `three-loop-pipeline.md` §3.1.0.
 
 ## Calibration
 

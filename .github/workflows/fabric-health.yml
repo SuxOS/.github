@@ -32,7 +32,7 @@ on:
       backlog-exclude-labels:
         description: "Comma-separated issue labels that make an open issue NOT build-eligible (held/blocked/tracking work is not backlog)."
         type: string
-        default: "hold,blocked,throttle,tracking,epic"
+        default: "hold,blocked,throttle,tracking,epic,needs-human,building"
       stuck-idle-days:
         description: "An open PR untouched for at least this many days counts as stuck."
         type: string
