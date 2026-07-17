@@ -169,12 +169,28 @@ jobs:
             # can fall outside that window and be silently omitted from wf_red (#345).
             # Query the latest run per workflow instead, so every workflow is observed
             # regardless of repo-wide run volume.
+            #
+            # Naive per-workflow querying is one `gh run list` call PER WORKFLOW PER REPO —
+            # 100+ extra API calls org-wide on a cron schedule (#350). Cut that by first
+            # batch-fetching the repo's 100 most-recent runs (one call) and reading each
+            # workflow's latest conclusion off that when present; only a workflow whose
+            # latest run fell outside that window still needs its own per-workflow call.
+            # This keeps the #345 no-under-reporting guarantee (every workflow is still
+            # observed one way or the other) while cutting calls for the common case where
+            # most workflows show up in the recent-runs window.
             wf_red=0
             if [ "$wfs_ok" -eq 1 ]; then
               runs_ok=1
+              batch_runs=$(gh run list --repo "$slug" --limit 100 \
+                  --json workflowDatabaseId,conclusion,status 2>/dev/null) || batch_runs="[]"
               while IFS= read -r wf_id; do
                 [ -z "$wf_id" ] && continue
-                if last_run=$(gh run list --repo "$slug" --workflow "$wf_id" --limit 1 \
+                batch_concl=$(printf '%s' "$batch_runs" | jq -r --argjson id "$wf_id" '
+                  [.[] | select(.workflowDatabaseId == $id)][0]
+                  | select(. != null) | select(.status == "completed") | .conclusion // "none"')
+                if [ -n "$batch_concl" ]; then
+                  [ "$batch_concl" = "failure" ] && wf_red=$((wf_red + 1))
+                elif last_run=$(gh run list --repo "$slug" --workflow "$wf_id" --limit 1 \
                     --json conclusion,status 2>/dev/null); then
                   concl=$(printf '%s' "$last_run" | jq -r '.[0] | select(.status == "completed") | .conclusion // empty')
                   [ "$concl" = "failure" ] && wf_red=$((wf_red + 1))
