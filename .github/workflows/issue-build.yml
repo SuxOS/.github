@@ -284,7 +284,7 @@ jobs:
               owner, repo, state: "open", per_page: 100,
             });
 
-            const buildable = all.filter((i) => {
+            const buildableRaw = all.filter((i) => {
               if (i.pull_request) return false;
               const labels = i.labels.map((l) => l.name);
               // "tracking" = a bookkeeping issue upserted by automation (budget-governor's
@@ -310,7 +310,61 @@ jobs:
               if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return true;
-            }).map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+            });
+            const buildable = buildableRaw.map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+
+            // Prerequisite gating (#348): don't batch an issue ahead of a STILL-OPEN issue it
+            // names as a hard prerequisite. When #342/#343 ("Extend the dashboard-query gate…")
+            // were queued while #339 — which ADDED that gate's script — still sat on an unmerged
+            // PR, the builder had to cherry-pick #339's commit just to have the file to extend.
+            // We DEFER such an issue behind unblocked work instead. This is advisory and
+            // NON-STARVING: a deferred issue is only reordered behind other buildable work, never
+            // dropped — if it's the only thing buildable it's still built (the pre-#348 behaviour,
+            // cherry-pick and all), so the heuristic can only reorder, never deadlock the backlog.
+            //
+            // A "blocker" is any OPEN, non-PR issue that will plausibly close on merge — i.e. NOT
+            // a long-lived tracking/needs-human/hold issue (blocking on those would starve the
+            // dependent forever). An issue covered by an open (unmerged) PR still counts: its
+            // change isn't on main yet, which is exactly the #339 situation. Detection is two
+            // narrow signals over the candidate's title+body, kept tight to limit false positives;
+            // the non-starving fallback caps any rare false positive at one selection cycle.
+            const NON_CLOSEABLE = ["tracking", "needs-human", "hold"];
+            const blockerNumbers = new Set(
+              all.filter((i) => !i.pull_request
+                  && !i.labels.map((l) => l.name).some((l) => NON_CLOSEABLE.includes(l)))
+                 .map((i) => i.number),
+            );
+            // (1) a dependency phrase directly followed by #NNN ("extends #339", "depends on #339",
+            //     "built by PR #341"); (2) an extension verb in the TITLE — a curated one-line
+            //     summary, so a strong "builds on prior work" signal — plus any reference to an
+            //     open blocker in the title/body (this is what catches #342/#343, whose titles say
+            //     "Extend the dashboard-query gate" while the #339 ref sits in the body).
+            const PREREQ_ADJ = /\b(?:extend(?:s|ing|ed)?|adds? to|build(?:s|ing)? on|built (?:on|by)|based on|depends? on|dependent on|blocked by|prerequisite|follow[- ]?up to)\b[^\n#]{0,20}#(\d+)/gi;
+            const TITLE_EXT = /\b(?:extend(?:s|ing|ed)?|adds? to|build(?:s|ing)? on|based on)\b/i;
+            const REF = /#(\d+)/g;
+            const blockedBy = (issue) => {
+              const title = issue.title || "";
+              const text = `${title}\n${issue.body || ""}`;
+              const blockers = new Set();
+              for (const m of text.matchAll(PREREQ_ADJ)) {
+                const n = Number(m[1]);
+                if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
+              }
+              if (TITLE_EXT.test(title)) {
+                for (const m of text.matchAll(REF)) {
+                  const n = Number(m[1]);
+                  if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
+                }
+              }
+              return [...blockers];
+            };
+            const deferred = buildableRaw
+              .map((i) => ({ number: i.number, blockers: blockedBy(i) }))
+              .filter((d) => d.blockers.length);
+            const deferredSet = new Set(deferred.map((d) => d.number));
+            let selectable = buildable.filter((i) => !deferredSet.has(i.number));
+            if (selectable.length === 0) selectable = buildable; // non-starving: gating may reorder, never empty
+            if (deferred.length) core.info(`prerequisite-deferred (open blocker unmerged): ${deferred.map((d) => `#${d.number}->${d.blockers.map((b) => "#" + b).join("/")}`).join(", ")}`);
 
             // Effort points: small=1, medium=2 (also the default for an unlabeled issue — most
             // of today's backlog predates the effort:* label), large=4. Deterministic lookup —
@@ -318,9 +372,9 @@ jobs:
             // observation-capture) filed the issue; no model call happens here.
             const pointsFor = (labels) => (labels.includes("effort:large") ? 4 : labels.includes("effort:small") ? 1 : 2);
 
-            const high = buildable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
-            const med = buildable.filter((i) => !high.includes(i) && i.labels.includes("priority:med"));
-            const low = buildable.filter((i) => !high.includes(i) && !med.includes(i));
+            const high = selectable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
+            const med = selectable.filter((i) => !high.includes(i) && i.labels.includes("priority:med"));
+            const low = selectable.filter((i) => !high.includes(i) && !med.includes(i));
 
             // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding while
             // under BOTH caps (count, points), spilling into the next tier once the current one

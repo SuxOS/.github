@@ -75,3 +75,7 @@ jobs:
       - name: Assert grafana/*.json exprs match the metrics/labels fabric-health emits
         run: bash scripts/test-dashboard-queries.sh
         shell: bash
+
+      - name: Assert issue-build prerequisite-gating defers issues behind unmerged prerequisites
+        run: bash scripts/test-issue-build-prereq-gating.sh
+        shell: bash
