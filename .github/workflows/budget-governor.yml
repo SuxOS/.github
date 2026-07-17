@@ -399,7 +399,7 @@ jobs:
             fi
             if [ -n "$found" ]; then
               num=$(jq -r '.number' <<<"$found")
-              manual=$(jq -r '[.labels[].name] | contains(["throttle-manual"])' <<<"$found")
+              manual=$(jq -r 'any(.labels[].name; . == "throttle-manual")' <<<"$found")
               if [ "$manual" = "true" ]; then
                 echo "SuxOS/$r#$num is pinned (throttle-manual) — leaving as-is"
                 continue

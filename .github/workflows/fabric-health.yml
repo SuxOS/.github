@@ -206,7 +206,8 @@ jobs:
           # `throttle` label — so match the same body line check-throttle/action.yml reads,
           # never a label. Fail-open to green on any lookup error, mirroring check-throttle:
           # a governor outage must not falsely report the org as throttled.
-          throttle_level=$(gh issue list --repo "${ORG}/.github" --state open --limit 100 \
+          throttle_level=$(gh issue list --repo "${ORG}/.github" --state open \
+              --search "\"Autonomy throttle\" in:title" --limit 100 \
               --json title,body 2>/dev/null \
             | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""' \
             | grep -m1 -oE '^level: (green|yellow|red)$' | awk '{print $2}') || true

@@ -765,6 +765,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
       - name: Check autonomy throttle
         id: throttle
         uses: SuxOS/.github/.github/actions/check-throttle@main
@@ -773,7 +780,7 @@ jobs:
           defer-at: "red"
 
       - name: Mint app token
-        if: steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: app-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -788,7 +795,7 @@ jobs:
       # specifically to prevent runaway self-triggering loops — hence the app token above,
       # same as select/build already use to mutate issues/PRs across a run boundary.
       - name: Fan out up to parallel-batches while unclaimed backlog remains
-        if: steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WORKFLOW_REF: ${{ github.workflow_ref }}
