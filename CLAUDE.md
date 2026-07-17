@@ -39,6 +39,11 @@ Test against a real caller if the change touches trigger conditions, secrets, or
 actual run. Prefer landing behind a caller repo's `workflow_dispatch` smoke test
 before it goes live on `schedule`/`issues` triggers across the whole org.
 
+This repo's own gate is `self-check.yml`: **actionlint** (which also runs
+shellcheck over embedded `run:` blocks) plus the four `scripts/test-*.sh` invariant
+scripts — run those locally, not `yamllint`. `yamllint` is on the runner but its
+default 80-col config flags nearly every pre-existing line here and is *not* the gate.
+
 A composite action's embedded `run:` shell block is directly unit-testable without
 a live `gh`: extract it with `yq -r '.runs.steps[] | select(.id == "X") | .run'
 action.yml`, then execute it via `bash -c "$extracted"` with a fake `gh` shim

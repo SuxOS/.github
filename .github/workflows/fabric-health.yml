@@ -137,8 +137,15 @@ jobs:
                 --json name,path,state 2>/dev/null); then
               wfs="[]"
             fi
-            disabled_json=$(printf '%s' "$wfs" | jq --arg ex "$DISABLED_EXEMPT" '
-              ($ex | split(",") | map(select(length>0))) as $excl
+            # The exempt list is the workflow_call-only reusable defs that live in THIS repo
+            # (.github) and are left disabled_manually by design. In every caller repo those
+            # same basenames are ACTIVE caller stubs (e.g. security-review.yml, a required
+            # merge gate), so only apply the exemption when surveying .github — everywhere
+            # else a manual disable is a real alert we must not suppress (#290).
+            disabled_json=$(printf '%s' "$wfs" | jq --arg ex "$DISABLED_EXEMPT" --arg repo "$repo" '
+              (if $repo == ".github"
+                 then ($ex | split(",") | map(select(length>0)))
+                 else [] end) as $excl
               | [ .[] | select(.state == "disabled_manually")
                   | select(((.path | split("/") | last) as $b | $excl | index($b)) | not)
                   | {file: (.path | split("/") | last), name: .name} ]')
