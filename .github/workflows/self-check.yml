@@ -71,3 +71,7 @@ jobs:
       - name: Assert detect-unreachable-checks reachability guard logic
         run: bash scripts/test-detect-unreachable-checks.sh
         shell: bash
+
+      - name: Assert grafana/*.json exprs match the metrics/labels fabric-health emits
+        run: bash scripts/test-dashboard-queries.sh
+        shell: bash
