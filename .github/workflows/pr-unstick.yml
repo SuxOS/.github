@@ -119,9 +119,12 @@ jobs:
           cooldown_sec=$(( COOLDOWN_HOURS * 3600 ))
           now=$(date -u +%s)
 
-          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
+          # --label narrows server-side BEFORE --limit is applied, so the cap binds on the
+          # needs-human set (oldest included) instead of truncating the newest-created page
+          # of ALL open PRs and only then filtering to needs-human (SuxOS/.github#366).
+          if ! prs=$(gh pr list --state open --label needs-human --limit "$PR_LIMIT" \
             --json number,isDraft,labels,headRefOid,mergeStateStatus \
-            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | index("needs-human")) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
             echo "::error::gh pr list failed — aborting instead of treating as zero needs-human PRs"
             exit 1
           fi
@@ -217,9 +220,11 @@ jobs:
           # ACTIVE, main-churn-independent requeue (SuxOS/.github#272): re-run the failed
           # security-review check directly, and drop the marker once it goes green. `hold`/
           # `keep` are excluded — a real finding or an operator pin is not ours to auto-requeue.
-          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
+          # Same server-side-narrow-before-limit fix as the needs-human sweep above
+          # (SuxOS/.github#366): --label binds the cap to the security-review-retry set.
+          if ! prs=$(gh pr list --state open --label security-review-retry --limit "$PR_LIMIT" \
             --json number,isDraft,labels,headRefOid \
-            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | index("security-review-retry")) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
             echo "::error::gh pr list failed (security-review-retry) — aborting instead of treating as zero retry PRs"
             exit 1
           fi
