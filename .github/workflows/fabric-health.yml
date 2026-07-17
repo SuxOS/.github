@@ -112,9 +112,17 @@ jobs:
             # "unknown" (suxos_collection_ok=0) instead of a healthy-looking zero. Without
             # this a failed issue query reads backlog 0 and can falsely satisfy the
             # backlog-zero Definition-of-Done streak on data that was never observed.
-            if issues=$(gh issue list --repo "$slug" --state open --limit 200 \
+            # --limit 201 (one past the real 200 cap, #345): if exactly 201 rows come
+            # back the true count is >200 and this page can't be trusted as complete —
+            # treat it as a collection failure (issues_ok=0) rather than a silent
+            # undercount that would read backlog_zero green on real backlog.
+            if issues=$(gh issue list --repo "$slug" --state open --limit 201 \
                 --json number,labels 2>/dev/null); then
-              issues_ok=1
+              if [ "$(printf '%s' "$issues" | jq 'length')" -gt 200 ]; then
+                issues="[]"; issues_ok=0
+              else
+                issues_ok=1
+              fi
             else
               issues="[]"; issues_ok=0
             fi
@@ -124,9 +132,14 @@ jobs:
               | length')
 
             # --- PRs: open / red (failing checks) / stuck ---
-            if prs=$(gh pr list --repo "$slug" --state open --limit 200 \
+            # Same cap-hit detection as the issues collector above (#345).
+            if prs=$(gh pr list --repo "$slug" --state open --limit 201 \
                 --json number,mergeable,mergeStateStatus,statusCheckRollup,updatedAt 2>/dev/null); then
-              prs_ok=1
+              if [ "$(printf '%s' "$prs" | jq 'length')" -gt 200 ]; then
+                prs="[]"; prs_ok=0
+              else
+                prs_ok=1
+              fi
             else
               prs="[]"; prs_ok=0
             fi
@@ -142,25 +155,35 @@ jobs:
                     or (.updatedAt < $before)) ] | length)
               }')
 
-            # --- Workflows: how many have a failing LAST run ---
-            if wfruns=$(gh run list --repo "$slug" --limit 200 \
-                --json workflowName,conclusion,status,createdAt 2>/dev/null); then
-              runs_ok=1
-            else
-              wfruns="[]"; runs_ok=0
-            fi
-            wf_red=$(printf '%s' "$wfruns" | jq '
-              [ .[] | select(.status == "completed") ]
-              | group_by(.workflowName)
-              | map(sort_by(.createdAt) | last)
-              | [ .[] | select(.conclusion == "failure") ] | length')
-
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             if wfs=$(gh workflow list --repo "$slug" --all \
-                --json name,path,state 2>/dev/null); then
+                --json id,name,path,state 2>/dev/null); then
               wfs_ok=1
             else
               wfs="[]"; wfs_ok=0
+            fi
+
+            # --- Workflows: how many have a failing LAST run ---
+            # A single `gh run list --limit 200` is a most-recent-runs window across ALL
+            # workflows in the repo, so on a busy repo a low-traffic workflow's latest run
+            # can fall outside that window and be silently omitted from wf_red (#345).
+            # Query the latest run per workflow instead, so every workflow is observed
+            # regardless of repo-wide run volume.
+            wf_red=0
+            if [ "$wfs_ok" -eq 1 ]; then
+              runs_ok=1
+              while IFS= read -r wf_id; do
+                [ -z "$wf_id" ] && continue
+                if last_run=$(gh run list --repo "$slug" --workflow "$wf_id" --limit 1 \
+                    --json conclusion,status 2>/dev/null); then
+                  concl=$(printf '%s' "$last_run" | jq -r '.[0] | select(.status == "completed") | .conclusion // empty')
+                  [ "$concl" = "failure" ] && wf_red=$((wf_red + 1))
+                else
+                  runs_ok=0
+                fi
+              done < <(printf '%s' "$wfs" | jq -r '.[].id')
+            else
+              runs_ok=0
             fi
             # The exempt list is the workflow_call-only reusable defs that live in THIS repo
             # (.github) and are left disabled_manually by design. In every caller repo those

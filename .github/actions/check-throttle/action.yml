@@ -41,7 +41,7 @@ runs:
         set -uo pipefail
 
         # Fail-open: any failure in the lookup chain leaves level=green.
-        level=$(gh issue list --repo "$REPO" --state open --limit 100 --json title,body 2>/dev/null \
+        level=$(gh issue list --repo "$REPO" --state open --search "\"Autonomy throttle\" in:title" --limit 100 --json title,body 2>/dev/null \
           | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""' \
           | grep -m1 -oE '^level: (green|yellow|red)$' | awk '{print $2}') || true
         level=${level:-green}
