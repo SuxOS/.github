@@ -78,7 +78,7 @@ unmerged forever.
 
 ## 4. Check for stuck/self-recolliding concurrency groups
 
-Each proposer/builder pair (e.g. `self-fixer.yml` + `self-fixer-hourly.yml`,
+Each proposer tier (e.g. `self-fixer-bugs.yml` + `self-fixer-30m.yml` + `self-fixer.yml`,
 §3.1.0 of `three-loop-pipeline.md`) is a distinct workflow name specifically so they land in
 distinct concurrency groups and never queue behind each other. If a fix ever merges two
 callers under one workflow name, or a `workflow_dispatch` is fired manually into the same

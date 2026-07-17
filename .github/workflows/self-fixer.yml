@@ -11,9 +11,9 @@ name: Self fixer
 
 on:
   schedule:
-    # Deep tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer-hourly.yml
-    # (renamed self-fixer-30m.yml) 30m): bugs + feature ideas + an explicit push for at least
-    # one ambitious/large idea per pass.
+    # Deep tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer-30m.yml
+    # 30m): bugs + feature ideas + an explicit push for at least one ambitious/large idea
+    # per pass.
     - cron: "29 * * * *"
   workflow_dispatch:
 
