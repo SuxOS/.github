@@ -466,7 +466,7 @@
     {
       "id": 10,
       "title": "Disabled workflow expiry (>48h persisted, non-exempt)",
-      "description": "Time-span coverage, not a sample count (#315): fires when the oldest sample of suxos_workflow_disabled visible in the trailing 48h window is itself already >=48h old, i.e. the disable SPANS the full window, rather than requiring an exact count of scrapes (count_over_time >= N) that a multi-hour collector outage could silently drop below. The collector only emits a sample while a workflow is disabled, so an absent-when-healthy series still means min_over_time == 1 would fire on any transient disable — this query keeps that same full-window-presence requirement but expressed as elapsed wall-clock time, tolerant of any number of missed scrapes as long as the first and last still straddle 48h.",
+      "description": "Time-span coverage, not a sample count (#315): fires when the oldest sample of suxos_workflow_disabled visible in the lookback window is >=48h (172800s) older than the newest, i.e. the disable SPANS 48h of wall-clock, rather than requiring an exact count of scrapes (count_over_time >= N) that a multi-hour collector outage could silently drop below. The subquery window is deliberately WIDER than the threshold ([49h] vs 48h, #320): a left-open [48h:...] range can only see samples strictly newer than now-48h, so the measured age is structurally < 48h and the alert could never fire — the extra hour of headroom lets a genuinely-spanning disable clear 48h reliably despite scrape jitter/step alignment. The collector only emits a sample while a workflow is disabled, so an absent-when-healthy series still means the alert clears the moment a workflow is re-enabled; tolerant of any number of missed scrapes as long as the first and last still straddle 48h.",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -511,7 +511,99 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[48h:15m])) >= 172800) or vector(0)"
+          "expr": "count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[49h:15m])) >= 172800) or vector(0)"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Collection integrity (all collectors reporting)",
+      "description": "collection-integrity contract (#305): min over every suxos_collection_ok{repo,collector} series. 1 = every collector's query succeeded this tick; 0 (DEGRADED) = at least one collector (issues/prs/runs/workflows on some repo) ERRORED, so the derived signals it feeds are UNKNOWN, not healthy — a backlog/red/stuck 0 during DEGRADED means 'couldn't measure', never 'measured clean'. Also gates the drain-to-zero DoD: the spine withholds backlog_zero=1 whenever an issue query fails, so the 7-day streak can't stay green across an unobserved backlog. Drill into 'Collection OK by repo/collector' to see which collector is down.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "collecting",
+                  "color": "green"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DEGRADED",
+                  "color": "red"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(last_over_time(suxos_collection_ok[20m]))"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Collection OK by repo/collector (0 = query errored → unknown)",
+      "description": "Per-repo, per-collector health of the fabric-health spine's OWN data collection (#305). A dip to 0 means that gh query (issues/prs/runs/workflows) failed on that repo this tick; the metric it feeds (backlog, pr_red/stuck, workflow_red) shows a gap rather than a healthy 0 for the same tick.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "last_over_time(suxos_collection_ok[20m])",
+          "legendFormat": "{{repo}}/{{collector}}"
         }
       ]
     }
