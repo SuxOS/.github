@@ -193,5 +193,23 @@ jobs:
 YAML
 assert_self_clean "self mode: non-workflow_run self-* variant not flagged" "$d"
 
+# 8. (#363) A workflow whose ONLY `uses: SuxOS/.github/.github/workflows/...` line is a
+#    header-comment example (as every reusable's own definition carries, e.g.
+#    `#   uses: SuxOS/.github/.github/workflows/health.yml@main`) and wires no reusable
+#    for real must NOT be mistaken for a live (non-canonical) stub.
+d="$(fresh_copy comment-uses)"
+cat > "$d/health-doc.yml" <<'YAML'
+# Example caller usage:
+#   uses: SuxOS/.github/.github/workflows/health.yml@main
+name: Not actually a caller
+on:
+  push:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo noop" }]
+YAML
+assert_not "(#363) header-comment uses: line is not treated as a live stub reference" "$d" "health-doc\.yml"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"

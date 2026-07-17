@@ -64,8 +64,13 @@ if [ ! -d "$WFDIR" ]; then
 fi
 
 # Every live `uses: SuxOS/.github/.github/workflows/X.yml@REF` reference across the repo,
-# and the set of reusable basenames they wire.
-wired="$(grep -rhoE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" "$WFDIR" 2>/dev/null \
+# and the set of reusable basenames they wire. Full-line comments are stripped first: every
+# reusable's own header carries an example `#   uses: SuxOS/.github/.github/workflows/X.yml@main`
+# line, which would otherwise false-positive if this ever scans a dir containing reusable
+# definitions themselves (currently moot for the cross-repo sweep, whose consumer stubs carry
+# no such comments — but this keeps the check robust if that ever changes, #363).
+wired="$(find "$WFDIR" -type f \( -name '*.yml' -o -name '*.yaml' \) -exec grep -vE '^[[:space:]]*#' {} + 2>/dev/null \
+  | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
   | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
 wired_names="$(printf '%s\n' "$wired" | sed -nE 's#.*/workflows/([A-Za-z0-9._-]+)\.yml@.*#\1#p' | sort -u)"
 
@@ -102,8 +107,13 @@ fi
 for f in "$@"; do
   [ -e "$f" ] || continue
   base="$(basename "$f")"; name="${base%.*}"
-  grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" "$f" || continue
-  reuses="$(grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" "$f" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+  # Strip full-line comments before the uses: test: every reusable definition's own header
+  # carries an example `#   uses: SuxOS/.github/.github/workflows/X.yml@main` line, which
+  # would otherwise be mistaken for a live stub if this scan is ever widened beyond
+  # self-*.yml/consumer stubs to include reusable definitions themselves (#363).
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f")"
+  printf '%s\n' "$uncommented" | grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" || continue
+  reuses="$(printf '%s\n' "$uncommented" | grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//')"
   if grep -qE '^[[:space:]]*workflow_run:' "$f"; then
     warn "dead stub '$base' triggers on workflow_run (wires: ${reuses}) — the R5/#263 class; scaffold-caller.sh never emits it (autofix is job-chained in ci.yml). Remove it."
     continue
