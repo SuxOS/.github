@@ -37,26 +37,40 @@ check() {
   fi
 }
 
-echo "[1/7] bare deep/1h tier 'Self fixer' -> opus (default model)"
+echo "[1/10] bare deep/1h tier 'Self fixer' -> opus (default model)"
 check "Self fixer" "opus"
 
-echo "[2/7] 'Self fixer (30m, bugs+feats)' (self-fixer-30m.yml, model: sonnet) -> sonnet"
+echo "[2/10] 'Self fixer (30m, bugs+feats)' (self-fixer-30m.yml, model: sonnet) -> sonnet"
 check "Self fixer (30m, bugs+feats)" "sonnet"
 
-echo "[3/7] 'Self fixer (15m, bugs only)' (self-fixer-bugs.yml, model: sonnet) -> sonnet"
+echo "[3/10] 'Self fixer (15m, bugs only)' (self-fixer-bugs.yml, model: sonnet) -> sonnet"
 check "Self fixer (15m, bugs only)" "sonnet"
 
-echo "[4/7] legacy 'Self fixer (hourly, shallow)' name still excluded -> sonnet"
+echo "[4/10] legacy 'Self fixer (hourly, shallow)' name still excluded -> sonnet"
 check "Self fixer (hourly, shallow)" "sonnet"
 
-echo "[5/7] fixer.yml's own reusable-def name -> opus (no cadence suffix)"
+echo "[5/10] fixer.yml's own reusable-def name -> opus (no cadence suffix)"
 check "Fixer — propose work as issues (reusable)" "opus"
 
-echo "[6/7] 'Deep audit (nightly)' -> opus"
+echo "[6/10] 'Deep audit (nightly)' -> opus"
 check "Deep audit (nightly)" "opus"
 
-echo "[7/7] 'Org consistency (weekly)' -> opus"
+echo "[7/10] 'Org consistency (weekly)' -> opus"
 check "Org consistency (weekly)" "opus"
+
+# The 3-tier propose cadence scaffold-caller.sh now emits for CONSUMER repos (#368) carries
+# its own workflow names, which budget-governor classifies by the same OPUS_WF_RE. They must
+# agree with each stub's actual `model:` (sonnet-pinned 15m/30m, unpinned=opus-default deep) —
+# the same name-vs-model coupling that broke as #307/#308. Renaming a scaffold fixer tier
+# (scaffold-caller.sh) must keep these green, exactly as for the self-fixer-*.yml names above.
+echo "[8/10] consumer 'Fixer (15m, bugs only)' (model: sonnet pin) -> sonnet"
+check "Fixer (15m, bugs only)" "sonnet"
+
+echo "[9/10] consumer 'Fixer (30m, bugs+feats)' (model: sonnet pin) -> sonnet"
+check "Fixer (30m, bugs+feats)" "sonnet"
+
+echo "[10/10] consumer 'Fixer (1h, deep)' (model unpinned = fixer.yml opus default) -> opus"
+check "Fixer (1h, deep)" "opus"
 
 if [ "$fail" -eq 0 ]; then
   echo "All budget-governor opus-classification tests passed."

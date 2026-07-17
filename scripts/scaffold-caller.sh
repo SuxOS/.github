@@ -234,14 +234,82 @@ YAML
 
 # --- Backlog pipeline (propose -> investigate -> build) --------------------
 
-emit fixer <<YAML
-name: Fixer
+# The 3-tier propose cadence standardized org-wide 2026-07-17 (docs/design/
+# 2026-07-17-automation-structure-and-anti-drift.md, propose row): one reusable
+# (fixer.yml) multiplexed across three cadence/scope/model variants, exactly as
+# this repo runs it via self-fixer-bugs.yml / self-fixer-30m.yml / self-fixer.yml.
+# All three wire the SAME fixer.yml reusable — the file basenames (fixer-bugs,
+# fixer-30m, fixer) deliberately differ from the reusable basename so each gets its
+# own workflow name -> its own concurrency group (fixer.yml keys on github.workflow),
+# so the tiers never block or race each other. Each needs its own permissions block:
+# the reusable requests more than the default read-only GITHUB_TOKEN, so a caller
+# that omits it fails at STARTUP (mirrors sux/suxrouter's proven fixer stub). Stagger
+# the schedule minutes per repo so concurrent repos don't stack sessions inside one
+# 5-hour subscription window.
+
+# Tightest tier: every 15m, bugs only (correctness bugs, no feature/doc noise) — the
+# cheap, time-sensitive tripwire, pinned to sonnet (not fixer.yml's bulk-scan default).
+emit fixer-bugs <<YAML
+name: Fixer (15m, bugs only)
 on:
-  schedule: [{ cron: "17 8 * * *" }]
+  schedule:
+    - cron: "9,24,39,54 * * * *" # every 15m, offset off the top of the hour; stagger per repo
   workflow_dispatch:
 jobs:
   fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
     uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      model: sonnet
+      max-turns: 10
+      scope: bugs
+    secrets: inherit
+YAML
+
+# Mid tier: every 30m, bugs + ordinary feature/gap ideas (no push for an ambitious
+# one — that's the deep tier's job), also pinned to sonnet.
+emit fixer-30m <<YAML
+name: Fixer (30m, bugs+feats)
+on:
+  schedule:
+    - cron: "14,44 * * * *" # every 30m, offset off the top of the hour; stagger per repo
+  workflow_dispatch:
+jobs:
+  fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      model: sonnet
+      max-turns: 15
+      scope: bugs-feats
+    secrets: inherit
+YAML
+
+# Deep tier: hourly, bugs + feature ideas + an explicit push for at least one
+# ambitious/large idea per pass. Model left unpinned = fixer.yml's own default (the
+# broad bulk-scan tier); a fuller repo sweep, so a larger turn budget.
+emit fixer <<YAML
+name: Fixer (1h, deep)
+on:
+  schedule:
+    - cron: "29 * * * *" # hourly; stagger the minute per repo
+  workflow_dispatch:
+jobs:
+  fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      max-turns: 40
+      scope: deep
     secrets: inherit
 YAML
 

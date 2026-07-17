@@ -334,6 +334,16 @@ jobs:
                   && !i.labels.map((l) => l.name).some((l) => NON_CLOSEABLE.includes(l)))
                  .map((i) => i.number),
             );
+            // An OPEN PR cited by number is also a blocker: a child that "depends on PR #341"
+            // / "built by #341" must wait for that PR to merge onto main — the same "change
+            // isn't on main yet" case as an issue on an unmerged PR (#370). PRs share the issue
+            // number space and are excluded from blockerNumbers above (they aren't issues), so
+            // the detection below (whose own comment/regex already advertise "built by PR #341")
+            // silently never gated them. Derive open-PR numbers from `all` (listForRepo returns
+            // open PRs too, tagged with a pull_request key). No trust filter: this only DEFERS a
+            // trusted child (buildableRaw is already trust-filtered) behind its own cited PR, and
+            // the non-starving fallback caps any false positive at one cycle.
+            const openPrNumbers = new Set(all.filter((i) => i.pull_request).map((i) => i.number));
             // (1) a dependency phrase directly followed by #NNN ("extends #339", "depends on #339",
             //     "built by PR #341"); (2) an extension verb in the TITLE — a curated one-line
             //     summary, so a strong "builds on prior work" signal — plus any reference to an
@@ -348,12 +358,12 @@ jobs:
               const blockers = new Set();
               for (const m of text.matchAll(PREREQ_ADJ)) {
                 const n = Number(m[1]);
-                if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
+                if (n !== issue.number && (blockerNumbers.has(n) || openPrNumbers.has(n))) blockers.add(n);
               }
               if (TITLE_EXT.test(title)) {
                 for (const m of text.matchAll(REF)) {
                   const n = Number(m[1]);
-                  if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
+                  if (n !== issue.number && (blockerNumbers.has(n) || openPrNumbers.has(n))) blockers.add(n);
                 }
               }
               return [...blockers];

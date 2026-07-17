@@ -75,6 +75,19 @@ assert_not "job-chained autofix inside ci is not flagged" "$healthy" "dead stub 
 d="$(fresh_copy missing-audit)"; rm -f "$d/audit.yml"
 assert_has "(a) missing canonical stub (audit)" "$d" "no live caller stub wires audit\.yml"
 
+# 1b. (#368) The 3-tier propose cadence — fixer-bugs.yml/fixer-30m.yml/fixer.yml all wiring
+#     the single fixer.yml reusable — must NOT false-positive. Neither as a non-canonical
+#     FILE (check b: all three are canonical emit-names) nor as "reusable not wired" (check a
+#     keys off the wired REUSABLE `fixer`, not the multiplexed file basenames). The healthy
+#     tree already asserts zero findings above, but pin the exact #368 regressions explicitly.
+assert_not "(#368) 3-tier fixer stubs not flagged non-canonical" "$healthy" "non-canonical stub 'fixer"
+assert_not "(#368) 3-tier fixer stubs not flagged reusable-unwired" "$healthy" "no live caller stub wires fixer-(bugs|30m)"
+
+# 1c. (#368/check-a) A consumer wiring NO fixer tier at all -> the fixer reusable is unwired,
+#     and check (a) reports it against the REUSABLE name (fixer), once, not once per tier.
+d="$(fresh_copy no-fixer)"; rm -f "$d/fixer-bugs.yml" "$d/fixer-30m.yml" "$d/fixer.yml"
+assert_has "(a) fixer reusable wholly unwired" "$d" "no live caller stub wires fixer\.yml"
+
 # 2. (b) DEAD workflow_run stub — the exact R5/#263 class.
 d="$(fresh_copy dead-autofix)"
 cat > "$d/claude-autofix.yml" <<'YAML'

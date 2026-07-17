@@ -51,11 +51,26 @@ warn() {
   count=$((count + 1))
 }
 
-# Canonical caller-stub names = the `emit NAME` list scaffold-caller.sh writes (ground
-# truth for the stub shapes). The `emit()` function definition has no space before its
-# `(`, so `^emit <name>` never matches it; the commented `# emit NAME …` line starts with
-# `#`, so it doesn't either.
+# Canonical caller-stub FILE basenames = the `emit NAME` list scaffold-caller.sh writes
+# (ground truth for the stub file shapes). The `emit()` function definition has no space
+# before its `(`, so `^emit <name>` never matches it; the commented `# emit NAME …` line
+# starts with `#`, so it doesn't either. Used by the dead/non-canonical FILE check (b) and
+# the per-FILE secrets check (c) — both key off the live stub's filename.
 CANON_STUBS="$(grep -oE '^emit [a-z][a-z0-9-]*' "$SCAFFOLD" | awk '{print $2}' | sort -u)"
+
+# Canonical REUSABLES = the distinct SuxOS/.github reusables those emitted stubs actually
+# wire. A stub FILE's basename is NOT always its reusable's basename: the 3-tier propose
+# cadence (#368) emits fixer-bugs.yml / fixer-30m.yml / fixer.yml, all wiring the SINGLE
+# fixer.yml reusable. Check (a) — "is each canonical reusable wired at all?" — must key off
+# THIS set (the wired reusables), not the file basenames, or a multiplexed cadence tier
+# false-positives as "reusable adopted org-wide but not wired here". Derived from scaffold's
+# own `uses: …/workflows/X.yml` references (comments stripped first) so it can't drift.
+# `claude-autofix` is excluded for the same reason it has no `emit` line: it is job-chained
+# inside the ci stub, never its own caller stub (the R5/#263 class), so check (a) — whose
+# message assumes a dedicated stub — must not demand a standalone claude-autofix caller.
+CANON_REUSABLES="$(grep -vE '^[[:space:]]*#' "$SCAFFOLD" \
+  | grep -oE 'workflows/[a-z][a-z0-9-]*\.yml' | sed -E 's#workflows/([a-z0-9-]+)\.yml#\1#' \
+  | grep -vxF 'claude-autofix' | sort -u)"
 
 if [ ! -d "$WFDIR" ]; then
   warn "no .github/workflows directory — no SuxOS caller stubs wired at all"
@@ -75,13 +90,16 @@ wired="$(find "$WFDIR" -type f \( -name '*.yml' -o -name '*.yaml' \) -exec grep 
 wired_names="$(printf '%s\n' "$wired" | sed -nE 's#.*/workflows/([A-Za-z0-9._-]+)\.yml@.*#\1#p' | sort -u)"
 
 if [ "$MODE" = "full" ]; then
-  # (a) MISSING — a canonical reusable with no live caller wiring it.
+  # (a) MISSING — a canonical reusable with no live caller wiring it. Keys off the wired
+  # REUSABLE set (not file basenames): the 3-tier fixer cadence wires one reusable (fixer)
+  # under three file names, so "is fixer wired?" is the right question, not "is fixer-bugs
+  # a reusable?" (#368).
   while IFS= read -r c; do
     [ -z "$c" ] && continue
     if ! printf '%s\n' "$wired_names" | grep -qxF "$c"; then
       warn "no live caller stub wires $c.yml (scaffold-caller.sh emits one — reusable adopted org-wide but not here)"
     fi
-  done <<< "$CANON_STUBS"
+  done <<< "$CANON_REUSABLES"
 
   # (d) STALE REF — a first-party SuxOS/.github reusable wired at anything but @main.
   while IFS= read -r u; do

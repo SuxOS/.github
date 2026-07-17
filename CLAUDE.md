@@ -32,6 +32,20 @@ everyone. It was previously held on the metered `ANTHROPIC_API_KEY` to avoid exa
 that — if jams appear, revert `security-review.yml` to `anthropic_api_key`. See README
 § Auth and `docs/design/backlog-pipeline.md`.
 
+## Model/effort config is contested — don't unilaterally flip it
+
+The Opus-vs-sonnet policy is spread across 5+ sites (`fixer.yml` `model` default,
+`issue-build.yml`'s `sensedOpus` escalation + `model-hint`/`simple-model` defaults, the
+`self-fixer-*.yml`/caller stub pins, `scaffold-caller.sh`, `budget-governor.yml`'s
+`OPUS_WF_RE`) and the operator directives baked into them **genuinely contradict each
+other**: `docs/design/2026-07-17-automation-structure-and-anti-drift.md` says "sonnet
+pinned org-wide, no Opus escalation", while `docs/design/budget-and-cadence.md:78`,
+`three-loop-pipeline.md`, `issue-build.yml`'s "default opus sonnet build" comment, and
+`fixer.yml`'s #286 opus default all still assert opus-for-real-work as intended. Treat any
+change that resolves this (e.g. #369's model-policy gate) as **operator arbitration, not a
+mechanical build** — pick a side only with explicit direction, and reconcile *all* the
+contradicting doc lines in the same PR.
+
 ## Before merging a workflow change
 
 Test against a real caller if the change touches trigger conditions, secrets, or

@@ -110,6 +110,21 @@ const casual = issue(405, "Fix the typo in the banner", "Similar area to #404 bu
 check("casual cross-ref (no verb, no adjacency phrase) → not deferred",
   [open404, casual], [], [404, 405]);
 
+// 8. (#370) An open PR cited by number as a prerequisite gates the child: PRs share the issue
+//    number space and aren't in blockerNumbers, so a "depends on PR #341" child was never
+//    deferred despite the regex/comment advertising exactly that phrasing. #341 (an open PR,
+//    tagged pull_request) is excluded from buildableRaw but must still defer its dependent.
+const pr341 = { number: 341, title: "feat: land the helper", body: "", pull_request: {}, labels: [] };
+const childOnPr = issue(342, "Wire the new command", "depends on PR #341 landing first.");
+check("(#370) open-PR prerequisite 'depends on PR #341' → deferred", [pr341, childOnPr], [342], [342]);
+
+// 9. (#370 guard) A casual open-PR reference — no dependency verb, no title-extension — must
+//    NOT defer, same tight-signal bar as issue refs; an unrelated open PR # in a body can't
+//    over-defer.
+const pr360 = { number: 360, title: "chore: cleanup", body: "", pull_request: {}, labels: [] };
+const casualPr = issue(361, "Fix the banner typo", "Nearby #360 but independent of it.");
+check("(#370 guard) casual open-PR ref (no verb) → not deferred", [pr360, casualPr], [], [361]);
+
 if (failures) { console.error(`\n${failures} assertion(s) failed`); process.exit(1); }
 console.log("\nall prerequisite-gating assertions passed");
 NODE
