@@ -260,6 +260,7 @@ jobs:
     uses: $REPO/.github/workflows/issue-build.yml@$REF
     with:
       gates-summary: "npm run type-check · npm test · npm run lint"
+      model-hint: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
     secrets: inherit
 YAML
 

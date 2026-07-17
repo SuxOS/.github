@@ -48,6 +48,13 @@ if ! prs=$(gh pr list --state open --limit "$pr_limit" \
 fi
 count=$(echo "$prs" | jq 'length')
 echo "open non-draft PRs to check: $count"
+# gh pr list returns created-desc with no label to narrow by here (every open PR is in
+# scope), so hitting the cap means the OLDEST open PRs — exactly the ones most likely to
+# be stuck — silently fell off this run (SuxOS/.github#366). Surface it instead of staying
+# quiet the way a plain truncation would.
+if [ "$count" -eq "$pr_limit" ]; then
+  echo "::warning::open PR count hit pr-limit ($pr_limit) — oldest open PRs beyond the cap were not checked this run"
+fi
 if [ "$count" -eq 0 ]; then exit 0; fi
 
 declare -A required_cache

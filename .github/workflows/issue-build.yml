@@ -104,9 +104,9 @@ on:
         type: string
         default: ""
       model-hint:
-        description: "`auto` = the design builder model (sonnet); or force `opus`/`sonnet`/`haiku` for this run."
+        description: "`auto` = tier-sensed model (opus on HIGH/large-effort, else sonnet); or force `opus`/`sonnet`/`haiku` for this run. Default is `sonnet` (operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation) — `auto` is opt-in per caller/run."
         type: string
-        default: "auto"
+        default: "sonnet"
       speed:
         description: "`thorough` = full turn budget; `fast` = trimmed (cheaper, quicker)."
         type: string
@@ -397,14 +397,17 @@ jobs:
                 if (picked.length >= maxIssues) break;
                 if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
                 if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
-                break;
+                continue;
               }
             }
-            // Escalate the MAIN model to opus for meaningful work: the whole HIGH tier
-            // (security or priority:high) or any effort:large issue. Routine MED/LOW work
-            // stays on sonnet — spending opus on the bug floor is waste, spending it on the
-            // work that actually matters is the point (operator: "default opus sonnet build"
-            // for real work; governor is the spend ceiling). Reuses data already computed.
+            // sensedOpus flags the whole HIGH tier (security or priority:high) or any
+            // effort:large issue — "meaningful work" by the old auto-escalation rule. It only
+            // actually escalates the MAIN model when a caller opts into model-hint: auto (see
+            // below); the org-wide default is now model-hint: sonnet, no Opus escalation
+            // (operator directive 2026-07-17, docs/design/2026-07-17-automation-structure-and-
+            // anti-drift.md, superseding the older "default opus sonnet build" quote below it
+            // in git history). sensedOpus still independently drives effort depth further down
+            // regardless of which model actually runs. Reuses data already computed.
             const sensedOpus = tier === "high" || picked.some((i) => i.labels.includes("effort:large"));
 
             core.info(`selected tier=${tier} count=${picked.length} points=${points}/${effortBudget} sensedOpus=${sensedOpus} issues=${JSON.stringify(picked.map((i) => i.number))}`);

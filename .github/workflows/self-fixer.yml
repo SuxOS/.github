@@ -34,4 +34,5 @@ jobs:
       # turns to read broadly before proposing (same tuning as sux's fixer stub).
       max-turns: 40
       scope: deep
+      model: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
     secrets: inherit

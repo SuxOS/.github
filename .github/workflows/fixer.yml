@@ -39,7 +39,9 @@ on:
     inputs:
       model:
         type: string
-        default: "opus" # a bulk scan whose every proposal is re-judged by issue-build — bulk tier
+        default: "sonnet" # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
+        # (a bulk scan whose every proposal is re-judged by issue-build anyway — bulk tier);
+        # a caller can still opt a specific tier into "opus" via this input if it wants one.
       max-turns:
         type: number
         default: 120
