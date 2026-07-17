@@ -310,12 +310,20 @@ jobs:
           [ -f edge-metrics.txt ] && cat edge-metrics.txt >> prom-body.txt
 
           if [ -n "${GRAFANA_PROM_URL:-}" ] && [ -n "${GRAFANA_PROM_USER:-}" ] && [ -n "${GRAFANA_LOKI_TOKEN:-}" ]; then
+            # curl's own exit code (6=DNS, 7=connect refused, 28=timeout, 35=TLS, ...)
+            # is what actually distinguishes an HTTP 000 cause — the http_code alone
+            # can't (#333). `set +e` around the call so `set -e` above doesn't kill
+            # the job on a nonzero curl exit before we get to log it.
+            set +e
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
               -u "${GRAFANA_PROM_USER}:${GRAFANA_LOKI_TOKEN}" \
               -H "content-type: text/plain" \
-              --data-binary @prom-body.txt "$GRAFANA_PROM_URL" || echo "000")
-            echo "grafana prometheus push HTTP $code"
-            [ "${code:0:1}" = "2" ] || echo "::warning::grafana prometheus push non-2xx ($code) — dashboard may be stale"
+              --data-binary @prom-body.txt "$GRAFANA_PROM_URL")
+            curl_exit=$?
+            set -e
+            [ -z "$code" ] && code="000"
+            echo "grafana prometheus push HTTP $code (curl exit $curl_exit)"
+            [ "${code:0:1}" = "2" ] || echo "::warning::grafana prometheus push non-2xx ($code, curl exit $curl_exit) — dashboard may be stale"
           else
             echo "GRAFANA_PROM_* secrets unset — prometheus push inert (no-op)"
           fi
