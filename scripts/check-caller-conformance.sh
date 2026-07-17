@@ -30,10 +30,11 @@
 # Optional 3rd arg `self` switches to .github's OWN self-*.yml caller-stub scan (#356):
 # those stubs are legitimately named self-<name>[-<variant>].yml rather than <name>.yml
 # (and self-fixer-30m.yml/self-fixer-bugs.yml legitimately multiplex one reusable across
-# several cadence/model variants), so the naming-derived checks (a)/(c)/(d) would false-
-# positive on every single one. Only the workflow_run dead-stub sub-case of (b) is
-# prefix-independent — it keys off the `workflow_run:` trigger shape, not the stub's name —
-# so `self` mode restricts the scan to self-*.yml files and only runs that sub-case.
+# several cadence/model variants), so the naming-derived checks (a) and (c) would false-
+# positive on every single one and are skipped in `self` mode. The workflow_run dead-stub
+# sub-case of (b), and (d) STALE REF, are both prefix-independent — they key off the
+# `workflow_run:` trigger shape and the `uses: ...@REF` string, never the stub's name — so
+# `self` mode restricts the workflow_run scan to self-*.yml files but still runs (d) (#362).
 MODE="full"
 if [ "${3:-}" = "self" ]; then MODE="self"; fi
 
@@ -77,17 +78,20 @@ if [ "$MODE" = "full" ]; then
       warn "no live caller stub wires $c.yml (scaffold-caller.sh emits one — reusable adopted org-wide but not here)"
     fi
   done <<< "$CANON_STUBS"
-
-  # (d) STALE REF — a first-party SuxOS/.github reusable wired at anything but @main.
-  while IFS= read -r u; do
-    [ -z "$u" ] && continue
-    ref="${u##*@}"
-    name="$(printf '%s' "$u" | sed -nE 's#.*/workflows/([A-Za-z0-9._-]+)\.yml@.*#\1#p')"
-    if [ "$ref" != "main" ]; then
-      warn "stub wires $name.yml at @$ref — canonical first-party ref is @main (stale pinned uses:)"
-    fi
-  done <<< "$wired"
 fi
+
+# (d) STALE REF — a first-party SuxOS/.github reusable wired at anything but @main. Like
+# the workflow_run dead-stub sub-case of (b), this is name-independent (keys off `uses:
+# ...@REF`, never the stub's filename) so it also runs in `self` mode (#362) — a self-*.yml
+# stub pinned to a tag/SHA would otherwise go undetected.
+while IFS= read -r u; do
+  [ -z "$u" ] && continue
+  ref="${u##*@}"
+  name="$(printf '%s' "$u" | sed -nE 's#.*/workflows/([A-Za-z0-9._-]+)\.yml@.*#\1#p')"
+  if [ "$ref" != "main" ]; then
+    warn "stub wires $name.yml at @$ref — canonical first-party ref is @main (stale pinned uses:)"
+  fi
+done <<< "$wired"
 
 # (b) DEAD/SUPERSEDED — a workflow FILE that wires a SuxOS reusable but whose basename is
 # not in the canonical stub set. The R5/#263 class: a standalone claude-autofix.yml stub on

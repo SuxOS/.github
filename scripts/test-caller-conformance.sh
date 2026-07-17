@@ -193,5 +193,12 @@ jobs:
 YAML
 assert_self_clean "self mode: non-workflow_run self-* variant not flagged" "$d"
 
+# 7d. (d) STALE REF (#362): self mode is name-independent for (d) same as it is for the
+#     workflow_run dead-stub sub-case of (b) — a self-*.yml stub pinned off @main must be
+#     caught even though the naming-derived checks (a)/(c) stay off in self mode.
+d="$(fresh_copy self-stale-ref)"
+sed -i 's#workflows/audit.yml@main#workflows/audit.yml@v1.2.3#' "$d/audit.yml"
+assert_self_has "self mode: stale non-@main ref caught" "$d" "stub wires audit\.yml at @v1\.2\.3"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"

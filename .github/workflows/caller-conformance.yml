@@ -10,10 +10,12 @@
 # consumer) — but this repo runs itself via its own self-*.yml caller stubs (see README's
 # self-* pattern), so the `self-conformance` job below scans THOSE too (#356), catching the
 # same R5/#263 dead-workflow_run-stub class if it recurs in a self-*.yml. It runs
-# check-caller-conformance.sh in `self` mode, which restricts the scan to self-*.yml and
-# skips the naming-derived (a)/(c)/(d) checks — self-*.yml is legitimately named
+# check-caller-conformance.sh in `self` mode, which restricts the workflow_run scan to
+# self-*.yml and skips the naming-derived (a)/(c) checks — self-*.yml is legitimately named
 # self-<name>.yml (and self-fixer-30m.yml-style cadence variants), so those checks would
-# otherwise false-positive on every stub.
+# otherwise false-positive on every stub. (d) STALE REF still runs in self mode (#362): it
+# keys off `uses: ...@ref`, not the stub's name, so it's just as prefix-independent as the
+# workflow_run check.
 #
 # Turns invariant 5 of the vX arc — "a merged reusable-workflow migration isn't done until
 # every caller adopts it" — from memory into a recurring signal. The comparison logic lives
