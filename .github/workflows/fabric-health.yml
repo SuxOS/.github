@@ -274,7 +274,14 @@ jobs:
 
           # --- Build the Influx line-protocol snapshot (suxos_* series) ---
           {
-            printf 'suxos_pipeline_backlog value=%s %s\n' "$(jq '.backlog_total' <<< "$status")" "$ts"
+            # suxos_pipeline_backlog is WITHHELD (no sample this tick, not a misleading 0)
+            # when any collector failed (#327): a repo whose issue query errored still
+            # contributes 0 to backlog_total, so a fully-degraded collection would otherwise
+            # read as a healthy-looking "Backlog now" of 0 even though collection-integrity
+            # is red. An absent sample is a dashboard gap, which is what we want here.
+            if [ "$(jq '.collection_ok' <<< "$status")" -eq 1 ]; then
+              printf 'suxos_pipeline_backlog value=%s %s\n' "$(jq '.backlog_total' <<< "$status")" "$ts"
+            fi
             printf 'suxos_backlog_zero value=%s %s\n' "$(jq '.backlog_zero' <<< "$status")" "$ts"
             printf 'suxos_budget_throttle_active value=%s %s\n' "$(jq '.budget_throttle_active' <<< "$status")" "$ts"
             printf 'suxos_collector_ok value=1 %s\n' "$ts"
