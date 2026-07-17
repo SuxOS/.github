@@ -140,6 +140,7 @@
     {
       "id": 3,
       "title": "Drain-to-zero streak (DoD: 7-day green)",
+      "description": "min_over_time(suxos_backlog_zero[7d]) == 1 means backlog held at zero for a full 7 days. Fail-safe: suxos_backlog_zero is gated on collection integrity (#305) — a run where any repo's issue query errored emits 0, breaking the streak, so an unobserved backlog can never read as a green 7-day streak. Check the 'Collector integrity' panels to tell a real backlog from a collection outage.",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -466,7 +467,7 @@
     {
       "id": 10,
       "title": "Disabled workflow expiry (>48h persisted, non-exempt)",
-      "description": "192 = 48h at the fabric-health 15-min scrape cadence (self-fabric-health.yml). Requires full-window presence (count_over_time >= 192) rather than min_over_time == 1, since the collector only emits a sample while a workflow is disabled — an absent-when-healthy series makes min_over_time == 1 fire on any transient disable within the window, not just one that persisted the whole 48h.",
+      "description": "180 ≈ 48h at the fabric-health 15-min scrape cadence (self-fabric-health.yml, 192 = 48h÷15min) with ~6% slack for dropped/delayed GitHub Actions schedule ticks. A strict >= 192 false-negatives on a single missed scrape over the window, silently suppressing the alert for a workflow that genuinely stayed disabled the whole 48h (#304). Requires near-full-window presence rather than min_over_time == 1, since the collector only emits a sample while a workflow is disabled — an absent-when-healthy series makes min_over_time == 1 fire on any transient disable within the window, not just one that persisted the whole 48h.",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -511,7 +512,99 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(count_over_time(suxos_workflow_disabled[48h]) >= 192) or vector(0)"
+          "expr": "count(count_over_time(suxos_workflow_disabled[48h]) >= 180) or vector(0)"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Collector integrity (query success)",
+      "description": "suxos_collection_ok is 1 when a per-repo/per-collector gh query succeeded this run, 0 when it errored (#305). DEGRADED means at least one collector failed — the health stats above may be a fail-silent zero rather than a measured green, so treat them as unknown until this clears. This is the collection-integrity contract: an outage reads as 'unknown', never 'green'.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DEGRADED",
+                  "color": "red"
+                }
+              }
+            },
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "all OK",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(last_over_time(suxos_collection_ok[20m]))"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Collector integrity by repo/collector",
+      "description": "Per-repo, per-collector suxos_collection_ok (1 = the backing gh query succeeded, 0 = errored). A dip to 0 marks a collection outage: that repo's corresponding health metric is a fail-silent zero this run, not a measured healthy value (#305). collector is one of backlog/prs/workflow_red/workflows_disabled (per repo) or throttle (.github budget governor).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min by (repo, collector) (last_over_time(suxos_collection_ok[20m]))",
+          "legendFormat": "{{repo}}/{{collector}}"
         }
       ]
     }

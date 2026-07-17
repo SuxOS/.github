@@ -34,7 +34,17 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | `suxos_pr_stuck_total` | `repo` | PRs BEHIND/DIRTY or idle past the threshold |
 | `suxos_workflow_red_total` | `repo` | Workflows whose last completed run failed |
 | `suxos_edge_deploy_ok` | `service` | Edge smoke check passed (opt-in via input) |
-| `suxos_collector_ok` | — | Heartbeat / freshness (`1` each run) |
+| `suxos_collection_ok` | `repo`, `collector` | `1` when that repo's `collector` gh query succeeded this run, `0` when it errored (`collector` ∈ backlog/prs/workflow_red/workflows_disabled, plus `throttle` on `.github`) |
+| `suxos_collector_ok` | — | Run heartbeat / freshness (`1` each run the spine executed) — distinct from `suxos_collection_ok`, which is per-query |
+
+**Collection-integrity contract:** every collector falls back to an empty result on a
+transient `gh` API error, which the derived metrics would otherwise score as a healthy
+zero (backlog 0, 0 red, 0 stuck, 0 disabled). `suxos_collection_ok{repo,collector}`
+makes that observable — an outage reads as an explicit **degraded/unknown** state, never
+silent green. The merge-relevant `suxos_backlog_zero` (and thus the 7-day DoD streak) is
+gated on it at the source: a run where any repo's issue query errored emits
+`backlog_zero=0`, so an unobserved backlog can't hold the streak falsely MET. The
+"Collector integrity" panels flag any `collection_ok < 1`.
 
 **Drain-to-zero streak (DoD):** not stored in the workflow — derived in Prometheus
 from series history: `min_over_time(suxos_backlog_zero[7d]) == 1` means backlog held

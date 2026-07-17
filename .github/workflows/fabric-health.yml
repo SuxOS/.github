@@ -90,14 +90,21 @@ jobs:
           # failing status rollup, or has been idle past the threshold.
           repos_json="[]"
           backlog_total=0
+          # Collection integrity (#305): a gh query that errors falls back to "[]", which the
+          # collectors below score as a healthy zero. Track per-collector success so an outage
+          # reads as an explicit "unknown"/degraded state (suxos_collection_ok) instead of
+          # silently green — and so the backlog-zero DoD streak can be gated on it.
+          backlog_collection_ok=1
 
           for repo in $REPOS; do
             slug="${ORG}/${repo}"
 
             # --- Backlog: open, non-PR issues that are build-eligible ---
-            if ! issues=$(gh issue list --repo "$slug" --state open --limit 200 \
+            if issues=$(gh issue list --repo "$slug" --state open --limit 200 \
                 --json number,labels 2>/dev/null); then
-              issues="[]"
+              issues_ok=1
+            else
+              issues="[]"; issues_ok=0; backlog_collection_ok=0
             fi
             backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" '
               ($ex | split(",") | map(select(length>0))) as $excl
@@ -105,9 +112,11 @@ jobs:
               | length')
 
             # --- PRs: open / red (failing checks) / stuck ---
-            if ! prs=$(gh pr list --repo "$slug" --state open --limit 200 \
+            if prs=$(gh pr list --repo "$slug" --state open --limit 200 \
                 --json number,mergeable,mergeStateStatus,statusCheckRollup,updatedAt 2>/dev/null); then
-              prs="[]"
+              prs_ok=1
+            else
+              prs="[]"; prs_ok=0
             fi
             pr_stats=$(printf '%s' "$prs" | jq --arg before "$stuck_before" '
               def failing: any(.statusCheckRollup[]?;
@@ -122,9 +131,11 @@ jobs:
               }')
 
             # --- Workflows: how many have a failing LAST run ---
-            if ! wfruns=$(gh run list --repo "$slug" --limit 200 \
+            if wfruns=$(gh run list --repo "$slug" --limit 200 \
                 --json workflowName,conclusion,status,createdAt 2>/dev/null); then
-              wfruns="[]"
+              wfruns_ok=1
+            else
+              wfruns="[]"; wfruns_ok=0
             fi
             wf_red=$(printf '%s' "$wfruns" | jq '
               [ .[] | select(.status == "completed") ]
@@ -133,9 +144,11 @@ jobs:
               | [ .[] | select(.conclusion == "failure") ] | length')
 
             # --- Workflows: disabled_manually, excluding known-by-design reusable defs ---
-            if ! wfs=$(gh workflow list --repo "$slug" --all \
+            if wfs=$(gh workflow list --repo "$slug" --all \
                 --json name,path,state 2>/dev/null); then
-              wfs="[]"
+              wfs_ok=1
+            else
+              wfs="[]"; wfs_ok=0
             fi
             # The exempt list is the workflow_call-only reusable defs that live in THIS repo
             # (.github) and are left disabled_manually by design. In every caller repo those
@@ -150,40 +163,60 @@ jobs:
                   | select(((.path | split("/") | last) as $b | $excl | index($b)) | not)
                   | {file: (.path | split("/") | last), name: .name} ]')
 
+            # Per-collector success for this repo (1 = query returned, 0 = errored to a
+            # fail-silent empty). Carried into fabric-status.json so the separate ship step
+            # can emit suxos_collection_ok{repo,collector} — steps don't share shell vars.
+            collection_json=$(jq -n \
+              --argjson backlog "$issues_ok" --argjson prs "$prs_ok" \
+              --argjson workflow_red "$wfruns_ok" --argjson workflows_disabled "$wfs_ok" \
+              '{backlog: $backlog, prs: $prs, workflow_red: $workflow_red,
+                workflows_disabled: $workflows_disabled}')
+
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
               --argjson disabled "$disabled_json" \
+              --argjson collection "$collection_json" \
               '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
-                workflows_disabled: $disabled}')
+                workflows_disabled: $disabled, collection: $collection}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
           done
 
           # --- Budget governor: throttle active if any open `throttle` issue in .github ---
-          if ! throttle=$(gh issue list --repo "${ORG}/.github" --state open \
+          if throttle=$(gh issue list --repo "${ORG}/.github" --state open \
               --label throttle --json number 2>/dev/null); then
-            throttle="[]"
+            throttle_ok=1
+          else
+            throttle="[]"; throttle_ok=0
           fi
           throttle_active=$(printf '%s' "$throttle" | jq 'if length > 0 then 1 else 0 end')
 
-          backlog_zero=$([ "$backlog_total" -eq 0 ] && echo 1 || echo 0)
+          # Gate backlog_zero on collection integrity (#305): a repo whose issue query errored
+          # contributes 0 to backlog_total, which would otherwise read as a clean zero and keep
+          # the merge-relevant 7-day DoD streak (min_over_time(suxos_backlog_zero[7d]) == 1)
+          # falsely MET during a real-but-unobserved backlog. Unmeasured is never green.
+          backlog_zero=$([ "$backlog_total" -eq 0 ] && [ "$backlog_collection_ok" -eq 1 ] && echo 1 || echo 0)
 
           jq -n \
             --argjson ts "$now_epoch" \
             --argjson repos "$repos_json" \
             --argjson backlog_total "$backlog_total" \
             --argjson backlog_zero "$backlog_zero" \
+            --argjson backlog_collection_ok "$backlog_collection_ok" \
             --argjson throttle_active "$throttle_active" \
+            --argjson throttle_ok "$throttle_ok" \
             '{
               schema: "suxos-fabric-status/v1",
               generated_at_epoch: $ts,
               backlog_total: $backlog_total,
               backlog_zero: $backlog_zero,
+              backlog_collection_ok: $backlog_collection_ok,
               budget_throttle_active: $throttle_active,
+              budget_throttle_collection_ok: $throttle_ok,
               repos: $repos
             }' > fabric-status.json
 
-          echo "backlog_total=$backlog_total backlog_zero=$backlog_zero throttle=$throttle_active"
+          echo "backlog_total=$backlog_total backlog_zero=$backlog_zero throttle=$throttle_active backlog_collection_ok=$backlog_collection_ok"
           echo "status-file=fabric-status.json" >> "$GITHUB_OUTPUT"
 
       - name: Edge deploy smoke checks (optional)
@@ -235,6 +268,14 @@ jobs:
             # disabled_manually workflow — the dashboard flags any that persists >48h.
             jq -r --arg ts "$ts" '.repos[] as $r | $r.workflows_disabled[]? |
               "suxos_workflow_disabled,repo=\($r.repo),workflow=\(.file) value=1 \($ts)"' <<< "$status"
+            # Per-repo/per-collector collection integrity (#305): value 1 = the backing gh
+            # query succeeded this run, 0 = it errored and the derived health metric above is a
+            # fail-silent zero that must NOT be read as green. Lets an outage surface as an
+            # explicit degraded state (dashboard "Collector integrity" panel + alert).
+            jq -r --arg ts "$ts" '.repos[] as $r | ($r.collection // {}) | to_entries[] |
+              "suxos_collection_ok,repo=\($r.repo),collector=\(.key) value=\(.value) \($ts)"' <<< "$status"
+            printf 'suxos_collection_ok,repo=.github,collector=throttle value=%s %s\n' \
+              "$(jq -r '.budget_throttle_collection_ok' <<< "$status")" "$ts"
           } > prom-body.txt
           # Append optional edge deploy series from the smoke-check step.
           [ -f edge-metrics.txt ] && cat edge-metrics.txt >> prom-body.txt
@@ -254,8 +295,15 @@ jobs:
           if [ -n "${GRAFANA_LOKI_URL:-}" ] && [ -n "${GRAFANA_LOKI_USER:-}" ] && [ -n "${GRAFANA_LOKI_TOKEN:-}" ]; then
             red_total=$(jq '[.repos[].workflow_red] | add // 0' <<< "$status")
             stuck_total=$(jq '[.repos[].prs.stuck] | add // 0' <<< "$status")
-            level=$([ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] && echo error || echo info)
+            # A collection outage is itself an error-level event: the health numbers below may
+            # be fail-silent zeros, not measured greens (#305).
+            collectors_failed=$(jq '
+              ([.repos[] | (.collection // {}) | to_entries[].value] + [.budget_throttle_collection_ok])
+              | map(select(. == 0)) | length' <<< "$status")
+            level=$([ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] || [ "$collectors_failed" -gt 0 ] && echo error || echo info)
             line=$(jq -c '{backlog: .backlog_total, backlog_zero, throttle: .budget_throttle_active,
+              collectors_failed: (([.repos[] | (.collection // {}) | to_entries[].value] + [.budget_throttle_collection_ok])
+                | map(select(. == 0)) | length),
               workflow_red: ([.repos[].workflow_red] | add // 0),
               pr_stuck: ([.repos[].prs.stuck] | add // 0)}' <<< "$status")
             body=$(jq -n --arg ts "$ts" --arg line "$line" --arg level "$level" \
