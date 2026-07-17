@@ -466,6 +466,7 @@
     {
       "id": 10,
       "title": "Disabled workflow expiry (>48h persisted, non-exempt)",
+      "description": "192 = 48h at the fabric-health 15-min scrape cadence (self-fabric-health.yml). Requires full-window presence (count_over_time >= 192) rather than min_over_time == 1, since the collector only emits a sample while a workflow is disabled — an absent-when-healthy series makes min_over_time == 1 fire on any transient disable within the window, not just one that persisted the whole 48h.",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -510,7 +511,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(min_over_time(suxos_workflow_disabled[48h]) == 1) or vector(0)"
+          "expr": "count(count_over_time(suxos_workflow_disabled[48h]) >= 192) or vector(0)"
         }
       ]
     }

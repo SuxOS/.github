@@ -46,10 +46,13 @@ env:
   #  - issue-build.yml's build step adaptively escalates to opus per-batch (`sensedOpus`,
   #    #172) for high-tier/effort:large work, but the workflow name doesn't change, so those
   #    runner-minutes are counted as sonnet here.
-  #  - conversely, a caller repo that overrides fixer's `model` input back to sonnet is now
-  #    over-counted as opus, since fixer matches OPUS_WF_RE by name regardless of the input.
+  #  - a caller repo that overrides fixer's `model` input back to sonnet is now over-counted
+  #    as opus, since fixer matches OPUS_WF_RE by name regardless of the input. self-fixer-
+  #    hourly.yml is special-cased out below (pinned to sonnet, #292) since it runs 24x/day —
+  #    frequent enough to trip the opus throttle on a pure mis-count; any other such caller
+  #    still rides the imprecision above.
   CLAUDE_WF_RE: "claude|security review|fixer|issue build|deep audit|org consistency"
-  OPUS_WF_RE: "deep audit|org consistency|fixer"
+  OPUS_WF_RE: "deep audit|org consistency|fixer(?! \\(hourly)"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
   OPUS_BUDGET_MIN: "900"

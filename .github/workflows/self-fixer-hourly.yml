@@ -27,5 +27,6 @@ jobs:
       id-token: write
     uses: SuxOS/.github/.github/workflows/fixer.yml@main
     with:
+      model: sonnet # pinned: this is the cheap 24x/day tripwire, not the bulk-scan tier fixer.yml defaults to
       max-turns: 12 # shallow: fresh/cheap signal only, not a full-repo re-sweep
     secrets: inherit
