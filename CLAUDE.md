@@ -65,3 +65,11 @@ prepended to `PATH` and the action's `inputs:` set as env vars. This tests the
 actual shipped logic (no drift from a hand-copied stand-in) and needs no test
 framework — see `scripts/test-scaffold-caller-regression.sh` for worked examples
 (pr-eligibility, upsert-tracking-issue, flood-guard, check-throttle).
+
+`actionlint` does NOT lint `github-script` `with.script:` JS — that JS is a blind spot
+in the gate, so a syntax error there ships silently. Validate any such block with
+`node --check <(yq -r '.jobs.J.steps[]|select(.id=="X").with.script' wf.yml)`, and
+unit-test a self-contained slice of it by extracting the region with `awk` between
+anchor comments and running it via `new Function(...)` with fixtures injected — see
+`scripts/test-issue-build-prereq-gating.sh` (tests issue-build's select heuristic this
+way, same no-drift principle as the shell-block extraction above).
