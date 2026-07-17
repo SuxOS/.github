@@ -79,3 +79,7 @@ jobs:
       - name: Assert issue-build prerequisite-gating defers issues behind unmerged prerequisites
         run: bash scripts/test-issue-build-prereq-gating.sh
         shell: bash
+
+      - name: Assert caller-stub conformance check flags missing/dead/stale/misconfigured stubs
+        run: bash scripts/test-caller-conformance.sh
+        shell: bash

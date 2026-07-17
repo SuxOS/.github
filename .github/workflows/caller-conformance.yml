@@ -1,0 +1,104 @@
+# Caller-stub conformance sweep (#346).
+#
+# For each repo in .github/managed-repos.json, compares its live SuxOS caller stubs
+# (.github/workflows/) against the canonical set scripts/scaffold-caller.sh would emit —
+# flagging (a) a reusable with no live caller, (b) a dead/superseded stub still present
+# (the R5/#263 `workflow_run` autofix class), (c) a stub missing required triggers /
+# `secrets: inherit`, and (d) a stub pinned to a stale `uses: …@ref`.
+#
+# Turns invariant 5 of the vX arc — "a merged reusable-workflow migration isn't done until
+# every caller adopts it" — from memory into a recurring signal. The comparison logic lives
+# in scripts/check-caller-conformance.sh (unit-tested, canonical set derived from
+# scaffold-caller.sh so it can't drift); this file is the cross-repo harness only.
+#
+# ADVISORY, never merge-blocking — same fail-safe posture as pin-consistency.yml's
+# `consumers` job: a repo it can't reach (App not installed / secret missing) degrades to a
+# logged skip, and every finding is a `::warning::` + step-summary row, never a failure. A
+# consumer repo's own stub hygiene is that repo's concern; this only surfaces the drift.
+#
+# Runs directly in this repo — it is NOT a reusable workflow_call file.
+name: caller-conformance
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caller-conformance-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  managed-repos:
+    # Single source of truth for the matrix below — see .github/managed-repos.json.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repos: ${{ steps.load.outputs.repos }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: load
+        run: echo "repos=$(jq -c '.repos' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
+  conformance:
+    # ADVISORY cross-repo scan. Never fails a merge in THIS repo; it only surfaces caller-stub
+    # drift as warnings + a step-summary. `continue-on-error` + outcome guards mean a missing
+    # secret or a repo the SUX_BOT App is not installed on degrades to a logged skip, never a
+    # hard failure. Cross-repo reach depends on the SUX_BOT App being installed on each target
+    # with `contents: read`; where it is not, that repo is skipped with a warning.
+    needs: managed-repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.managed-repos.outputs.repos) }}
+    steps:
+      # This repo first (default path): scripts/check-caller-conformance.sh derives the
+      # canonical stub set from scripts/scaffold-caller.sh, both of which live here.
+      - name: Checkout .github (this repo — canonical stub source)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Mint org-scoped app token
+        id: app-token
+        continue-on-error: true
+        # Same pinned version as .github/actions/mint-app-token (kept in lock-step so
+        # pin-consistency's DRIFT check stays green). Scoped to the single target repo.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: ${{ matrix.repo }}
+
+      - name: Checkout SuxOS/${{ matrix.repo }}
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/${{ matrix.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: consumer
+
+      - name: Check caller-stub conformance for SuxOS/${{ matrix.repo }} (advisory)
+        env:
+          REPO: ${{ matrix.repo }}
+          TOKEN_OK: ${{ steps.app-token.outcome }}
+          CHECKOUT_OK: ${{ steps.checkout.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$TOKEN_OK" != "success" ]; then
+            echo "::warning::[$REPO] could not mint an app token (secret missing or App not installed) — skipping conformance scan"
+            exit 0
+          fi
+          if [ "$CHECKOUT_OK" != "success" ] || [ ! -d consumer/.github ]; then
+            echo "::warning::[$REPO] could not check out repo / no .github tree (App may lack contents:read) — skipping conformance scan"
+            exit 0
+          fi
+          echo "### Caller-stub conformance — $REPO" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/check-caller-conformance.sh "$REPO" consumer/.github/workflows
