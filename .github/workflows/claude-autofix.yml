@@ -251,10 +251,16 @@ jobs:
           # job for this branch via the Actions API and cap on whichever count is higher — a
           # missed trailer then degrades to over-counting (safe) instead of under-counting
           # (unbounded spend, the failure mode this cap exists to prevent).
+          # Since #263, this job runs job-chained inside the caller CI workflow rather than as
+          # its own workflow_run, so `workflow_id` here is the CALLER CI workflow's id and its
+          # runs?branch=X total_count is every CI run on the branch (one per push/synchronize),
+          # not autofix attempts — this job only ever fires when that CI run's conclusion is a
+          # failure, so filter to status=failure to approximate actual autofix attempts instead
+          # of counting every green push too.
           run_attempts=0
           workflow_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -q '.workflow_id' 2>/dev/null || true)
           if printf '%s' "$workflow_id" | grep -qE '^[0-9]+$'; then
-            api_count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?branch=${HEAD_BRANCH}&per_page=100" \
+            api_count=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?branch=${HEAD_BRANCH}&status=failure&per_page=100" \
               -q '.total_count' 2>/dev/null || true)
             if printf '%s' "$api_count" | grep -qE '^[0-9]+$'; then run_attempts=$api_count; fi
           fi
@@ -287,9 +293,6 @@ jobs:
         if: steps.gate.outputs.go == 'true' && steps.cap.outputs.go == 'true'
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
-          CI_HEAD_BRANCH: ${{ inputs.head-branch }}
-          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          GATES_SUMMARY: ${{ inputs.gates-summary }}
           ENABLE_PROMPT_CACHING_1H: "1"
           # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
           # and retry instead of failing — the pool-exhaustion jam, without a metered key.
@@ -304,10 +307,10 @@ jobs:
           # "never trigger on a bot event" block from also applying to our own bot.
           allowed_bots: suxbot[bot]
           prompt: |
-            CI failed on this PR (branch $CI_HEAD_BRANCH,
-            run $CI_RUN_URL). Read the failing job's logs,
+            CI failed on this PR (branch ${{ inputs.head-branch }},
+            run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}). Read the failing job's logs,
             find the ROOT cause, and fix it. This repo's gates must all pass:
-              $GATES_SUMMARY
+              ${{ inputs.gates-summary }}
             Make the smallest correct change, re-run the gates locally, then commit and push
             to this PR branch. In EVERY commit you make, add this exact trailer as a footer line
             (after a blank line, at the end of the commit message):
