@@ -124,7 +124,7 @@ jobs:
           prompt: |
             ${{ inputs.prompt-context }}
             Do a SECURITY review of this PR's diff vs the base branch. FIRST run
-            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            `git diff ${{ env.BASE_SHA }}...${{ env.HEAD_SHA }}` to see the full diff — do not
             try to infer what changed from reading post-change files alone, and do not spend
             turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
             context only where the diff alone is ambiguous.
@@ -169,7 +169,7 @@ jobs:
           prompt: |
             ${{ inputs.prompt-context }}
             Do a SECURITY review of this PR's diff vs the base branch. FIRST run
-            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            `git diff ${{ env.BASE_SHA }}...${{ env.HEAD_SHA }}` to see the full diff — do not
             try to infer what changed from reading post-change files alone, and do not spend
             turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
             context only where the diff alone is ambiguous.
@@ -215,7 +215,7 @@ jobs:
           prompt: |
             ${{ inputs.prompt-context }}
             Do a SECURITY review of this PR's diff vs the base branch. FIRST run
-            `git diff ${{ env.BASE_SHA }} ${{ env.HEAD_SHA }}` to see the full diff — do not
+            `git diff ${{ env.BASE_SHA }}...${{ env.HEAD_SHA }}` to see the full diff — do not
             try to infer what changed from reading post-change files alone, and do not spend
             turns hunting for the diff any other way. Use `git log`/`git show` for commit-level
             context only where the diff alone is ambiguous.
