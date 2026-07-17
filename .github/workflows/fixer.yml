@@ -39,10 +39,10 @@ on:
     inputs:
       model:
         type: string
-        default: "sonnet" # a bulk scan whose every proposal is re-judged by issue-build — bulk tier
+        default: "opus" # a bulk scan whose every proposal is re-judged by issue-build — bulk tier
       max-turns:
         type: number
-        default: 40
+        default: 120
       auto-assign-agent:
         description: >-
           After filing, assign each freshly-created issue to a coding agent via GitHub's
@@ -71,7 +71,7 @@ concurrency:
 jobs:
   fixer:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Preflight — need the token
         id: pre
