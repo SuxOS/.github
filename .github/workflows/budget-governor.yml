@@ -38,15 +38,18 @@ concurrency:
 env:
   # Workflow-name → model classification (case-insensitive extended regexes).
   # Three-loop rework (2026-07-15): the standalone opus `triage` stage was removed — its
-  # buildability call folded into issue-build (sonnet). Opus now runs ONLY in the nightly
-  # deep-audit + weekly org-consistency passes; everything else Claude-ish is sonnet.
-  # Known accepted gap: issue-build.yml's build step adaptively escalates to opus per-batch
-  # (`sensedOpus`, #172) for high-tier/effort:large work, but the workflow name doesn't
-  # change, so those runner-minutes are counted as sonnet here — see
-  # docs/design/budget-and-cadence.md § "The budget governor" for why this isn't worth
-  # fixing precisely yet.
+  # buildability call folded into issue-build (sonnet). Opus runs in the nightly deep-audit
+  # + weekly org-consistency passes, and in `fixer` (its default `model` flipped sonnet→opus
+  # in #286, fixer.yml:40-42); everything else Claude-ish is sonnet.
+  # Known accepted gaps (see docs/design/budget-and-cadence.md § "The budget governor" for
+  # why neither is worth fixing precisely yet):
+  #  - issue-build.yml's build step adaptively escalates to opus per-batch (`sensedOpus`,
+  #    #172) for high-tier/effort:large work, but the workflow name doesn't change, so those
+  #    runner-minutes are counted as sonnet here.
+  #  - conversely, a caller repo that overrides fixer's `model` input back to sonnet is now
+  #    over-counted as opus, since fixer matches OPUS_WF_RE by name regardless of the input.
   CLAUDE_WF_RE: "claude|security review|fixer|issue build|deep audit|org consistency"
-  OPUS_WF_RE: "deep audit|org consistency"
+  OPUS_WF_RE: "deep audit|org consistency|fixer"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
   OPUS_BUDGET_MIN: "900"
