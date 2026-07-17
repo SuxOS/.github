@@ -85,7 +85,19 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # Both sweeps below can trigger a `gh run rerun --failed` that re-invokes
+      # security-review.yml (an LLM-costing check), so gate them the same way
+      # issue-build.yml gates its own Claude spend (#331): defer only at red, since
+      # this is backlog-draining retry work, not proactively new spend.
+      - name: Check autonomy throttle
+        id: throttle
+        uses: SuxOS/.github/.github/actions/check-throttle@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          defer-at: "red"
+
       - name: Retry needs-human PRs past their cooldown, up to the cycle cap
+        if: steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -181,6 +193,7 @@ jobs:
           done
 
       - name: Requeue security-review-retry PRs (rate-limit infra defers), honoring resetsAt
+        if: steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
