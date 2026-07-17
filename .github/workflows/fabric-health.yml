@@ -132,7 +132,7 @@ jobs:
               | map(sort_by(.createdAt) | last)
               | [ .[] | select(.conclusion == "failure") ] | length')
 
-            # --- Workflows: disabled_manually, excluding known-by-design reusable defs ---
+            # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             if ! wfs=$(gh workflow list --repo "$slug" --all \
                 --json name,path,state 2>/dev/null); then
               wfs="[]"
@@ -141,14 +141,19 @@ jobs:
             # (.github) and are left disabled_manually by design. In every caller repo those
             # same basenames are ACTIVE caller stubs (e.g. security-review.yml, a required
             # merge gate), so only apply the exemption when surveying .github — everywhere
-            # else a manual disable is a real alert we must not suppress (#290).
+            # else a manual disable is a real alert we must not suppress (#290). The exemption
+            # covers only disabled_manually — disabled_inactivity (GitHub auto-disabling a
+            # workflow after 60 days of repo inactivity) is never by-design, even in .github,
+            # so it always alerts (#303).
             disabled_json=$(printf '%s' "$wfs" | jq --arg ex "$DISABLED_EXEMPT" --arg repo "$repo" '
               (if $repo == ".github"
                  then ($ex | split(",") | map(select(length>0)))
                  else [] end) as $excl
-              | [ .[] | select(.state == "disabled_manually")
-                  | select(((.path | split("/") | last) as $b | $excl | index($b)) | not)
-                  | {file: (.path | split("/") | last), name: .name} ]')
+              | [ .[] | select(.state == "disabled_manually" or .state == "disabled_inactivity")
+                  | select(if .state == "disabled_manually"
+                           then (((.path | split("/") | last) as $b | $excl | index($b)) | not)
+                           else true end)
+                  | {file: (.path | split("/") | last), name: .name, state: .state} ]')
 
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
@@ -232,7 +237,8 @@ jobs:
               "suxos_pr_stuck_total,repo=\(.repo) value=\(.prs.stuck) \($ts)\n" +
               "suxos_workflow_red_total,repo=\(.repo) value=\(.workflow_red) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt
-            # disabled_manually workflow — the dashboard flags any that persists >48h.
+            # disabled_manually or disabled_inactivity workflow — the dashboard
+            # flags any that persists >48h.
             jq -r --arg ts "$ts" '.repos[] as $r | $r.workflows_disabled[]? |
               "suxos_workflow_disabled,repo=\($r.repo),workflow=\(.file) value=1 \($ts)"' <<< "$status"
           } > prom-body.txt

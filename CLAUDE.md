@@ -40,9 +40,11 @@ actual run. Prefer landing behind a caller repo's `workflow_dispatch` smoke test
 before it goes live on `schedule`/`issues` triggers across the whole org.
 
 This repo's own gate is `self-check.yml`: **actionlint** (which also runs
-shellcheck over embedded `run:` blocks) plus the four `scripts/test-*.sh` invariant
-scripts — run those locally, not `yamllint`. `yamllint` is on the runner but its
-default 80-col config flags nearly every pre-existing line here and is *not* the gate.
+shellcheck over embedded `run:` blocks) plus the `scripts/test-*.sh` invariant
+scripts (five as of #307/#308) — run those locally, not `yamllint`. `yamllint` is
+on the runner but its default 80-col config flags nearly every pre-existing line
+here and is *not* the gate. Each script is wired into `self-check.yml` by explicit
+name, not a glob, so adding a new one means adding its step there too.
 
 A composite action's embedded `run:` shell block is directly unit-testable without
 a live `gh`: extract it with `yq -r '.runs.steps[] | select(.id == "X") | .run'

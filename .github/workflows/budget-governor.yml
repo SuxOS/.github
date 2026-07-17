@@ -47,12 +47,18 @@ env:
   #    #172) for high-tier/effort:large work, but the workflow name doesn't change, so those
   #    runner-minutes are counted as sonnet here.
   #  - a caller repo that overrides fixer's `model` input back to sonnet is now over-counted
-  #    as opus, since fixer matches OPUS_WF_RE by name regardless of the input. self-fixer-
-  #    hourly.yml is special-cased out below (pinned to sonnet, #292) since it runs 24x/day —
-  #    frequent enough to trip the opus throttle on a pure mis-count; any other such caller
-  #    still rides the imprecision above.
+  #    as opus, since fixer matches OPUS_WF_RE by name regardless of the input. Every current
+  #    sonnet-pinned self-fixer-*.yml cadence tier (self-fixer-30m.yml "Self fixer (30m,
+  #    bugs+feats)", self-fixer-bugs.yml "Self fixer (15m, bugs only)") is special-cased out
+  #    below by its `(<duration>m` name suffix, since each runs frequently enough to trip the
+  #    opus throttle on a pure mis-count; any other such caller still rides the imprecision
+  #    above. Only the bare "Self fixer" name (the deep/1h tier, opus by default) and
+  #    fixer.yml's own reusable-def name still classify as opus. This lookahead is a name-
+  #    substring guess, not a `model:` read — see scripts/test-budget-governor-opus-classify.sh,
+  #    which MUST be updated (and re-run) whenever a self-fixer-*.yml is renamed or a cadence
+  #    tier is added/removed (#307, #308 were this same regression resurrected by a rename).
   CLAUDE_WF_RE: "claude|security review|fixer|issue build|deep audit|org consistency"
-  OPUS_WF_RE: "deep audit|org consistency|fixer(?! \\(hourly)"
+  OPUS_WF_RE: "deep audit|org consistency|fixer(?! ?\\((?:\\d+m|hourly))"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
   OPUS_BUDGET_MIN: "900"
@@ -218,38 +224,50 @@ jobs:
           since=$(date -u -d "-${RATE_LIMIT_LOOKBACK_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
             || date -u -v-"${RATE_LIMIT_LOOKBACK_HOURS}"H +%Y-%m-%dT%H:%M:%SZ)
 
+          # Gather every candidate failure across ALL repos first, THEN sort by
+          # recency and apply the scan cap — scanning by fixed repo-list order let an
+          # early-listed repo's unrelated failure storm exhaust the whole budget
+          # before a later-listed repo's genuine, more recent five_hour marker was
+          # ever looked at (#302). One `gh run list` per repo is cheap; it's the
+          # per-run `gh run view --log-failed` below that's rate-limited, so the cap
+          # must bind on that, applied globally by recency.
+          all_candidates="[]"
+          for r in $REPOS; do
+            runs=$(gh run list --repo "SuxOS/$r" --limit 50 --created ">=$since" \
+                --json databaseId,workflowName,conclusion,createdAt 2>/dev/null \
+              | jq -c --arg cre "$CLAUDE_WF_RE" --arg repo "$r" \
+                '[.[] | select(.conclusion == "failure") | select(.workflowName | test($cre; "i")) |
+                  {repo: $repo, id: .databaseId, createdAt}]') \
+              || { echo "::warning::gh run list (rate-limit scan) failed for SuxOS/$r — skipping"; continue; }
+            all_candidates=$(jq -c -n --argjson a "$all_candidates" --argjson b "$runs" '$a + $b')
+          done
+          scan_targets=$(jq -c --argjson cap "$RATE_LIMIT_MAX_RUNS_SCANNED" \
+            '[sort_by(.createdAt) | reverse | .[0:$cap][]]' <<<"$all_candidates")
+
           max_resets_at=0
           scanned=0
-          for r in $REPOS; do
-            [ "$scanned" -ge "$RATE_LIMIT_MAX_RUNS_SCANNED" ] && break
-            runs=$(gh run list --repo "SuxOS/$r" --limit 50 --created ">=$since" \
-                --json databaseId,workflowName,conclusion 2>/dev/null \
-              | jq -c --arg cre "$CLAUDE_WF_RE" \
-                '[.[] | select(.conclusion == "failure") | select(.workflowName | test($cre; "i")) | .databaseId]') \
-              || { echo "::warning::gh run list (rate-limit scan) failed for SuxOS/$r — skipping"; continue; }
-            for id in $(jq -r '.[]' <<<"$runs"); do
-              [ "$scanned" -ge "$RATE_LIMIT_MAX_RUNS_SCANNED" ] && break
-              scanned=$((scanned + 1))
-              log=$(gh run view --repo "SuxOS/$r" "$id" --log-failed 2>/dev/null) || continue
-              # Take resetsAt ONLY from a line that itself carries the five_hour marker:
-              # a genuine rate_limit_event is one compact JSON line with both fields
-              # inside rate_limit_info (see scripts/test-classify-security-noverdict.sh
-              # for the shape). Run logs also contain untrusted text (diffs, tool
-              # output), so a stray "resetsAt" elsewhere in the log must never be read
-              # as the reset epoch. Same-line pairing + the plausibility cap below bound
-              # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
-              # no worse than an attacker genuinely exhausting the pool.
-              this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
-                | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
-              [ -n "${this_reset:-}" ] || continue
-              # resetsAt may be epoch seconds or milliseconds (same normalization as
-              # pr-unstick.yml): 13+ digits is milliseconds.
-              if [ "${#this_reset}" -ge 13 ]; then this_reset=$(( this_reset / 1000 )); fi
-              if [ "$this_reset" -gt "$max_resets_at" ]; then
-                max_resets_at=$this_reset
-              fi
-            done
-          done
+          while IFS=$'\t' read -r repo id; do
+            [ -n "$id" ] || continue
+            scanned=$((scanned + 1))
+            log=$(gh run view --repo "SuxOS/$repo" "$id" --log-failed 2>/dev/null) || continue
+            # Take resetsAt ONLY from a line that itself carries the five_hour marker:
+            # a genuine rate_limit_event is one compact JSON line with both fields
+            # inside rate_limit_info (see scripts/test-classify-security-noverdict.sh
+            # for the shape). Run logs also contain untrusted text (diffs, tool
+            # output), so a stray "resetsAt" elsewhere in the log must never be read
+            # as the reset epoch. Same-line pairing + the plausibility cap below bound
+            # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
+            # no worse than an attacker genuinely exhausting the pool.
+            this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
+              | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+            [ -n "${this_reset:-}" ] || continue
+            # resetsAt may be epoch seconds or milliseconds (same normalization as
+            # pr-unstick.yml): 13+ digits is milliseconds.
+            if [ "${#this_reset}" -ge 13 ]; then this_reset=$(( this_reset / 1000 )); fi
+            if [ "$this_reset" -gt "$max_resets_at" ]; then
+              max_resets_at=$this_reset
+            fi
+          done < <(jq -r '.[] | [.repo, .id] | @tsv' <<<"$scan_targets")
 
           now=$(date -u +%s)
           cap=$(( now + RATE_LIMIT_MAX_FUTURE_HOURS * 3600 ))
@@ -300,10 +318,15 @@ jobs:
           if [ "${RESETS_AT:-0}" -gt 0 ]; then
             rate_limit_note="**Live five-hour rate limit detected** — the account hit its Claude usage ceiling; forcing \`red\` until it resets at $(date -u -d "@${RESETS_AT}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || date -u -r "${RESETS_AT}" '+%Y-%m-%d %H:%M UTC')."
           fi
+          # YELLOW_FRACTION is the fraction of capacity still owed as headroom before
+          # yellow fires (e.g. 0.75 -> yellow triggers once headroom drops to the
+          # complementary 25%, per bucket_avail's `<= capacity * (1 - yellowFrac)` check
+          # above) — the report must show that trigger fraction, not the raw input (#301).
+          yellow_trigger_pct=$(awk -v f="$YELLOW_FRACTION" 'BEGIN { printf "%.0f", (1 - f) * 100 }')
           body=$(printf '%s\n' \
             "Auto-maintained by budget-governor.yml. Last updated $(date -u '+%Y-%m-%d %H:%M UTC'). Window: trailing ${LOOKBACK_DAYS} days." \
             "" \
-            "**Throttle level: \`${LEVEL}\`** — token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, all Claude workflows ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (yellow when either drops to ${YELLOW_FRACTION} capacity or below, red at 0)." \
+            "**Throttle level: \`${LEVEL}\`** — token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, all Claude workflows ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (yellow when either drops to ${yellow_trigger_pct}% capacity or below, red at 0)." \
             "" \
             "${rate_limit_note}" \
             "" \
