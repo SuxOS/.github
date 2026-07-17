@@ -56,7 +56,7 @@ on:
           reusable definitions in this repo, which have no schedule/event trigger of
           their own and so are routinely left `disabled_manually` by design.
         type: string
-        default: "audit.yml,automerge.yml,ci.yml,claude-autofix.yml,claude.yml,fabric-health.yml,fixer.yml,health.yml,issue-build.yml,pipeline-utilization.yml,pr-auto-update.yml,pr-drain.yml,pr-unstick.yml,pr-watch.yml,security-review.yml,skill-sync.yml"
+        default: "audit.yml,automerge.yml,ci.yml,claude-autofix.yml,claude.yml,fabric-health.yml,fixer.yml,health.yml,issue-build.yml,pr-auto-update.yml,pr-drain.yml,pr-unstick.yml,pr-watch.yml,security-review.yml,skill-sync.yml"
 
 permissions:
   contents: read

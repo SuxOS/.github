@@ -22,8 +22,9 @@ GitHub's native secret-scanning + push-protection (repo Settings → Security), 
 a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 
 **Scheduled monitoring** (runs on the caller's schedule/dispatch, opens/refreshes a tracking issue — does not block merge):
-`health.yml` (app health) · `pipeline-utilization.yml` (autonomy-pipeline run volume/duration —
-a proxy for spend/waste, since actual Claude token usage isn't queryable via the GitHub API)
+`health.yml` (app health) — autonomy-pipeline run volume/duration is covered by
+`budget-governor.yml` below, not a separate workflow (the former `pipeline-utilization.yml`
+was dead code with no caller and was removed, #240)
 
 **Autonomy pipeline** (keeps PRs moving hands-off — native GitHub auto-merge, not a merge
 queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)):

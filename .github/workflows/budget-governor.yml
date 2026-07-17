@@ -5,7 +5,7 @@ name: Budget governor
 #   1. Sweep `gh run list` across the org's repos for the trailing 7 days (App token —
 #      the repos are private, so the ambient GITHUB_TOKEN can't see them).
 #   2. Roll up wall-clock minutes for Claude-invoking workflows, split opus/sonnet by
-#      workflow name. Same caveat as pipeline-utilization.yml: wall-clock is a PROXY
+#      workflow name. Wall-clock is a PROXY
 #      that correlates with subscription spend — it is not a bill. Calibrate the
 #      thresholds against claude.ai's usage page (see the design doc's ritual).
 #   3. Simulate a token bucket (capacity = budget, continuous linear refill) over the

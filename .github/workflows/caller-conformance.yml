@@ -6,6 +6,15 @@
 # (the R5/#263 `workflow_run` autofix class), (c) a stub missing required triggers /
 # `secrets: inherit`, and (d) a stub pinned to a stale `uses: …@ref`.
 #
+# `managed-repos.json` deliberately excludes `.github` itself (it's this repo, not a
+# consumer) — but this repo runs itself via its own self-*.yml caller stubs (see README's
+# self-* pattern), so the `self-conformance` job below scans THOSE too (#356), catching the
+# same R5/#263 dead-workflow_run-stub class if it recurs in a self-*.yml. It runs
+# check-caller-conformance.sh in `self` mode, which restricts the scan to self-*.yml and
+# skips the naming-derived (a)/(c)/(d) checks — self-*.yml is legitimately named
+# self-<name>.yml (and self-fixer-30m.yml-style cadence variants), so those checks would
+# otherwise false-positive on every stub.
+#
 # Turns invariant 5 of the vX arc — "a merged reusable-workflow migration isn't done until
 # every caller adopts it" — from memory into a recurring signal. The comparison logic lives
 # in scripts/check-caller-conformance.sh (unit-tested, canonical set derived from
@@ -32,6 +41,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  self-conformance:
+    # This repo's OWN self-*.yml caller stubs (#356) — not covered by the cross-repo
+    # `conformance` job below, since managed-repos.json deliberately excludes `.github`.
+    # No cross-repo checkout needed; the stubs being scanned already live in this checkout.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Check .github's own self-*.yml caller stubs (advisory)
+        run: |
+          set -euo pipefail
+          echo "### Caller-stub conformance — .github (self-*.yml)" >> "$GITHUB_STEP_SUMMARY"
+          bash scripts/check-caller-conformance.sh ".github" .github/workflows self
+
   managed-repos:
     # Single source of truth for the matrix below — see .github/managed-repos.json.
     runs-on: ubuntu-latest
