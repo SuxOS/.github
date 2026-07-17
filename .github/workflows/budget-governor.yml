@@ -381,13 +381,22 @@ jobs:
             gh label create tracking --repo "SuxOS/$r" --color ededed \
               --description "Bookkeeping issue maintained by automation — not buildable work" 2>/dev/null || true
 
+            # Guard each gh call below with `if ! …; continue`: under `set -euo pipefail`
+            # a single repo's transient gh failure (or pipefail from a piped jq) in a
+            # command substitution aborts the whole step, so every repo after it keeps its
+            # stale throttle level for up to 6h. Log a warning and skip that one repo
+            # instead — same per-item batch-abort guard the filing loops adopted in #199.
+            #
             # `--search` narrows server-side to matching issues instead of paging through
             # every open issue in the repo, so this stays correct past the old --limit 100
             # cap (#247) without needing a pagination loop. `in:title` still returns
             # partial/fuzzy title matches, so the exact-match select below is required.
-            found=$(gh issue list --repo "SuxOS/$r" --state open --search "\"Autonomy throttle\" in:title" \
+            if ! found=$(gh issue list --repo "SuxOS/$r" --state open --search "\"Autonomy throttle\" in:title" \
                 --limit 100 --json number,title,labels \
-              | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty')
+              | jq -c '[.[] | select(.title == "Autonomy throttle")] | first // empty'); then
+              echo "::warning::failed to query throttle issue for SuxOS/$r — skipping, stale level retained until next run"
+              continue
+            fi
             if [ -n "$found" ]; then
               num=$(jq -r '.number' <<<"$found")
               manual=$(jq -r '[.labels[].name] | contains(["throttle-manual"])' <<<"$found")
@@ -395,10 +404,16 @@ jobs:
                 echo "SuxOS/$r#$num is pinned (throttle-manual) — leaving as-is"
                 continue
               fi
-              gh issue edit "$num" --repo "SuxOS/$r" --body "$body" --add-label tracking >/dev/null
+              if ! gh issue edit "$num" --repo "SuxOS/$r" --body "$body" --add-label tracking >/dev/null; then
+                echo "::warning::failed to update SuxOS/$r#$num throttle level — skipping, stale level retained until next run"
+                continue
+              fi
               echo "SuxOS/$r#$num → level: $LEVEL"
             else
-              url=$(gh issue create --repo "SuxOS/$r" --title "Autonomy throttle" --body "$body" --label tracking)
+              if ! url=$(gh issue create --repo "SuxOS/$r" --title "Autonomy throttle" --body "$body" --label tracking); then
+                echo "::warning::failed to create throttle issue for SuxOS/$r — skipping, will retry next run"
+                continue
+              fi
               echo "created $url → level: $LEVEL"
             fi
           done
