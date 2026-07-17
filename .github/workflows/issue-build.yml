@@ -322,16 +322,18 @@ jobs:
             // dropped — if it's the only thing buildable it's still built (the pre-#348 behaviour,
             // cherry-pick and all), so the heuristic can only reorder, never deadlock the backlog.
             //
-            // A "blocker" is any OPEN, non-PR issue that will plausibly close on merge — i.e. NOT
+            // A "blocker" is any OPEN issue OR PR that will plausibly close on merge — i.e. NOT
             // a long-lived tracking/needs-human/hold issue (blocking on those would starve the
-            // dependent forever). An issue covered by an open (unmerged) PR still counts: its
-            // change isn't on main yet, which is exactly the #339 situation. Detection is two
-            // narrow signals over the candidate's title+body, kept tight to limit false positives;
-            // the non-starving fallback caps any rare false positive at one selection cycle.
+            // dependent forever). Open PRs count directly (not just issues): issues and PRs share
+            // one number space, and the detection regex/comment explicitly targets PR references
+            // ("built by PR #341") — excluding PRs here left that reference silently un-gated
+            // (#370). An issue covered by an open (unmerged) PR still counts: its change isn't on
+            // main yet, which is exactly the #339 situation. Detection is two narrow signals over
+            // the candidate's title+body, kept tight to limit false positives; the non-starving
+            // fallback caps any rare false positive at one selection cycle.
             const NON_CLOSEABLE = ["tracking", "needs-human", "hold"];
             const blockerNumbers = new Set(
-              all.filter((i) => !i.pull_request
-                  && !i.labels.map((l) => l.name).some((l) => NON_CLOSEABLE.includes(l)))
+              all.filter((i) => !i.labels.map((l) => l.name).some((l) => NON_CLOSEABLE.includes(l)))
                  .map((i) => i.number),
             );
             // (1) a dependency phrase directly followed by #NNN ("extends #339", "depends on #339",

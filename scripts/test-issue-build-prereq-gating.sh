@@ -110,6 +110,14 @@ const casual = issue(405, "Fix the typo in the banner", "Similar area to #404 bu
 check("casual cross-ref (no verb, no adjacency phrase) → not deferred",
   [open404, casual], [], [404, 405]);
 
+// 8. PR-number reference (#370): "built by PR #341" with #341 an open PR → deferred. Open PRs
+//    must count as blockers directly, not just issues — issues/PRs share one number space and
+//    the regex/comment explicitly target PR references.
+const pr341 = { number: 341, title: "Add the shared retry helper", body: "", labels: [], pull_request: {} };
+const builtByPr = issue(406, "Wire retries into the fetch client", "built by PR #341, which lands the helper.");
+check("PR reference: 'built by PR #341' with #341 an open PR → deferred",
+  [pr341, builtByPr], [406], [406]);
+
 if (failures) { console.error(`\n${failures} assertion(s) failed`); process.exit(1); }
 console.log("\nall prerequisite-gating assertions passed");
 NODE
