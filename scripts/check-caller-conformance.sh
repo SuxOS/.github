@@ -113,7 +113,7 @@ for f in "$@"; do
   # self-*.yml/consumer stubs to include reusable definitions themselves (#363).
   uncommented="$(grep -vE '^[[:space:]]*#' "$f")"
   printf '%s\n' "$uncommented" | grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" || continue
-  reuses="$(printf '%s\n' "$uncommented" | grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+  reuses="$(printf '%s\n' "$uncommented" | grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)"
   if grep -qE '^[[:space:]]*workflow_run:' "$f"; then
     warn "dead stub '$base' triggers on workflow_run (wires: ${reuses}) — the R5/#263 class; scaffold-caller.sh never emits it (autofix is job-chained in ci.yml). Remove it."
     continue
