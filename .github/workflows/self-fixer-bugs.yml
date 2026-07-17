@@ -1,0 +1,32 @@
+name: Self fixer (15m, bugs only)
+
+# Tightest tier of the 3-cadence proposer (see self-fixer-30m.yml 30m bugs+feats /
+# self-fixer.yml 1h deep). Runs every 15m with scope: bugs — correctness bugs only, no
+# feature/doc/dead-code proposals, so the cheapest and most time-sensitive signal (a bug in
+# code that just landed) surfaces fast without also generating feature noise on every pass.
+# Distinct workflow name -> distinct concurrency group, so this never blocks on or races the
+# other tiers. Safe by construction: the reusable's own throttle check (check-throttle,
+# defer-at: yellow) already stands this down under budget pressure, same as every other
+# proposer-stage caller.
+# Same TEMPORARY note as self-fixer.yml: this lets suxbot[bot] author PRs editing this repo's
+# own shared workflow files; self-issue-build.yml/self-automerge.yml/self-security-review.yml
+# are the matching build/merge/gate stages.
+# Reusable workflow: SuxOS/.github/.github/workflows/fixer.yml
+
+on:
+  schedule:
+    - cron: "9,24,39,54 * * * *" # every 15m, offset to dodge top-of-hour rush
+  workflow_dispatch:
+
+jobs:
+  fixer:
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    with:
+      model: sonnet # pinned: this is the cheap 96x/day tripwire, not the bulk-scan tier fixer.yml defaults to
+      max-turns: 10 # tight: only fresh, cheap-to-spot bugs, not a repo re-sweep
+      scope: bugs
+    secrets: inherit
