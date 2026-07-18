@@ -67,6 +67,11 @@ jobs:
             echo "all_csv=$(jq -r '(.repos + [".github"]) | join(",")' .github/managed-repos.json)"
             echo "all_space=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)"
             echo "schema_enum=$(jq -c '(.repos + [".github"])' .github/managed-repos.json)"
+            # Product repos only (excludes .github, which is checked out separately above) —
+            # drives the checkout loop and the prompt's repo-path list below, so a repo added
+            # to managed-repos.json can't drift out of sync with either again (#402).
+            echo "product_space=$(jq -r '.repos | join(" ")' .github/managed-repos.json)"
+            echo "product_paths=$(jq -r '.repos | map("repos/" + .) | join(", ")' .github/managed-repos.json)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Mint org-scoped app token
@@ -79,37 +84,19 @@ jobs:
           owner: SuxOS
           repositories: ${{ steps.repos.outputs.all_csv }}
 
-      - name: Checkout sux
+      # One loop over managed-repos.json's repo list instead of one hardcoded checkout
+      # step per repo — #395 had to hand-add a suxlib step here after it landed in
+      # managed-repos.json; this makes that class of drift impossible (#402).
+      - name: Checkout product repos
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: SuxOS/sux
-          token: ${{ steps.app-token.outputs.token }}
-          path: repos/sux
-
-      - name: Checkout suxrouter
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: SuxOS/suxrouter
-          token: ${{ steps.app-token.outputs.token }}
-          path: repos/suxrouter
-
-      - name: Checkout claude-config
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: SuxOS/claude-config
-          token: ${{ steps.app-token.outputs.token }}
-          path: repos/claude-config
-
-      - name: Checkout suxlib
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: SuxOS/suxlib
-          token: ${{ steps.app-token.outputs.token }}
-          path: repos/suxlib
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PRODUCT_REPOS: ${{ steps.repos.outputs.product_space }}
+        run: |
+          set -euo pipefail
+          for repo in $PRODUCT_REPOS; do
+            gh repo clone "SuxOS/$repo" "repos/$repo" -- --depth=1
+          done
 
       - name: Claude — cross-repo consistency and refactor sweep
         id: claude
@@ -136,8 +123,8 @@ jobs:
           prompt: |
             You are the weekly org-consistency auditor. The workspace root is the org's
             `.github` hub repo (reusable workflows + scaffold); the product repos are checked
-            out under `repos/sux`, `repos/suxrouter`, `repos/claude-config`, and
-            `repos/suxlib`. You see what no single-repo pass can: drift BETWEEN them.
+            out under ${{ steps.repos.outputs.product_paths }}. You see what no single-repo
+            pass can: drift BETWEEN them.
 
             Hunt, in priority order:
               1. Caller-stub drift: each repo's `.github/workflows/*.yml` thin callers vs.

@@ -25,7 +25,7 @@ on:
   workflow_call:
     inputs:
       pr-limit:
-        description: "Max open PRs to list per run. Raise on repos with a busy queue (>100 open PRs) so armed-but-BEHIND PRs past the first page still get updated."
+        description: "Starting page size for the exhaustive open-PR list (doubles until a short page is seen, or fails loud past gh-list-exhaustive's max-limit — see #401). Raise only if a repo's open-PR count is large enough that the default start makes the first page-doubling pass slower than useful."
         type: string
         default: "100"
 
@@ -49,11 +49,29 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # A bounded `gh pr list --limit N` silently drops armed BEHIND/BLOCKED PRs past
+      # page N on a busy queue — the same undercount shape gh-list-exhaustive (#396)
+      # was built to eliminate; this site was simply missed until #401.
+      - name: List open PRs (exhaustive)
+        id: list-prs
+        uses: SuxOS/.github/.github/actions/gh-list-exhaustive@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          json-fields: number,mergeStateStatus,isDraft,autoMergeRequest,labels,headRefName
+          start-limit: ${{ inputs.pr-limit }}
+          args: |
+            pr
+            list
+            --repo
+            ${{ github.repository }}
+            --state
+            open
+
       - name: Update armed BEHIND PRs onto main
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-          PR_LIMIT: ${{ inputs.pr-limit }}
+          PRS_JSON: ${{ steps.list-prs.outputs.json }}
         run: |
           set -uo pipefail
           # mergeStateStatus alone under-selects: GitHub reports BLOCKED (not BEHIND)
@@ -62,16 +80,14 @@ jobs:
           # already fixed on main. Candidate on BEHIND or BLOCKED, then confirm via
           # compare's behind_by so a BLOCKED-but-current PR (blocked for some other
           # reason) isn't needlessly churned.
-          if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
-            --json number,mergeStateStatus,isDraft,autoMergeRequest,labels,headRefName \
-            --jq '.[]
+          if ! prs=$(jq -r '.[]
               | select(.isDraft == false)
               | select(.autoMergeRequest != null)
               | select(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "BLOCKED")
               | select(([.labels[].name] | index("hold")) | not)
               | select(([.labels[].name] | index("autofix-in-progress")) | not)
-              | "\(.number)\t\(.headRefName)"'); then
-            echo "::error::gh pr list failed (auth/API error) — cannot distinguish from no BEHIND/BLOCKED PRs"
+              | "\(.number)\t\(.headRefName)"' <<<"$PRS_JSON"); then
+            echo "::error::failed to parse open-PR list — cannot distinguish from no BEHIND/BLOCKED PRs"
             exit 1
           fi
           if [ -z "$prs" ]; then

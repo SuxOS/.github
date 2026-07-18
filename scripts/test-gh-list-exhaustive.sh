@@ -25,6 +25,7 @@ if [ "$fail_mode" = "error" ]; then exit 1; fi
 limit=""
 prev=""
 for a in "\$@"; do
+  if [ -z "\$a" ]; then echo "fake gh: received a spurious empty positional arg" >&2; exit 1; fi
   if [ "\$prev" = "--limit" ]; then limit="\$a"; fi
   prev="\$a"
 done
@@ -37,7 +38,7 @@ EOF
   chmod +x "$dir/gh"
 }
 
-echo "[1/4] single page (result well under start-limit)"
+echo "[1/5] single page (result well under start-limit)"
 d1=$(mktemp -d); make_fake_gh "$d1" 3
 out1=/tmp/gh-list-exhaustive-out.$$
 : > "$out1"
@@ -50,7 +51,7 @@ else
 fi
 rm -rf "$d1" "$out1"
 
-echo "[2/4] growth required (250 results, start-limit=100)"
+echo "[2/5] growth required (250 results, start-limit=100)"
 d2=$(mktemp -d); make_fake_gh "$d2" 250
 out2=/tmp/gh-list-exhaustive-out.$$
 : > "$out2"
@@ -63,7 +64,7 @@ else
 fi
 rm -rf "$d2" "$out2"
 
-echo "[3/4] result set exceeds max-limit -> fails loud, does not return a truncated result"
+echo "[3/5] result set exceeds max-limit -> fails loud, does not return a truncated result"
 d3=$(mktemp -d); make_fake_gh "$d3" 999999
 out3=/tmp/gh-list-exhaustive-out.$$
 : > "$out3"
@@ -77,7 +78,22 @@ else
 fi
 rm -rf "$d3" "$out3"
 
-echo "[4/4] gh error surfaces as ::error:: and a non-zero exit"
+echo "[4/5] real args: | shape (trailing newline) doesn't add a spurious empty arg (#405)"
+d5=$(mktemp -d); make_fake_gh "$d5" 3
+out5=/tmp/gh-list-exhaustive-out.$$
+: > "$out5"
+# YAML's default clip chomping on `args: |` leaves exactly one trailing newline —
+# mirror that shape here instead of the no-trailing-newline ARGS=$'pr\nlist' used above.
+PATH="$d5:$PATH" GITHUB_OUTPUT="$out5" ARGS=$'pr\nlist\n' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
+  bash -c "$run" >/dev/null 2>&1
+if grep -q '^count=3$' "$out5"; then
+  note "trailing-newline args produce no spurious empty positional arg (count=3)"
+else
+  bad "expected count=3 with real args: | shape, got: $(cat "$out5")"
+fi
+rm -rf "$d5" "$out5"
+
+echo "[5/5] gh error surfaces as ::error:: and a non-zero exit"
 d4=$(mktemp -d); make_fake_gh "$d4" 0 error
 out4=/tmp/gh-list-exhaustive-out.$$
 : > "$out4"

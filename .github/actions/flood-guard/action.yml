@@ -32,31 +32,15 @@ runs:
   using: composite
   steps:
     # The org bot surfaces as "suxbot" in either the app/suxbot or suxbot[bot]
-    # form, so narrow server-side with both --app and --author (#393) rather
-    # than fetching the repo's whole open-PR list and filtering client-side —
-    # that would silently undercount once a repo passes 100 total open PRs.
-    # gh-list-exhaustive (#396) additionally pages each of these two queries
-    # past a single bounded page (or refuses to guess) instead of just
-    # trusting one --limit 100 call, and continue-on-error preserves this
-    # action's fail-open contract: a refusal/failure here still reaches the
-    # count step below with that query's json output empty.
-    - name: List open PRs by app
-      id: list-app
-      continue-on-error: true
-      uses: SuxOS/.github/.github/actions/gh-list-exhaustive@main
-      with:
-        github-token: ${{ inputs.github-token }}
-        json-fields: number
-        args: |
-          pr
-          list
-          --repo
-          ${{ github.repository }}
-          --state
-          open
-          --app
-          suxbot
-
+    # form. A GitHub App's bot account has exactly one login, <slug>[bot], and
+    # --app <slug> is gh's sugar for filtering by that same login — so --app
+    # suxbot and --author suxbot[bot] provably return the SAME PRs, not
+    # disjoint sets (confirmed fixing #399, which had summed the two and
+    # double-counted every real bot PR). Issuing both therefore only doubled
+    # gh-list-exhaustive's pagination cost for zero extra coverage (#403); one
+    # query narrows server-side just as well as two, so only --author is kept.
+    # continue-on-error preserves this action's fail-open contract: a
+    # refusal/failure here still reaches the count step below with json empty.
     - name: List open PRs by author
       id: list-author
       continue-on-error: true
@@ -79,21 +63,14 @@ runs:
       shell: bash
       env:
         THRESHOLD: ${{ inputs.threshold }}
-        APP_JSON: ${{ steps.list-app.outputs.json }}
         AUTHOR_JSON: ${{ steps.list-author.outputs.json }}
       run: |
         set -uo pipefail
 
-        # Fail-open: either query failing/refusing leaves its *_JSON empty, which
-        # falls back to an empty array below — a partial outage undercounts rather
-        # than crashing. A GitHub App's bot account has exactly one login,
-        # <slug>[bot], and --app <slug> is gh's sugar for filtering by that same
-        # login — so these two queries return the SAME PRs, not disjoint sets.
-        # Dedupe by number instead of summing them (#399: summing double-counted
-        # every real bot PR, tripping the guard at roughly half the configured
-        # threshold).
-        count=$(jq -s '[.[][]] | unique_by(.number) | length' \
-          <(printf '%s' "${APP_JSON:-[]}") <(printf '%s' "${AUTHOR_JSON:-[]}")) || count=0
+        # Fail-open: the query failing/refusing leaves AUTHOR_JSON empty, which
+        # falls back to an empty array below — an outage undercounts rather than
+        # crashing.
+        count=$(jq 'unique_by(.number) | length' <<<"${AUTHOR_JSON:-[]}") || count=0
 
         features_ok=true
         [ "$count" -ge "$THRESHOLD" ] && features_ok=false
