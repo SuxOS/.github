@@ -88,6 +88,14 @@ detect-unreachable-checks, and budget-governor still have their own (already
 working) bespoke mitigations and are deliberately left as separate future
 migrations rather than churned in one pass.
 
+`scripts/test-no-new-gh-list-limit.sh`'s allowlist gate is a plain `grep` over
+`.github/workflows`/`.github/actions` line content, not a real invocation parser — an
+`echo "::error::..."`/log message that happens to mention a workflow's own `gh ...
+list` call together with `--limit` on the same line trips it as a phantom "new
+bespoke call site", same as an actual new call would (#443). Word any such
+diagnostic string to avoid that exact co-occurrence, or add it to the allowlist,
+rather than assuming only real invocations can fail this gate.
+
 `actionlint` does NOT lint `github-script` `with.script:` JS — that JS is a blind spot
 in the gate, so a syntax error there ships silently. Validate any such block with
 `node --check <(yq -r '.jobs.J.steps[]|select(.id=="X").with.script' wf.yml)`, and
