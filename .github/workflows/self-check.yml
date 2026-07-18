@@ -99,3 +99,7 @@ jobs:
       - name: Assert no new bespoke 'gh ... list --limit' call sites outside the tracked allowlist
         run: bash scripts/test-no-new-gh-list-limit.sh
         shell: bash
+
+      - name: Assert pr-drain DIRTY-conflict sweep flags sibling builder-PR hot-file collisions
+        run: bash scripts/test-pr-drain-dirty-collision.sh
+        shell: bash

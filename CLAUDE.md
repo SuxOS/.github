@@ -124,3 +124,10 @@ fell back to `fail-closed` in every caller repo this way). If a reusable step ne
 lives only in this repo, add an explicit second `actions/checkout@... with: {repository:
 SuxOS/.github, ref: main, path: .suxos-ci}` and call it from that subpath — don't sync copies
 into callers.
+
+`gh pr list --json ...,files` fetches each matched PR's full changed-file list, not a cheap
+flat field — fine at pr-drain.yml's current `PR_LIMIT` default (200) against this org's actual
+open-PR counts (low single digits per repo), but check the added latency/rate-limit cost
+before reaching for `files` on a list call whose limit could realistically climb into the
+hundreds (#437 added it to pr-drain's DIRTY-CONFLICT sweep for a diagnostic-only sibling
+hot-file-overlap check).
