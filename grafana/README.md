@@ -28,7 +28,7 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | --- | --- | --- |
 | `suxos_pipeline_backlog` | — | Open build-eligible issues across the org |
 | `suxos_backlog_zero` | — | `1` when backlog is 0 (the streak is derived from this) |
-| `suxos_budget_throttle_active` | — | `1` when a `throttle` issue is open in `.github` |
+| `suxos_budget_throttle_active` | — | `1` when the `.github` "Autonomy throttle" tracking issue's `level:` body line is not `green` (#319 — body-matched, not a `throttle` label) |
 | `suxos_pr_open_total` | `repo` | Open PRs |
 | `suxos_pr_red_total` | `repo` | PRs with a failing check rollup |
 | `suxos_pr_stuck_total` | `repo` | PRs BEHIND/DIRTY or idle past the threshold |
