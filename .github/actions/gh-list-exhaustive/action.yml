@@ -8,7 +8,7 @@ description: >-
   ad hoc at least six times across this repo's history (#18, #247, #344,
   #345, #350, #366) plus flood-guard (#396). This generalizes the
   grow-and-reissue loop upsert-tracking-issue already uses for its own
-  lookup: double the page size and re-query until a page comes back shorter
+  lookup: grow the page size (4x) and re-query until a page comes back shorter
   than requested (the true end of the list) or the page size exceeds
   max-limit, in which case it fails loud instead of returning a truncated
   result. New and existing gh-list-then-filter call sites should prefer this
@@ -36,7 +36,7 @@ inputs:
     description: Token for the gh call.
     required: true
   start-limit:
-    description: Starting page size; doubled on each re-query until a short page is seen.
+    description: Starting page size; quadrupled on each re-query until a short page is seen.
     required: false
     default: "100"
   max-limit:
@@ -71,7 +71,14 @@ runs:
       run: |
         set -uo pipefail
 
-        mapfile -t gh_args <<< "$ARGS"
+        # Every real caller supplies `args` as a YAML block literal (`args: |`), which
+        # YAML's default clip chomping leaves with exactly one trailing newline. A
+        # herestring (<<<) always appends its own trailing newline on top of that,
+        # so `mapfile <<< "$ARGS"` was turning the resulting blank line into a spurious
+        # empty trailing element in gh_args — a stray '' positional arg on every real
+        # invocation (#405). Process substitution instead of a herestring avoids
+        # appending that second newline.
+        mapfile -t gh_args < <(printf '%s' "$ARGS")
 
         limit="$START_LIMIT"
         while :; do
