@@ -247,7 +247,11 @@ check_expr() {
   # fix: an `and on() (min(suxos_collection_ok{...}) == 1)` clause turns a
   # partial-collection undercount into an explicit no-data reading instead
   # of a false-green sum/count, which `or vector(...)` alone cannot do).
-  if grep -qP '\b(min_over_time|count_over_time|count|sum|max|avg)\s*\(' <<<"$expr" && \
+  # Also matches the grouped forms `sum by (...) (` / `max without (...) (`
+  # (#387): a grouped aggregation is the same #291-class risk as the bare
+  # form — a repo whose collector fails just silently drops out of the
+  # by-label breakdown instead of undercounting one aggregate number.
+  if grep -qP '\b(min_over_time|count_over_time|count|sum|max|avg)\s*(\(|by\s*\(|without\s*\()' <<<"$expr" && \
      ! grep -qP 'or vector\(|suxos_collection_ok' <<<"$expr"; then
     while IFS= read -r m; do
       [ -z "$m" ] && continue
@@ -287,12 +291,14 @@ expect_v() {
   fi
 }
 expect_v "clean bare metric"                 'suxos_pipeline_backlog'                                        0
-expect_v "clean range + by-repo grouping"    'sum by (repo) (last_over_time(suxos_workflow_red_total[20m]))' 0
+expect_v "clean range + by-repo grouping, gated on collection_ok" 'sum by (repo) (last_over_time(suxos_workflow_red_total[20m])) and on() (min(suxos_collection_ok{collector="runs"}) == 1)' 0
+expect_v "grouped aggregation of conditional metric, no fallback (#387)" 'sum by (repo) (last_over_time(suxos_workflow_red_total[20m]))' 1
+expect_v "grouped 'without' aggregation of conditional metric, no fallback (#387)" 'max without (workflow) (last_over_time(suxos_workflow_disabled[20m]))' 1
 expect_v "clean matcher on a valid label"    'suxos_collection_ok{repo="sux"}'                              0
 expect_v "unknown metric"                    'last_over_time(suxos_not_a_metric[20m])'                      1
 expect_v "matcher on a nonexistent label"    'suxos_budget_throttle_active{throttle="red"}'                 1
 expect_v "matcher label wrong for metric"    'suxos_pr_red_total{service="x"}'                              1
-expect_v "grouping by a typo'd label"        'sum by (reepo) (suxos_pr_red_total)'                          1
+expect_v "grouping by a typo'd label"        'sum by (reepo) (suxos_pr_red_total)'                          2
 expect_v "age window == threshold (#320)"    'count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[48h:15m])) >= 172800) or vector(0)' 1
 expect_v "age window > threshold (fixed)"    'count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[49h:15m])) >= 172800) or vector(0)' 0
 expect_v "conditional series aggregated, no fallback (#291)" 'min_over_time(suxos_pr_red_total[20m])'        1
