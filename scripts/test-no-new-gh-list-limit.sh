@@ -31,7 +31,7 @@ ALLOWLIST=(
   ".github/workflows/pr-watch.yml::gh pr list --repo \"\$GITHUB_REPOSITORY\" --state open --limit \"\$PR_LIMIT\""
   ".github/workflows/issue-build.yml::gh issue list --state open --limit 300"
   ".github/workflows/org-consistency.yml::gh issue list --limit 200 --state all"
-  ".github/workflows/budget-governor.yml::gh run list --repo \"SuxOS/\$r\" --limit 1000 --created"
+  ".github/workflows/budget-governor.yml::gh run list --repo \"SuxOS/\$r\" --limit 1001 --created"
   ".github/workflows/budget-governor.yml::gh run list --repo \"SuxOS/\$r\" --limit 50 --created"
   ".github/workflows/fabric-health.yml::gh issue list --repo \"\$slug\" --state open --limit 201"
   ".github/workflows/fabric-health.yml::gh pr list --repo \"\$slug\" --state open --limit 201"

@@ -68,6 +68,10 @@ jobs:
         run: bash scripts/test-budget-governor-opus-classify.sh
         shell: bash
 
+      - name: Assert budget-governor sweep fails closed on a run-list cap hit
+        run: bash scripts/test-budget-governor-sweep-cap.sh
+        shell: bash
+
       - name: Assert detect-unreachable-checks reachability guard logic
         run: bash scripts/test-detect-unreachable-checks.sh
         shell: bash

@@ -127,9 +127,19 @@ jobs:
 
           all="[]"
           for r in $REPOS; do
-            if ! runs=$(gh run list --repo "SuxOS/$r" --limit 1000 --created ">=$since" \
+            # --limit 1001, one past the real 1000 cap (#443, same shape as the
+            # rate-limit scan's #438 fix and fabric-health's collectors): this feeds
+            # opus_avail_min/total_avail_min -> level directly, gating the ENTIRE
+            # autonomy pipeline, so unlike the best-effort rate-limit scan a truncated
+            # page here must fail closed rather than silently undercount toward a
+            # falsely-green level.
+            if ! runs=$(gh run list --repo "SuxOS/$r" --limit 1001 --created ">=$since" \
                 --json workflowName,conclusion,status,startedAt,updatedAt); then
               echo "::error::gh run list failed for SuxOS/$r — refusing to govern on partial data"
+              exit 1
+            fi
+            if [ "$(jq 'length' <<<"$runs")" -gt 1000 ]; then
+              echo "::error::SuxOS/$r has >1000 runs in the lookback window, past the run-list page cap — the true count would be silently undercounted; refusing to govern on truncated data"
               exit 1
             fi
             all=$(jq -c --arg repo "$r" '.[0] + [.[1][] | . + {repo: $repo}]' \
