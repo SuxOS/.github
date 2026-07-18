@@ -103,7 +103,7 @@ jobs:
           fi
 
           if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
-            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt,headRefName); then
+            --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest,updatedAt,headRefName,files); then
             echo "::error::gh pr list failed — aborting drain instead of no-opping both passes"
             exit 1
           fi
@@ -178,7 +178,34 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            gh pr comment "$n" --body "🧹 Closing — this builder PR has a real merge conflict with main (not just behind), and no existing loop resolves that short of a human. Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#237 / #239." 2>/dev/null || true
+
+            # Best-effort diagnostic only (SuxOS/.github#437): note when this DIRTY PR shares
+            # a changed file with another still-open sibling builder PR — the two-concurrent-
+            # batches-hit-the-same-hot-file collision this sweep already recovers from but
+            # doesn't prevent (a full fix needs select-time file-overlap detection in
+            # issue-build.yml, deliberately out of scope — see the issue). Doesn't change the
+            # close/requeue decision, only makes each such incident visible instead of silent.
+            # Sourced from the batch-fetched $prs snapshot (already carries `files`, no extra
+            # API calls) — fine for a diagnostic note even if a sibling's state has since
+            # moved on. Guarded with `|| true`: the real runner shell is `-e` even though this
+            # script only declares `-uo pipefail` (see CLAUDE.md), so an assignment that
+            # failed would otherwise abort the whole step, not just this notice.
+            collision=$(printf '%s' "$prs" | jq -r --argjson n "$n" '
+              def files_of(x): (x.files // []) | map(.path);
+              (map(select(.number == $n)) | first) as $target
+              | (if $target == null then [] else files_of($target) end) as $mine
+              | [ .[] | select(.number != $n)
+                    | select(.headRefName | startswith("bot/issue-build-"))
+                    | . as $p
+                    | (files_of($p) | map(select(. as $f | $mine | index($f) != null))) as $shared
+                    | select(($shared | length) > 0)
+                    | "#\($p.number) on \($shared | join(", "))" ]
+              | join("; ")' 2>/dev/null || true)
+            note=""
+            if [ -n "$collision" ]; then
+              note=" Hot-file collision with sibling builder PR(s): ${collision} — see SuxOS/.github#437."
+            fi
+            gh pr comment "$n" --body "🧹 Closing — this builder PR has a real merge conflict with main (not just behind), and no existing loop resolves that short of a human.${note} Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#237 / #239." 2>/dev/null || true
             gh pr close "$n" && echo "closed #$n (DIRTY)" || echo "::warning::could not close #$n (see gh error above)"
 
             # Strip `building` from every issue this PR claimed via a closing keyword, so
