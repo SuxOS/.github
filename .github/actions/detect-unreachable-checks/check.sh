@@ -153,7 +153,7 @@ for row in $(echo "$prs" | jq -c '.[]'); do
   while IFS= read -r gate; do
     [ -z "$gate" ] && continue
     disabled_wf=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
-      '[.workflows[]? | select(.state == "disabled_manually") | select(.name == $g or (.name | endswith(" / " + $g)))] | .[0].name // empty' 2>/dev/null || true)
+      '[.workflows[]? | select(.state == "disabled_manually") | .name as $n | select($n == $g or ($g | startswith($n + " / ")))] | .[0].name // empty' 2>/dev/null || true)
     if [ -n "$disabled_wf" ]; then
       pr_has_disabled=1
       echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
