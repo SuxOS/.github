@@ -56,23 +56,35 @@ jobs:
           PR_LIMIT: ${{ inputs.pr-limit }}
         run: |
           set -uo pipefail
+          # mergeStateStatus alone under-selects: GitHub reports BLOCKED (not BEHIND)
+          # whenever required checks are failing/pending, even if the PR is ALSO
+          # behind main — e.g. a stale merge base whose checks inherited a bug
+          # already fixed on main. Candidate on BEHIND or BLOCKED, then confirm via
+          # compare's behind_by so a BLOCKED-but-current PR (blocked for some other
+          # reason) isn't needlessly churned.
           if ! prs=$(gh pr list --state open --limit "$PR_LIMIT" \
-            --json number,mergeStateStatus,isDraft,autoMergeRequest,labels \
+            --json number,mergeStateStatus,isDraft,autoMergeRequest,labels,headRefName \
             --jq '.[]
               | select(.isDraft == false)
               | select(.autoMergeRequest != null)
-              | select(.mergeStateStatus == "BEHIND")
+              | select(.mergeStateStatus == "BEHIND" or .mergeStateStatus == "BLOCKED")
               | select(([.labels[].name] | index("hold")) | not)
               | select(([.labels[].name] | index("autofix-in-progress")) | not)
-              | .number'); then
-            echo "::error::gh pr list failed (auth/API error) — cannot distinguish from no BEHIND PRs"
+              | "\(.number)\t\(.headRefName)"'); then
+            echo "::error::gh pr list failed (auth/API error) — cannot distinguish from no BEHIND/BLOCKED PRs"
             exit 1
           fi
           if [ -z "$prs" ]; then
-            echo "No armed BEHIND PRs to update."
+            echo "No armed BEHIND/BLOCKED PRs to update."
             exit 0
           fi
-          for n in $prs; do
+          while IFS=$'\t' read -r n head_ref; do
+            [ -z "$n" ] && continue
+            behind_by=$(gh api "repos/$GH_REPO/compare/main...$head_ref" --jq '.behind_by' 2>/dev/null) || behind_by=""
+            if ! [ "$behind_by" -gt 0 ] 2>/dev/null; then
+              echo "PR #$n ($head_ref) not behind main (behind_by=${behind_by:-unknown}) — skipping"
+              continue
+            fi
             echo "::group::update-branch PR #$n"
             if gh pr update-branch "$n"; then
               echo "updated #$n onto main"
@@ -81,4 +93,4 @@ jobs:
             fi
             echo "::endgroup::"
             sleep 3
-          done
+          done <<< "$prs"

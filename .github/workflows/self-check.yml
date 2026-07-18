@@ -83,3 +83,7 @@ jobs:
       - name: Assert caller-stub conformance check flags missing/dead/stale/misconfigured stubs
         run: bash scripts/test-caller-conformance.sh
         shell: bash
+
+      - name: Assert gh-list-exhaustive pages past a capped page or fails loud
+        run: bash scripts/test-gh-list-exhaustive.sh
+        shell: bash
