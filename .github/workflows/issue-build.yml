@@ -1112,7 +1112,18 @@ jobs:
             const queued = await github.rest.actions.listWorkflowRunsForRepo({
               owner, repo, per_page: 100, status: "queued",
             }).then((r) => r.data.workflow_runs).catch(() => []);
-            const inFlight = [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
+            const inFlightRuns = [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
+            // A completed run's concurrency lives on as its OPEN PR, which keeps racing the same
+            // base until merged/closed — counting only in_progress/queued RUNS undercounts the
+            // instant a batch's build finishes and opens a PR: requeue then keeps dispatching past
+            // `cap`, letting concurrently-open builder PRs pile up well past parallel-batches (the
+            // mutual DIRTY-conflict generator behind SuxOS/.github#434's 7-PR pileup). openPrs is
+            // already fetched above for referencedByOpenPr, so this is free. max(), not +: a run
+            // still in_progress/queued has almost never opened its PR yet (build hasn't reached
+            // PR-open), so summing would double-count the common case — max() only grows the
+            // estimate when a PR has outlived the run that opened it.
+            const openBuilderPrs = openPrs.filter((pr) => isTrusted(pr.user, pr.author_association) && (pr.head?.ref || "").startsWith("bot/issue-build-")).length;
+            const inFlight = Math.max(inFlightRuns, openBuilderPrs);
 
             // Dispatch enough to reach the cap, but never more batches than there is unclaimed
             // work to fill (each batch drains ~effortBudget points, capped at maxIssues issues),
