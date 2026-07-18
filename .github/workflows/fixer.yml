@@ -70,6 +70,20 @@ on:
           has no equivalent as of 2026-07.
         type: string
         default: "copilot-swe-agent[bot]"
+      epic-filing:
+        description: >-
+          Opt-in: when a proposal carries the optional `epic: {"id", "repos"}` field (see
+          the --json-schema blocks below), file one child issue per named repo (tagged
+          `epic:<id>`, picked up unmodified by that repo's own issue-build.yml) plus a
+          tracking issue in `.github` (title `Epic <id>: <title>`, body a checklist of the
+          child issues, refreshed in place on repeat runs) — per
+          docs/design/2026-07-18-epic-decomposition-design.md §2.2. Default false: per the
+          design doc's §2.5/§5 gating note, this mechanism should stay off until the vX-arc
+          DoD (7-day drain streak + >=50% opus-bucket headroom) is confirmed live — it's
+          landed disabled so it exists and is testable ahead of that, the same shape as
+          #452's spine-fetch landing unconsumed first.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -368,6 +382,113 @@ jobs:
             }
             if (filed.length > 0) {
               await core.summary.addHeading("fixer: proposals filed", 3).addList(filed).write();
+            }
+
+      # epic-filing (opt-in, default false — see the input's description): mint-app-token's
+      # `repositories:` needs its repo list up front, but that list is only known once the
+      # model's proposals are parsed, so extract it here (plain jq, no model call) before the
+      # token step below can run. `|| true` on the assignment per this repo's CLAUDE.md note
+      # that `run:` steps execute under `-e` regardless of `set`, so an unguarded failed
+      # pipeline would otherwise abort the step instead of degrading to "nothing to file".
+      - name: Extract epic repos to scope the cross-repo token
+        id: epic-repos
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true
+        env:
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+        run: |
+          set -uo pipefail
+          list=$(printf '%s' "${VERDICT:-}" | jq -r '
+            [(.proposals // [])[] | select(.epic != null and ((.epic.repos // []) | length) > 0)] as $eps
+            | if ($eps | length) == 0 then "" else (($eps | map(.epic.repos[])) + [".github"] | unique | join(",")) end
+          ' || true)
+          echo "list=${list:-}" >> "$GITHUB_OUTPUT"
+
+      # Cross-repo write token (owner+repositories scoped, per create-github-app-token's own
+      # multi-repo support) — the ordinary app-token above is same-repo-only and can't file
+      # child issues in other repos or the tracking issue in .github. Only minted when there's
+      # actually an epic proposal to file (list non-empty), so a normal fixer run with no
+      # epic proposals never even attempts the extra token mint.
+      - name: Mint app token for epic repos
+        id: epic-token
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true && steps.epic-repos.outputs.list != ''
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.epic-repos.outputs.list }}
+
+      # docs/design/2026-07-18-epic-decomposition-design.md §2.2: one child issue per named
+      # repo (tagged `epic:<id>`, each repo's own issue-build.yml picks it up unmodified —
+      # only "tracking" not "epic:<id>" is in the shared nonbuildable-labels floor), plus one
+      # tracking issue in `.github` whose body is a checklist of the children. The tracking
+      # issue lookup is exhaustive-by-title via github.paginate (this file's existing JS-over-
+      # jq convention, same discipline gh-list-exhaustive centralizes for bash callers) so an
+      # existing tracking issue past the first page is refreshed, not duplicated.
+      - name: File epic issues (child + tracking) — opt-in
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true && steps.epic-repos.outputs.list != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+        with:
+          github-token: ${{ steps.epic-token.outputs.token }}
+          script: |
+            const owner = context.repo.owner;
+            const trackingRepo = ".github";
+            const raw = process.env.VERDICT;
+            if (!raw) { core.info("no structured output → no epics to file"); return; }
+
+            let verdict;
+            try { verdict = JSON.parse(raw); } catch { core.warning("structured output is not valid JSON — no epics filed"); return; }
+            const proposals = Array.isArray(verdict.proposals) ? verdict.proposals : [];
+            const epicProposals = proposals.filter((p) => p && p.epic && p.epic.id
+              && Array.isArray(p.epic.repos) && p.epic.repos.length > 0);
+            if (!epicProposals.length) { core.info("no epic-tagged proposals — nothing to file"); return; }
+
+            for (const p of epicProposals) {
+              const { title, body, type, security, effort, epic } = p;
+              if (!["bug", "enhancement", "documentation"].includes(type)) { core.warning(`skipping epic proposal with unexpected type '${type}': ${title}`); continue; }
+
+              const labels = [type, `epic:${epic.id}`];
+              if (security === true) labels.push("security");
+              if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
+
+              const childUrls = [];
+              for (const childRepo of epic.repos) {
+                try {
+                  // epic:<id> is a brand-new label per epic — ensure it exists before use
+                  // (issues.create errors on an unknown label), idempotent on repeat runs.
+                  await github.rest.issues.createLabel({ owner, repo: childRepo, name: `epic:${epic.id}`, color: "ededed", description: `Child of cross-repo epic ${epic.id} — tracked in ${owner}/.github` }).catch(() => {});
+                  const { data } = await github.rest.issues.create({ owner, repo: childRepo, title, body, labels });
+                  core.info(`filed epic child: ${data.html_url}`);
+                  childUrls.push(data.html_url);
+                } catch (e) {
+                  core.warning(`failed to file epic child in ${childRepo} for '${title}': ${e.message}`);
+                }
+              }
+              if (!childUrls.length) { core.warning(`epic '${epic.id}' filed no children — skipping its tracking issue`); continue; }
+
+              const trackingTitle = `Epic ${epic.id}: ${title}`;
+              const trackingBody = [
+                `Tracking issue for epic \`${epic.id}\` — closes automatically once every child below is closed (fabric-health.yml's epic reconciler).`,
+                "",
+                "Children:",
+                ...childUrls.map((u) => `- [ ] ${u}`),
+              ].join("\n");
+              try {
+                const openTracking = await github.paginate(github.rest.issues.listForRepo, { owner, repo: trackingRepo, state: "open", per_page: 100 });
+                const existing = openTracking.find((i) => i.title === trackingTitle);
+                if (existing) {
+                  await github.rest.issues.update({ owner, repo: trackingRepo, issue_number: existing.number, body: trackingBody });
+                  core.info(`refreshed epic tracking issue ${owner}/${trackingRepo}#${existing.number}`);
+                } else {
+                  await github.rest.issues.createLabel({ owner, repo: trackingRepo, name: "epic", color: "ededed", description: "Cross-repo epic tracking issue — not buildable work" }).catch(() => {});
+                  const { data } = await github.rest.issues.create({ owner, repo: trackingRepo, title: trackingTitle, body: trackingBody, labels: ["epic", `epic:${epic.id}`, "tracking"] });
+                  core.info(`filed epic tracking issue: ${data.html_url}`);
+                }
+              } catch (e) {
+                core.warning(`failed to upsert epic tracking issue for '${epic.id}': ${e.message}`);
+              }
             }
 
       # Deterministic on purpose (cardinal rule: script over model call whenever exact) —

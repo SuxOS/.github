@@ -57,10 +57,29 @@ on:
           their own and so are routinely left `disabled_manually` by design.
         type: string
         default: "audit.yml,automerge.yml,ci.yml,claude-autofix.yml,claude.yml,fabric-health.yml,fixer.yml,health.yml,issue-build.yml,pr-auto-update.yml,pr-drain.yml,pr-unstick.yml,pr-watch.yml,security-review.yml,skill-sync.yml"
+      epic-reconciler:
+        description: >-
+          Opt-in: reconcile epic tracking issues in the repo this workflow itself runs in
+          (github.repository — per self-fabric-health.yml, that's SuxOS/.github) against
+          their child issues across `repos`. For each open issue labeled `epic` here, checks
+          whether any `epic:<id>` child issue is still open in any repo in `repos`; ticks
+          the tracking issue's checklist and closes it once every named child has closed.
+          Companion to fixer.yml's `epic-filing` input, which files the issues this reads —
+          independent of it (can be built/tested against hand-labeled `epic:<id>` issues
+          before filing exists). Per
+          docs/design/2026-07-18-epic-decomposition-design.md §2.3/§2.5: default false,
+          same gating note as `epic-filing` — stays off until the vX-arc DoD (7-day drain
+          streak + >=50% opus-bucket headroom) is confirmed live.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  issues: read
+  # write (not read): the opt-in epic reconciler below (epic-reconciler, default false)
+  # ticks/closes tracking issues in this repo. Every other step in this job only reads
+  # issues, so this is a strict widening for one disabled-by-default step, not a change to
+  # the spine collector's own access.
+  issues: write
   pull-requests: read
   actions: read
   checks: read
@@ -409,3 +428,107 @@ jobs:
           name: fabric-status
           path: fabric-status.json
           retention-days: 14
+
+      # Epic reconciler (opt-in, default false — see the epic-reconciler input above).
+      # docs/design/2026-07-18-epic-decomposition-design.md §2.3: this repo (where
+      # fabric-health.yml itself runs, per self-fabric-health.yml) holds every epic's
+      # tracking issue (label "epic", one `epic:<id>` label naming which epic); child
+      # issues live across `repos`, each tagged `epic:<id>` by fixer.yml's filing step.
+      # For each tracking issue, page through open `epic:<id>`-labeled issues in every
+      # repo — the same grow-4x-and-reissue technique `.github/actions/gh-list-exhaustive`
+      # centralizes for a static `uses:` call site, inlined here instead because $REPOS is
+      # a runtime-computed list (this job's own `repos` input), so the number of
+      # repo/epic combinations isn't knowable at workflow-authoring time and can't be a
+      # static matrix of `uses:` steps. Any repo still showing an open child means the
+      # epic isn't done; zero open children anywhere closes the tracking issue.
+      - name: Epic reconciler — tick/close tracking issues (opt-in)
+        if: inputs.epic-reconciler == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOS: ${{ inputs.repos }}
+          OWNER: ${{ github.repository_owner }}
+          TRACKING_REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+
+          # Exhaustive open-issue listing for one repo+label: grow the page size 4x until a
+          # short page proves the true end of the list, instead of trusting one bounded
+          # --limit call that could silently undercount (the bug class this repo's
+          # gh-list-exhaustive action generalizes — see the step comment above for why
+          # that action itself isn't called here). Shared by both list sites below.
+          list_open_for_label() {
+            local repo="$1" label="$2" fields="$3" limit=100 page count
+            while :; do
+              page=$(gh issue list --repo "$repo" --state open --label "$label" --limit "$limit" --json "$fields" 2>/dev/null) || page="[]"
+              count=$(printf '%s' "$page" | jq 'length' 2>/dev/null || echo 0)
+              if [ "$count" -lt "$limit" ] || [ "$limit" -ge 6400 ]; then
+                printf '%s' "$page"
+                return
+              fi
+              limit=$((limit * 4))
+            done
+          }
+          count_open_for_label() { list_open_for_label "$1" "$2" number | jq 'length' 2>/dev/null || echo 0; }
+
+          tracking=$(list_open_for_label "$TRACKING_REPO" "epic" "number,title,body,labels")
+          tcount=$(printf '%s' "$tracking" | jq 'length' 2>/dev/null || echo 0)
+          if [ "$tcount" -eq 0 ]; then
+            echo "no open epic tracking issues in $TRACKING_REPO"
+            exit 0
+          fi
+
+          printf '%s' "$tracking" | jq -c '.[]' | while IFS= read -r issue; do
+            num=$(printf '%s' "$issue" | jq -r '.number')
+            body=$(printf '%s' "$issue" | jq -r '.body // ""')
+            epic_id=$(printf '%s' "$issue" | jq -r '[.labels[].name | select(startswith("epic:"))][0] // empty' | sed 's/^epic://')
+            if [ -z "$epic_id" ]; then
+              echo "::warning::tracking issue #$num carries no epic:<id> label — skipping"
+              continue
+            fi
+
+            open_total=0
+            for repo_name in $REPOS; do
+              n=$(count_open_for_label "$OWNER/$repo_name" "epic:$epic_id")
+              open_total=$((open_total + n))
+            done
+
+            # Tick the checklist: mark every "- [ ] <url>" line closed once its own
+            # repo#number is no longer open (a per-line state check, not just the
+            # aggregate open_total, so the checklist reflects reality even mid-epic).
+            new_body=$(printf '%s\n' "$body" | while IFS= read -r line; do
+              case "$line" in
+                "- [ ] "*)
+                  url=$(printf '%s' "$line" | sed -E 's/^- \[ \] //')
+                  ref=$(printf '%s' "$url" | grep -oE '[^/]+/[^/]+/issues/[0-9]+$' || true)
+                  if [ -n "$ref" ]; then
+                    child_repo=$(printf '%s' "$ref" | cut -d/ -f1-2)
+                    child_num=$(printf '%s' "$ref" | grep -oE '[0-9]+$')
+                    state=$(gh issue view "$child_num" --repo "$child_repo" --json state --jq '.state' 2>/dev/null || echo "OPEN")
+                    if [ "$state" = "CLOSED" ]; then
+                      printf -- '- [x] %s\n' "$url"
+                      continue
+                    fi
+                  fi
+                  printf '%s\n' "$line"
+                  ;;
+                *)
+                  printf '%s\n' "$line"
+                  ;;
+              esac
+            done)
+
+            if [ "$new_body" != "$body" ]; then
+              gh issue edit "$num" --repo "$TRACKING_REPO" --body "$new_body" \
+                && echo "ticked checklist on tracking issue #$num" \
+                || echo "::warning::failed to update tracking issue #$num body"
+            fi
+
+            if [ "$open_total" -eq 0 ]; then
+              gh issue comment "$num" --repo "$TRACKING_REPO" --body "All child issues for epic \`$epic_id\` are closed — closing this tracking issue." || true
+              gh issue close "$num" --repo "$TRACKING_REPO" \
+                && echo "closed tracking issue #$num (epic $epic_id complete)" \
+                || echo "::warning::failed to close tracking issue #$num"
+            else
+              echo "epic $epic_id: tracking issue #$num — $open_total child issue(s) still open"
+            fi
+          done

@@ -123,6 +123,17 @@ on:
         description: "Human-readable list of gates the change must pass before it pushes."
         type: string
         default: "the repo's lint/type-check/test/build commands"
+      value-ranking-sort:
+        description: >-
+          Opt-in: replace the per-tier oldest-first pack (HIGH -> MED -> LOW) with a single
+          pass over all selectable issues sorted by `final_score` descending, per
+          docs/design/2026-07-18-value-ranking-score-spec.md. `final_score` blends tier,
+          effort-fit, and backlog pressure (from the fail-soft spine fetch above), then
+          anti-starvation-ages toward 1.0 as an issue nears 21 days old. Default false (the
+          existing tier-then-number pack) — the score is always computed and logged either
+          way (see the `pick` step) so the two orders can be compared before this flips on.
+        type: boolean
+        default: false
       needs-suxlib:
         description: >-
           This caller's package.json has a "file:../suxlib" dependency on the private
@@ -171,8 +182,9 @@ jobs:
       turns: ${{ steps.pick.outputs.turns }}
       # Spine signal outputs (docs/design/2026-07-18-value-ranking-selection-design.md §2.1,
       # #452): raw fabric-status.json fields, fail-soft (spine_available=false on any miss).
-      # Not consumed by `pick` yet — that's the score-sort slice
-      # (docs/design/2026-07-18-value-ranking-score-spec.md §5), a separate follow-up issue.
+      # Consumed by `pick`'s value-ranking score-sort (value-ranking-sort input, §5 of
+      # docs/design/2026-07-18-value-ranking-score-spec.md) — pressure_term degrades to 0
+      # when spine_available is false, per the spec's §6 fail-soft contract.
       spine_available: ${{ steps.spine.outputs.available }}
       spine_backlog_total: ${{ steps.spine.outputs.backlog_total }}
       spine_workflow_red_total: ${{ steps.spine.outputs.workflow_red_total }}
@@ -220,9 +232,8 @@ jobs:
       # Every command-substitution assignment is `|| true`-guarded per this repo's CLAUDE.md note
       # that `run:` steps execute under `-e` regardless of this script's own `set` line, so an
       # unguarded failed pipeline would otherwise abort the step instead of falling through to
-      # the degrade path. Nothing downstream consumes these outputs yet — that's the score-sort
-      # slice (docs/design/2026-07-18-value-ranking-score-spec.md), a separate follow-up issue;
-      # this step only lands the raw signal so that slice has real data to read.
+      # the degrade path. Consumed by the `pick` step's value-ranking score-sort (see below)
+      # as the `pressure_term` input, per docs/design/2026-07-18-value-ranking-score-spec.md.
       - name: Fetch fabric-status.json spine signal (fail-soft)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: spine
@@ -313,6 +324,9 @@ jobs:
           SIMPLE_MODEL: ${{ inputs.simple-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
+          VALUE_RANKING_SORT: ${{ inputs.value-ranking-sort }}
+          SPINE_AVAILABLE: ${{ steps.spine.outputs.available }}
+          SPINE_BACKLOG_TOTAL: ${{ steps.spine.outputs.backlog_total }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -405,7 +419,7 @@ jobs:
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return true;
             });
-            const buildable = buildableRaw.map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+            const buildable = buildableRaw.map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name), created_at: i.created_at }));
 
             // Prerequisite gating (#348): don't batch an issue ahead of a STILL-OPEN issue it
             // names as a hard prerequisite. When #342/#343 ("Extend the dashboard-query gate…")
@@ -471,29 +485,68 @@ jobs:
             const high = selectable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
             const med = selectable.filter((i) => !high.includes(i) && i.labels.includes("priority:med"));
             const low = selectable.filter((i) => !high.includes(i) && !med.includes(i));
+            const tierOf = (i) => (high.includes(i) ? "high" : med.includes(i) ? "med" : "low");
 
-            // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding while
-            // under BOTH caps (count, points), spilling into the next tier once the current one
-            // is exhausted instead of stopping cold at tier boundaries. A thin HIGH tier (e.g.
-            // one security issue trickling in) used to starve the whole batch down to count=1
-            // even with a full MED/LOW backlog waiting (operator-observed 2026-07-15) — spillover
-            // fixes that while still always draining HIGH first. `tier` reports the highest tier
-            // actually represented in the picked set (drives the opus-escalation signal below).
-            // Always take at least one issue even if its own points exceed the budget alone —
-            // "always build at least one thing" (three-loop-pipeline.md) is never overridden
-            // by the effort budget (verified: a lone effort:large issue still gets picked
-            // even when its 4pts alone exceed a 2pt budget).
+            // Value-ranking score-sort (docs/design/2026-07-18-value-ranking-score-spec.md):
+            // an alternative pack order to the tier-then-number one below, computed and logged
+            // unconditionally (even when the flag is off) so the two orders can be compared on
+            // every run before value-ranking-sort flips on for real. pressure_term degrades to
+            // 0 (spec §6 fail-soft contract) whenever the spine fetch didn't land fresh data —
+            // never fails/blocks selection, matching the spine step's own fail-soft contract.
+            const PRESSURE_CAP = 50;
+            const AGE_CAP_DAYS = 21;
+            const TIER_SCORE = { high: 1.0, med: 0.5, low: 0.0 };
+            const spineAvailable = process.env.SPINE_AVAILABLE === "true";
+            const backlogTotal = Number(process.env.SPINE_BACKLOG_TOTAL || 0);
+            const clamp01 = (n) => Math.min(Math.max(n, 0), 1);
+            const finalScoreOf = (i) => {
+              const pts = pointsFor(i.labels);
+              const effortFit = 1 / pts;
+              const pressureTerm = spineAvailable ? clamp01(backlogTotal / PRESSURE_CAP) : 0;
+              const baseScore = 0.45 * TIER_SCORE[tierOf(i)] + 0.25 * effortFit + 0.30 * pressureTerm;
+              const ageDays = (Date.now() - new Date(i.created_at).getTime()) / 86_400_000;
+              const ageFactor = clamp01(ageDays / AGE_CAP_DAYS);
+              return baseScore * (1 - ageFactor) + 1.0 * ageFactor;
+            };
+            const valueRankingSort = process.env.VALUE_RANKING_SORT === "true";
+            const scoreSorted = [...selectable]
+              .map((i) => ({ ...i, pts: pointsFor(i.labels), score: finalScoreOf(i), tName: tierOf(i) }))
+              .sort((a, b) => b.score - a.score);
+            core.info(`value-ranking score-sort order (spine_available=${spineAvailable} backlog_total=${backlogTotal}): ${scoreSorted.map((i) => `#${i.number}(${i.score.toFixed(3)})`).join(", ")}`);
+
+            // Greedy pack: keep adding while under BOTH caps (count, points). Default order is
+            // oldest-first within each tier, HIGH -> MED -> LOW, spilling into the next tier once
+            // the current one is exhausted instead of stopping cold at tier boundaries. A thin
+            // HIGH tier (e.g. one security issue trickling in) used to starve the whole batch
+            // down to count=1 even with a full MED/LOW backlog waiting (operator-observed
+            // 2026-07-15) — spillover fixes that while still always draining HIGH first. `tier`
+            // reports the highest tier actually represented in the picked set (drives the
+            // opus-escalation signal below). Always take at least one issue even if its own
+            // points exceed the budget alone — "always build at least one thing"
+            // (three-loop-pipeline.md) is never overridden by the effort budget (verified: a
+            // lone effort:large issue still gets picked even when its 4pts alone exceed a 2pt
+            // budget). value-ranking-sort (opt-in, default off) replaces the per-tier
+            // oldest-first order with a single pass over `scoreSorted` — same greedy
+            // accept-while-under-budget shape, different sort key feeding it (spec §5).
             const picked = [];
             let points = 0;
             let tier = "low";
-            for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
-              if (picked.length >= maxIssues) break;
-              const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
-              for (const it of sorted) {
+            if (valueRankingSort) {
+              for (const it of scoreSorted) {
                 if (picked.length >= maxIssues) break;
-                if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
+                if (picked.length === 0) { picked.push(it); points += it.pts; tier = it.tName; continue; }
                 if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
-                continue;
+              }
+            } else {
+              for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
+                if (picked.length >= maxIssues) break;
+                const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
+                for (const it of sorted) {
+                  if (picked.length >= maxIssues) break;
+                  if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
+                  if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
+                  continue;
+                }
               }
             }
             // sensedOpus flags the whole HIGH tier (security or priority:high) or any

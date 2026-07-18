@@ -39,6 +39,12 @@ ALLOWLIST=(
   ".github/workflows/fabric-health.yml::gh run list --limit 200"
   ".github/workflows/fabric-health.yml::gh run list --repo \"\$slug\" --limit 100"
   ".github/workflows/fabric-health.yml::gh run list --repo \"\$slug\" --workflow \"\$wf_id\" --limit 1"
+  # Epic reconciler's list_open_for_label (#471): this IS the grow-4x-and-reissue
+  # exhaustive-paging technique gh-list-exhaustive centralizes, just inlined (the
+  # composite action can't be invoked from inside a bash loop over a runtime-computed
+  # repo/epic list — see the step's own comment). The literal --limit call below is the
+  # loop's own growing page-size probe, not a bespoke bounded call.
+  ".github/workflows/fabric-health.yml::gh issue list --repo \"\$repo\" --state open --label \"\$label\" --limit \"\$limit\" --json \"\$fields\""
   ".github/workflows/deep-audit.yml::gh issue list --limit 200 --state all"
   ".github/workflows/pr-unstick.yml::gh pr list --state open --label needs-human --limit \"\$PR_LIMIT\""
   ".github/workflows/pr-unstick.yml::gh run list --repo \"\$GH_REPO\" --commit \"\$sha\" --limit 100 --json databaseId,conclusion"
