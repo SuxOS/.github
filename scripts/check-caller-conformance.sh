@@ -68,10 +68,18 @@ fi
 # reusable's own header carries an example `#   uses: SuxOS/.github/.github/workflows/X.yml@main`
 # line, which would otherwise false-positive if this ever scans a dir containing reusable
 # definitions themselves (currently moot for the cross-repo sweep, whose consumer stubs carry
-# no such comments — but this keeps the check robust if that ever changes, #363).
-wired="$(find "$WFDIR" -type f \( -name '*.yml' -o -name '*.yaml' \) -exec grep -vE '^[[:space:]]*#' {} + 2>/dev/null \
-  | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
-  | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
+# no such comments — but this keeps the check robust if that ever changes, #363). In `self`
+# mode, scope this to self-*.yml only — WFDIR is the same .github/workflows this repo also
+# uses for its own reusable *definitions*, and those aren't caller stubs.
+if [ "$MODE" = "self" ]; then
+  wired="$(for f in "$WFDIR"/self-*.yml "$WFDIR"/self-*.yaml; do [ -e "$f" ] || continue; grep -vE '^[[:space:]]*#' "$f"; done \
+    | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
+    | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
+else
+  wired="$(find "$WFDIR" -type f \( -name '*.yml' -o -name '*.yaml' \) -exec grep -vE '^[[:space:]]*#' {} + 2>/dev/null \
+    | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
+    | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
+fi
 wired_names="$(printf '%s\n' "$wired" | sed -nE 's#.*/workflows/([A-Za-z0-9._-]+)\.yml@.*#\1#p' | sort -u)"
 
 if [ "$MODE" = "full" ]; then
@@ -82,8 +90,13 @@ if [ "$MODE" = "full" ]; then
       warn "no live caller stub wires $c.yml (scaffold-caller.sh emits one — reusable adopted org-wide but not here)"
     fi
   done <<< "$CANON_STUBS"
+fi
 
-  # (d) STALE REF — a first-party SuxOS/.github reusable wired at anything but @main.
+if [ "$MODE" = "full" ] || [ "$MODE" = "self" ]; then
+  # (d) STALE REF — a first-party SuxOS/.github reusable wired at anything but @main. This
+  # is name-independent (keys off `uses: ...@ref`, not the stub's basename), so it runs in
+  # `self` mode too (#362) — unlike (a)/(c), which are derived from the canonical <name>.yml
+  # stub names and would false-positive on the self-<name>.yml prefix.
   while IFS= read -r u; do
     [ -z "$u" ] && continue
     ref="${u##*@}"
