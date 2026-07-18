@@ -118,5 +118,48 @@ else
   bad "job-chained ci.yml (autofix job) not mistaken for a dead stub" "ci.yml was removed"
 fi
 
+# 8. An empty/all-comment stub file must not abort the script under set -e (#430) — a
+#    realistic operator placeholder/disabled-workflow stub.
+d="$(fresh_copy empty-stub)"
+: > "$d/placeholder.yml"
+printf '# disabled for now\n# nothing to see here\n' > "$d/commented-out.yml"
+out="$(bash "$remediate" "$d" 2>&1)"
+if [ -f "$d/placeholder.yml" ] && [ -f "$d/commented-out.yml" ]; then
+  ok "empty/all-comment stub files don't abort remediation"
+else
+  bad "empty/all-comment stub files don't abort remediation" "$out"
+fi
+
+# 9. (d) STALE @ref — a first-party SuxOS/.github stub pinned to something other than
+#    @main is rewritten in place to @main (#432).
+d="$(fresh_copy stale-ref)"
+cat > "$d/health.yml" <<'YAML'
+name: Health
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+jobs:
+  health:
+    uses: SuxOS/.github/.github/workflows/health.yml@abc1234
+    secrets: inherit
+YAML
+bash "$remediate" "$d" >/dev/null
+if grep -q 'workflows/health.yml@main' "$d/health.yml" && ! grep -q '@abc1234' "$d/health.yml"; then
+  ok "(d) stale @ref pin rewritten to @main"
+else
+  bad "(d) stale @ref pin rewritten to @main" "$(cat "$d/health.yml")"
+fi
+
+# 10. A stub already pinned to @main is left byte-identical (no spurious rewrite).
+d="$(fresh_copy already-main)"
+before="$(sha256sum "$d/health.yml")"
+bash "$remediate" "$d" >/dev/null
+after="$(sha256sum "$d/health.yml")"
+if [ "$before" = "$after" ]; then
+  ok "stub already pinned to @main left untouched"
+else
+  bad "stub already pinned to @main left untouched" "content changed"
+fi
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all remediate-caller-stubs assertions passed"

@@ -95,3 +95,7 @@ jobs:
       - name: Assert fabric-health workflow_red batch/fallback/cap-hit rollup
         run: bash scripts/test-fabric-health-sweep.sh
         shell: bash
+
+      - name: Assert no new bespoke 'gh ... list --limit' call sites outside the tracked allowlist
+        run: bash scripts/test-no-new-gh-list-limit.sh
+        shell: bash
