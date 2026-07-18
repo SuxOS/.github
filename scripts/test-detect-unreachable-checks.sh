@@ -36,7 +36,7 @@ run_case() {
   echo "  [$name] exit=$code"
 }
 
-echo "[1/12] gh pr list fails -> fail OPEN (no findings, exit 0)"
+echo "[1/13] gh pr list fails -> fail OPEN (no findings, exit 0)"
 run_case "pr-list-fails" '
   case "$1" in
     pr) return 1 ;;
@@ -47,7 +47,7 @@ else
   bad "expected exit 0 + warning, got exit=$code out=$out"
 fi
 
-echo "[2/12] no open PRs -> exit 0, nothing to report"
+echo "[2/13] no open PRs -> exit 0, nothing to report"
 run_case "no-prs" '
   case "$1" in
     pr) echo "[]" ;;
@@ -58,7 +58,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[3/12] rulesets unreadable for base -> skip PR, fail OPEN"
+echo "[3/13] rulesets unreadable for base -> skip PR, fail OPEN"
 run_case "rules-unreadable" '
   case "$1" in
     pr) echo "[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]" ;;
@@ -72,7 +72,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[4/12] no required contexts on base -> skip PR, exit 0"
+echo "[4/13] no required contexts on base -> skip PR, exit 0"
 run_case "no-required" '
   case "$1" in
     pr) echo "[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]" ;;
@@ -86,7 +86,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[5/12] head commit is inside the grace window -> settle-gate skips it (never reports a fresh PR as jammed)"
+echo "[5/13] head commit is inside the grace window -> settle-gate skips it (never reports a fresh PR as jammed)"
 run_case "fresh-commit" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -103,7 +103,7 @@ else
   bad "expected exit 0 + settling message, got exit=$code out=$out"
 fi
 
-echo "[6/12] checks still in flight on head -> not settled, skip"
+echo "[6/13] checks still in flight on head -> not settled, skip"
 run_case "checks-pending" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -120,7 +120,7 @@ else
   bad "expected exit 0 + not-settled message, got exit=$code out=$out"
 fi
 
-echo "[7/12] all required contexts reported (exact + prefix-drift) -> reachable, exit 0"
+echo "[7/13] all required contexts reported (exact + prefix-drift) -> reachable, exit 0"
 run_case "reachable" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -137,7 +137,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[8/12] required context never reported, no disabled workflow found -> real jam (exit 1, generic remedy)"
+echo "[8/13] required context never reported, no disabled workflow found -> real jam (exit 1, generic remedy)"
 run_case "never-reporting-generic" "
   case \"\$1\" in
     pr) echo '[{\"number\":7,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -164,7 +164,7 @@ else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=7', got: $gh_output"
 fi
 
-echo "[9/12] required context's workflow is disabled_manually -> real jam (exit 1, disabled-workflow remedy)"
+echo "[9/13] required context's workflow is disabled_manually -> real jam (exit 1, disabled-workflow remedy)"
 run_case "never-reporting-disabled" "
   case \"\$1\" in
     pr) echo '[{\"number\":9,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -187,7 +187,7 @@ else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=' (empty), got: $gh_output"
 fi
 
-echo "[10/12] one gate disabled + one gate generic on the SAME PR -> excluded from generic-unreachable-prs (mixed cause)"
+echo "[10/13] one gate disabled + one gate generic on the SAME PR -> excluded from generic-unreachable-prs (mixed cause)"
 run_case "never-reporting-mixed" "
   case \"\$1\" in
     pr) echo '[{\"number\":11,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -205,7 +205,7 @@ else
   bad "expected exit 1 + empty generic-unreachable-prs, got exit=$code gh_output=$gh_output"
 fi
 
-echo "[11/12] two PRs, only one pure-generic -> only that one is handed off"
+echo "[11/13] two PRs, only one pure-generic -> only that one is handed off"
 run_case "never-reporting-two-prs" "
   case \"\$1\" in
     pr) echo '[{\"number\":7,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"},{\"number\":9,\"baseRefName\":\"main\",\"headRefOid\":\"def456\"}]' ;;
@@ -224,7 +224,7 @@ else
   bad "expected exit 1 + generic-unreachable-prs=7, got exit=$code gh_output=$gh_output"
 fi
 
-echo "[12/12] two flagged PRs in one run -> actions/workflows fetched once, not re-fetched per PR (#386)"
+echo "[12/13] two flagged PRs in one run -> actions/workflows fetched once, not re-fetched per PR (#386)"
 WF_CALLS_FILE=$(mktemp)
 echo 0 > "$WF_CALLS_FILE"
 run_case "workflows-json-cached-across-prs" "
@@ -246,6 +246,29 @@ if [ "$code" -eq 1 ] && [ "$wf_calls" -eq 1 ]; then
   note "actions/workflows fetched exactly once across both flagged PRs, not re-fetched per PR"
 else
   bad "expected exactly 1 actions/workflows call for 2 flagged PRs, got $wf_calls (exit=$code)"
+fi
+
+echo "[13/13] required context is a longer '<workflow> / <job>' string, disabled workflow name is the shorter prefix -> classified as disabled (#380)"
+run_case "never-reporting-disabled-prefix-name" "
+  case \"\$1\" in
+    pr) echo '[{\"number\":13,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
+    api) case \"\$2\" in
+           repos/*/rules/branches/*) echo '[{\"type\":\"required_status_checks\",\"parameters\":{\"required_status_checks\":[{\"context\":\"pin-consistency / verify\"}]}}]' ;;
+           repos/*/commits/*/check-runs) echo '{\"check_runs\":[]}' ;;
+           repos/*/commits/*/status) echo '{\"statuses\":[]}' ;;
+           repos/*/actions/workflows) echo '{\"workflows\":[{\"name\":\"pin-consistency\",\"state\":\"disabled_manually\"}]}' ;;
+           repos/*/commits/*) echo '{\"commit\":{\"committer\":{\"date\":\"$OLD_DATE\"}}}' ;;
+         esac ;;
+  esac"
+if [ "$code" -eq 1 ] && printf '%s' "$out" | grep -q 'manually disabled'; then
+  note "a disabled workflow whose short name is a '<workflow> / <job>' prefix of the required context is classified and named in the remedy"
+else
+  bad "expected exit 1 + 'manually disabled' remedy, got exit=$code out=$out"
+fi
+if [ "$gh_output" = "generic-unreachable-prs=" ]; then
+  note "a pure-disabled-workflow PR (prefix-matched) is excluded from generic-unreachable-prs"
+else
+  bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=' (empty), got: $gh_output"
 fi
 
 [ "$fail" -eq 0 ] && { echo "detect-unreachable-checks: PASS"; exit 0; } || { echo "detect-unreachable-checks: FAIL"; exit 1; }
