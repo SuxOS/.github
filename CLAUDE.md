@@ -93,3 +93,13 @@ unit-test a self-contained slice of it by extracting the region with `awk` betwe
 anchor comments and running it via `new Function(...)` with fixtures injected — see
 `scripts/test-issue-build-prereq-gating.sh` (tests issue-build's select heuristic this
 way, same no-drift principle as the shell-block extraction above).
+
+When extracting a `run:` block per the above, invoke it as `bash -e -c "$extracted"`,
+not bare `bash -c`: the runner's actual default shell for `run:` steps is
+`bash --noprofile --norc -eo pipefail {0}`, so `-e` is already active on every real
+run even when the step's own script only does `set -uo pipefail` (that omission
+doesn't turn `-e` off — it was never the script's to unset). A bare `bash -c` harness
+starts with no flags at all, so it silently misses any bug that only manifests under
+errexit (#404: an unguarded no-match command substitution killed the real step but
+passed locally under `bash -c`); `bash -e -c` reproduces the real semantics regardless
+of what the extracted script's own `set` line says (#411).

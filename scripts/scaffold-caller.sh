@@ -35,7 +35,7 @@ FORCE=0
 
 die() { echo "scaffold-caller: $*" >&2; exit 1; }
 
-usage() { sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in

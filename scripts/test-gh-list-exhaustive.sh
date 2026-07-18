@@ -38,12 +38,12 @@ EOF
   chmod +x "$dir/gh"
 }
 
-echo "[1/5] single page (result well under start-limit)"
+echo "[1/6] single page (result well under start-limit)"
 d1=$(mktemp -d); make_fake_gh "$d1" 3
 out1=/tmp/gh-list-exhaustive-out.$$
 : > "$out1"
 PATH="$d1:$PATH" GITHUB_OUTPUT="$out1" ARGS=$'pr\nlist' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
-  bash -c "$run" >/dev/null 2>&1
+  bash -e -c "$run" >/dev/null 2>&1
 if grep -q '^count=3$' "$out1"; then
   note "small result returns in one call (count=3)"
 else
@@ -51,12 +51,12 @@ else
 fi
 rm -rf "$d1" "$out1"
 
-echo "[2/5] growth required (250 results, start-limit=100)"
+echo "[2/6] growth required (250 results, start-limit=100)"
 d2=$(mktemp -d); make_fake_gh "$d2" 250
 out2=/tmp/gh-list-exhaustive-out.$$
 : > "$out2"
 PATH="$d2:$PATH" GITHUB_OUTPUT="$out2" ARGS=$'pr\nlist' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
-  bash -c "$run" >/dev/null 2>&1
+  bash -e -c "$run" >/dev/null 2>&1
 if grep -q '^count=250$' "$out2"; then
   note "grows past a short first page to the true full count (count=250)"
 else
@@ -64,13 +64,13 @@ else
 fi
 rm -rf "$d2" "$out2"
 
-echo "[3/5] result set exceeds max-limit -> fails loud, does not return a truncated result"
+echo "[3/6] result set exceeds max-limit -> fails loud, does not return a truncated result"
 d3=$(mktemp -d); make_fake_gh "$d3" 999999
 out3=/tmp/gh-list-exhaustive-out.$$
 : > "$out3"
 rc=0
 err=$(PATH="$d3:$PATH" GITHUB_OUTPUT="$out3" ARGS=$'pr\nlist' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
-  bash -c "$run" 2>&1) || rc=$?
+  bash -e -c "$run" 2>&1) || rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$err" | grep -q '::error::' && ! grep -q '^json=' "$out3"; then
   note "refuses to silently return a truncated result once max-limit is exceeded"
 else
@@ -78,14 +78,14 @@ else
 fi
 rm -rf "$d3" "$out3"
 
-echo "[4/5] real args: | shape (trailing newline) doesn't add a spurious empty arg (#405)"
+echo "[4/6] real args: | shape (trailing newline) doesn't add a spurious empty arg (#405)"
 d5=$(mktemp -d); make_fake_gh "$d5" 3
 out5=/tmp/gh-list-exhaustive-out.$$
 : > "$out5"
 # YAML's default clip chomping on `args: |` leaves exactly one trailing newline —
 # mirror that shape here instead of the no-trailing-newline ARGS=$'pr\nlist' used above.
 PATH="$d5:$PATH" GITHUB_OUTPUT="$out5" ARGS=$'pr\nlist\n' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
-  bash -c "$run" >/dev/null 2>&1
+  bash -e -c "$run" >/dev/null 2>&1
 if grep -q '^count=3$' "$out5"; then
   note "trailing-newline args produce no spurious empty positional arg (count=3)"
 else
@@ -93,13 +93,32 @@ else
 fi
 rm -rf "$d5" "$out5"
 
-echo "[5/5] gh error surfaces as ::error:: and a non-zero exit"
+echo "[5/6] zero-result list (no-match) doesn't abort under the runner's real -e (#411)"
+# Guards against the #404 bug class: an unguarded command substitution that
+# returns empty/no-match aborts the whole step under the runner's actual
+# `bash -eo pipefail {0}` default. The action itself has no analogous unguarded
+# substitution today, but this pins the zero-result path so a future edit that
+# adds one (e.g. piping `$page` through a filter before the `jq 'length'` count)
+# can't silently reintroduce it.
+d6=$(mktemp -d); make_fake_gh "$d6" 0
+out6=/tmp/gh-list-exhaustive-out.$$
+: > "$out6"
+PATH="$d6:$PATH" GITHUB_OUTPUT="$out6" ARGS=$'pr\nlist' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
+  bash -e -c "$run" >/dev/null 2>&1
+if grep -q '^count=0$' "$out6"; then
+  note "zero-result list returns count=0 without aborting the step"
+else
+  bad "expected count=0 for a zero-result list, got: $(cat "$out6")"
+fi
+rm -rf "$d6" "$out6"
+
+echo "[6/6] gh error surfaces as ::error:: and a non-zero exit"
 d4=$(mktemp -d); make_fake_gh "$d4" 0 error
 out4=/tmp/gh-list-exhaustive-out.$$
 : > "$out4"
 rc=0
 err=$(PATH="$d4:$PATH" GITHUB_OUTPUT="$out4" ARGS=$'pr\nlist' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
-  bash -c "$run" 2>&1) || rc=$?
+  bash -e -c "$run" 2>&1) || rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$err" | grep -q '::error::'; then
   note "a gh failure surfaces as ::error:: and a non-zero exit"
 else
