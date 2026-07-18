@@ -235,6 +235,23 @@ jobs:
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
+      # SuxOS/.github is PRIVATE, so the caller repo's own GITHUB_TOKEN (scoped only to the
+      # caller repo) 404s on this cross-repo checkout — a plain "repository not found", not an
+      # auth-prompt, since GitHub returns 404 rather than 403 for a private repo a token can't
+      # see. This fails the job on EVERY run (clean-verdict included) once .github went private,
+      # not just on findings — a false-red gating the whole fleet's merges (#457). Mint a token
+      # explicitly scoped to `.github` (mirrors issue-build.yml's "Mint app token for suxlib"
+      # sibling-checkout pattern) rather than reusing mint-app-token@main, which defaults to the
+      # CALLING repo only when no owner/repositories is passed.
+      - name: Mint app token for classifier checkout (SuxOS/.github)
+        if: steps.pre.outputs.go == 'true'
+        id: classifier-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
       - name: Checkout classifier (SuxOS/.github — scripts/classify-security-noverdict.sh lives only there, never in caller repos)
         if: steps.pre.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -242,6 +259,7 @@ jobs:
           repository: SuxOS/.github
           ref: main
           path: .suxos-ci
+          token: ${{ steps.classifier-token.outputs.token }}
       - name: Gate — classify no-verdict (infra retry vs diff fail-closed); block on high/critical
         if: steps.pre.outputs.go == 'true'
         env:
