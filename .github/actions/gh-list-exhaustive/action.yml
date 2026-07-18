@@ -36,7 +36,7 @@ inputs:
     description: Token for the gh call.
     required: true
   start-limit:
-    description: Starting page size; doubled on each re-query until a short page is seen.
+    description: Starting page size; grown 4x on each re-query until a short page is seen.
     required: false
     default: "100"
   max-limit:
@@ -71,7 +71,13 @@ runs:
       run: |
         set -uo pipefail
 
-        mapfile -t gh_args <<< "$ARGS"
+        # A bash here-string (<<<) always appends its own trailing newline on
+        # top of whatever $ARGS already ends with. Every real caller supplies
+        # args as a YAML block literal (args: |), whose default 'clip'
+        # chomping already leaves one trailing newline — so strip it first or
+        # mapfile turns the resulting blank line into a spurious empty
+        # trailing element in gh_args.
+        mapfile -t gh_args <<< "${ARGS%$'\n'}"
 
         limit="$START_LIMIT"
         while :; do

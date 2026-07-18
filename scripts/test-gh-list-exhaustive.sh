@@ -91,6 +91,42 @@ else
 fi
 rm -rf "$d4" "$out4"
 
+echo "[5/5] real 'args: |' shape (trailing newline) does not inject a spurious empty positional arg"
+d5=$(mktemp -d)
+cat > "$d5/gh" <<'EOF'
+#!/usr/bin/env bash
+limit=""
+prev=""
+for a in "$@"; do
+  if [ -z "$a" ]; then
+    echo "unexpected empty positional arg among: $*" >&2
+    exit 1
+  fi
+  if [ "$prev" = "--limit" ]; then limit="$a"; fi
+  prev="$a"
+done
+python3 -c "
+import json
+n = min(3, $limit)
+print(json.dumps([{'number': i} for i in range(n)]))
+"
+EOF
+chmod +x "$d5/gh"
+out5=/tmp/gh-list-exhaustive-out.$$
+: > "$out5"
+# YAML block literal (args: |) with default 'clip' chomping leaves exactly one
+# trailing newline on the string, e.g. "pr\nlist\n" — not the trailing-newline-free
+# ANSI-C string the other cases above use.
+err5=$(PATH="$d5:$PATH" GITHUB_OUTPUT="$out5" ARGS=$'pr\nlist\n' JSON_FIELDS=number START_LIMIT=100 MAX_LIMIT=6400 \
+  bash -c "$run" 2>&1)
+rc5=$?
+if [ "$rc5" -eq 0 ] && grep -q '^count=3$' "$out5" && ! printf '%s' "$err5" | grep -q 'unexpected empty positional arg'; then
+  note "trailing-newline ARGS (matching real 'args: |' callers) does not inject a spurious empty arg"
+else
+  bad "trailing-newline ARGS injected a spurious empty positional arg (rc=$rc5, err: $err5, output: $(cat "$out5"))"
+fi
+rm -rf "$d5" "$out5"
+
 if [ "$fail" -eq 0 ]; then
   echo "gh-list-exhaustive regression guard: PASS"
 else

@@ -259,7 +259,7 @@ jobs:
             # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
             # no worse than an attacker genuinely exhausting the pool.
             this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
-              | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+              | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1) || true
             [ -n "${this_reset:-}" ] || continue
             # resetsAt may be epoch seconds or milliseconds (same normalization as
             # pr-unstick.yml): 13+ digits is milliseconds.

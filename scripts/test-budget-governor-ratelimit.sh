@@ -27,9 +27,14 @@ run_case() {
   gh() { eval "$gh_body"; }
   export -f gh
   export gh_body
+  # -e matches the runner's actual default shell for `run:` blocks
+  # (bash --noprofile --norc -eo pipefail {0}) — without it, this harness misses
+  # any command whose non-zero exit would abort the real step (#404: an unguarded
+  # command substitution in a no-match grep pipeline killed the step under -e
+  # while a bare `bash -c` run here stayed silent about it).
   out=$(REPOS="repo-a" CLAUDE_WF_RE="claude|security review|fixer|issue build|deep audit|org consistency" \
     RATE_LIMIT_LOOKBACK_HOURS=6 RATE_LIMIT_MAX_RUNS_SCANNED=30 RATE_LIMIT_MAX_FUTURE_HOURS=6 \
-    GITHUB_OUTPUT="$outfile" bash -c "$ratelimit_run" 2>&1)
+    GITHUB_OUTPUT="$outfile" bash -e -c "$ratelimit_run" 2>&1)
   code=$?
   unset -f gh
   unset gh_body

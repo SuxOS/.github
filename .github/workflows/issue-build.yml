@@ -574,6 +574,19 @@ jobs:
           npm install -g typescript-language-server typescript
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
+      - name: Snapshot building-labelled issues before the session
+        # Baseline for the post-session diff below: the prompt lets the model claim
+        # extra issues mid-session with `gh issue edit <n> --add-label building`
+        # (EXPAND, see the prompt text). Since that claim has no other output channel
+        # back to this workflow, we detect it by diffing this label's before/after state.
+        id: pre-claim
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          before=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building --json number -q '.[].number' | sort -n | tr '\n' ' ')
+          echo "numbers=$before" >> "$GITHUB_OUTPUT"
+
       - name: Claude — plan and build the batch into one PR
         id: claude
         env:
@@ -700,6 +713,23 @@ jobs:
           # still gate the merge.
           claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }} --permission-mode bypassPermissions"
 
+      - name: Detect mid-session EXPAND claims
+        # Anything now building-labelled that wasn't in the pre-session snapshot is an issue
+        # the model claimed via the EXPAND path (see prompt above). Fold those into the same
+        # nums/closes set the push step uses, so an expanded issue that shipped in this PR
+        # actually gets a `Closes #n` reference instead of sitting orphaned until the reaper
+        # frees it for a wasted rebuild (SuxOS/.github#406).
+        id: expand
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BEFORE: ${{ steps.pre-claim.outputs.numbers }}
+        run: |
+          set -euo pipefail
+          after=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label building --json number -q '.[].number' | sort -n)
+          new=$(comm -13 <(tr ' ' '\n' <<<"$BEFORE" | sort -n) <(echo "$after") | tr '\n' ' ')
+          echo "numbers=$new" >> "$GITHUB_OUTPUT"
+
       - name: Push and open ONE PR, or release claims on failure
         # always(): this is the only thing that releases the `building` claim on this run's own
         # failure/cancellation — without it, a killed build step skips straight to the reaper's
@@ -710,11 +740,17 @@ jobs:
           BRANCH: ${{ steps.branch.outputs.name }}
           TIER: ${{ needs.select.outputs.tier }}
           ISSUE_NUMBERS_JSON: ${{ needs.select.outputs.numbers }}
+          EXPAND_NUMBERS: ${{ steps.expand.outputs.numbers }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          nums=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')
+          # Merge in any mid-session EXPAND claims (issues the model claimed beyond the
+          # statically-selected set, detected by the before/after `building`-label diff above)
+          # so they get the same release-on-failure / Closes-on-success treatment as the rest.
+          # shellcheck disable=SC2086 # EXPAND_NUMBERS is a deliberately unquoted space-separated
+          # word list here, so each number lands on its own line for the sort below.
+          nums=$(printf '%s\n' "$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[]')" $EXPAND_NUMBERS | sort -n -u)
 
           # Only real success is a commit ahead of base — a dirty/uncommitted tree is a failure.
           if [ -z "$(git log "origin/${BASE_BRANCH}"..HEAD 2>/dev/null)" ]; then
