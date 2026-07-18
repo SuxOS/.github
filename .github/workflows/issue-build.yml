@@ -523,7 +523,8 @@ jobs:
             // session redoing bad work costs more than it saves). So an opus build fans out to
             // sonnet subagents ("opus sonnet build"); a sonnet build keeps sonnet subagents.
             // Passed to the build session via CLAUDE_CODE_SUBAGENT_MODEL (see the build job).
-            const subagentModel = modelHint === "auto" ? (model === "opus" ? "sonnet" : model) : model;
+            const floorAtSonnet = (m) => (m === "haiku" ? "sonnet" : m);
+            const subagentModel = floorAtSonnet(modelHint === "auto" ? (model === "opus" ? "sonnet" : model) : model);
 
             // Effort level scales with tier — the orchestrator picks reasoning depth per build,
             // deterministically, from the same tier signal (operator: "choose model and
@@ -864,6 +865,19 @@ jobs:
               gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
                 --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
             done
+
+            # A number the model listed in BOTH built and dropped is an inconsistent
+            # disposition (#468) — trust neither the auto-close nor the released claim for it.
+            # It already got the "dropped" treatment (claim released, comment posted) above;
+            # strip it from `built`/`nums` too so it falls through to the "Related to" branch
+            # below instead of also getting `Closes #n`, which would auto-close an issue the
+            # same record says wasn't shipped.
+            overlap=$(comm -12 <(echo "$built" | tr ' ' '\n' | sort -u) <(echo "$dropped_nums" | tr ' ' '\n' | sort -u))
+            if [ -n "$overlap" ]; then
+              echo "::warning::disposition.json lists issue(s) in both built and dropped: $(echo "$overlap" | tr '\n' ' ')"
+              built=$(comm -23 <(echo "$built" | tr ' ' '\n' | sort -u) <(echo "$overlap" | sort -u) | tr '\n' ' ')
+              nums="$built"
+            fi
           fi
 
           # Fail closed, not open: a multi-issue batch with no valid disposition record is
