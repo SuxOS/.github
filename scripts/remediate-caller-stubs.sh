@@ -22,9 +22,11 @@
 #     workflow that happens to wire a SuxOS reusable; check-caller-conformance.sh's own
 #     message says "remove if superseded, or add to scaffold-caller.sh if intended", i.e.
 #     a judgment call.
-#   - (c) missing `secrets: inherit` / `ready_for_review`, and (d) stale @ref — both mean
-#     editing an EXISTING file's content, a bigger blast-radius step than add-only/
-#     remove-only; a future issue can widen this once the add/remove slice has run safely.
+#   - (c) missing `secrets: inherit` / `ready_for_review` — editing an EXISTING file's
+#     content in a way that isn't a single mechanical line rewrite; left advisory-only.
+#     (d) stale @ref IS handled below (#432) — a first-party SuxOS/.github `uses:` line
+#     pinned to anything but @main is rewritten in place via sed, the same low-risk,
+#     single-line mechanical edit as scaffold-caller.sh's own canonical stubs use.
 #   - ci.yml specifically, even when wholly missing: its content bakes in a
 #     --wrangler-config default (sux/wrangler.jsonc) that does not fit every caller's
 #     layout (a repo with no Worker, or a Worker config at a different path) — exactly the
@@ -61,9 +63,20 @@ fi
 echo "-- removing dead workflow_run stubs (R5/#263 class) --"
 for f in "$WFDIR"/*.yml "$WFDIR"/*.yaml; do
   [ -e "$f" ] || continue
-  uncommented="$(grep -vE '^[[:space:]]*#' "$f")"
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f" || true)"
   printf '%s\n' "$uncommented" | grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" || continue
   grep -qE '^[[:space:]]*workflow_run:' "$f" || continue
   echo "removing dead stub: $f"
   rm -f "$f"
+done
+
+echo "-- fixing stale first-party @ref pins (canonical ref is @main, #432) --"
+for f in "$WFDIR"/*.yml "$WFDIR"/*.yaml; do
+  [ -e "$f" ] || continue
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f" || true)"
+  wired="$(printf '%s\n' "$uncommented" | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" || true)"
+  [ -z "$wired" ] && continue
+  printf '%s\n' "$wired" | grep -qvE '@main$' || continue
+  echo "rewriting stale @ref pin(s) to @main: $f"
+  sed -i -E 's#(uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml)@[A-Za-z0-9._/-]+#\1@main#' "$f"
 done
