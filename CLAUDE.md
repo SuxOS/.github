@@ -64,7 +64,11 @@ action.yml`, then execute it via `bash -c "$extracted"` with a fake `gh` shim
 prepended to `PATH` and the action's `inputs:` set as env vars. This tests the
 actual shipped logic (no drift from a hand-copied stand-in) and needs no test
 framework — see `scripts/test-scaffold-caller-regression.sh` for worked examples
-(pr-eligibility, upsert-tracking-issue, flood-guard, check-throttle).
+(pr-eligibility, upsert-tracking-issue, flood-guard, check-throttle). When capturing
+that output to assert on `::error::`/`::warning::`/`::notice::` text, remember those
+are plain `echo`s to stdout (the runner UI parses them, but they aren't stderr) — a
+`2>&1 >/dev/null` stderr-only capture silently discards them; use `2>&1` (merged) or
+plain stdout capture instead.
 
 `.github/actions/gh-list-exhaustive` (#396) is the shared helper for the
 "`gh ... list --limit N` then client-side filter" undercount bug class fixed ad hoc
