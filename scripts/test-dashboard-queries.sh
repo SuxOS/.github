@@ -239,15 +239,20 @@ check_expr() {
   fi
 
   # (5) Conditional-series aggregation without an `or vector(...)` fallback
-  # (#291 class): min_over_time/count_over_time/count() over a metric that
-  # fabric-health.yml only emits some ticks (CONDITIONAL_METRICS) can read
-  # stale-green when the underlying condition just never occurred this
-  # window, unless the expr also handles the no-data case via `or vector(...)`.
-  if grep -qP '\b(min_over_time|count_over_time|count)\s*\(' <<<"$expr" && ! grep -q 'or vector(' <<<"$expr"; then
+  # (#291 class): min_over_time/count_over_time/count/sum/max/avg() over a
+  # metric that fabric-health.yml only emits some ticks (CONDITIONAL_METRICS)
+  # can read stale-green when the underlying condition just never occurred
+  # this window, unless the expr also handles the no-data case via
+  # `or vector(...)`, or already gates on `suxos_collection_ok` (the #378
+  # fix: an `and on() (min(suxos_collection_ok{...}) == 1)` clause turns a
+  # partial-collection undercount into an explicit no-data reading instead
+  # of a false-green sum/count, which `or vector(...)` alone cannot do).
+  if grep -qP '\b(min_over_time|count_over_time|count|sum|max|avg)\s*\(' <<<"$expr" && \
+     ! grep -qP 'or vector\(|suxos_collection_ok' <<<"$expr"; then
     while IFS= read -r m; do
       [ -z "$m" ] && continue
       [[ -v CONDITIONAL_METRICS["$m"] ]] && \
-        echo "VIOLATION [$ctx]: aggregates conditionally-emitted metric '$m' (${CONDITIONAL_METRICS[$m]}) with no 'or vector(...)' fallback — can read stale-green when the condition doesn't occur this window (#291)"
+        echo "VIOLATION [$ctx]: aggregates conditionally-emitted metric '$m' (${CONDITIONAL_METRICS[$m]}) with no 'or vector(...)' fallback or suxos_collection_ok gate — can read stale-green when the condition doesn't occur this window (#291)"
     done < <(grep -oE 'suxos_[a-z0-9_]+' <<<"$expr" | sort -u)
   fi
 }
@@ -294,6 +299,11 @@ expect_v "conditional series aggregated, no fallback (#291)" 'min_over_time(suxo
 expect_v "conditional series aggregated, with vector fallback (fixed)" 'min_over_time(suxos_pr_red_total[20m]) or vector(0)' 0
 expect_v "count() over a conditionally-emitted series, no fallback" 'count(suxos_workflow_disabled)'          1
 expect_v "aggregation over an unconditional series needs no fallback" 'min_over_time(suxos_backlog_zero[7d])' 0
+expect_v "sum() over a conditionally-emitted series, no fallback (#378)" 'sum(suxos_workflow_red_total)'       1
+expect_v "max() over a conditionally-emitted series, no fallback (#378)" 'max(suxos_workflow_disabled)'        1
+expect_v "avg() over a conditionally-emitted series, no fallback (#378)" 'avg(suxos_pipeline_backlog)'         1
+expect_v "sum() over a conditionally-emitted series, gated on collection_ok (fixed, #378)" \
+  'sum(last_over_time(suxos_workflow_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="runs"}[20m])) == 1)' 0
 
 # ===========================================================================
 # Part B — live gate: every expr in the real grafana/*.json must be clean.
