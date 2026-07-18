@@ -157,8 +157,8 @@ jobs:
             if [ "$marker" != "null" ] && [ -n "$marker" ]; then
               comment_id=$(echo "$marker" | jq -r '.id')
               body=$(echo "$marker" | jq -r '.body')
-              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2)
-              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2)
+              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
+              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2 || true)
               last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
               cycle=${cycle:-0}
             fi
@@ -379,8 +379,8 @@ jobs:
             if [ "$marker" != "null" ] && [ -n "$marker" ]; then
               comment_id=$(echo "$marker" | jq -r '.id')
               body=$(echo "$marker" | jq -r '.body')
-              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2)
-              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2)
+              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
+              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2 || true)
               last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
               cycle=${cycle:-0}
             fi
