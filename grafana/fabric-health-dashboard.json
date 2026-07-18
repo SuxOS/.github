@@ -367,7 +367,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (repo) (last_over_time(suxos_workflow_red_total[20m]))",
+          "expr": "sum by (repo) (last_over_time(suxos_workflow_red_total[20m])) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"runs\"}[20m])) == 1)",
           "legendFormat": "{{repo}}"
         }
       ]
@@ -458,7 +458,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (repo, workflow) (last_over_time(suxos_workflow_disabled[20m]))",
+          "expr": "max by (repo, workflow) (last_over_time(suxos_workflow_disabled[20m])) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"workflows\"}[20m])) == 1)",
           "legendFormat": "{{repo}}/{{workflow}}"
         }
       ]
