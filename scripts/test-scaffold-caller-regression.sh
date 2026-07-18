@@ -137,22 +137,35 @@ echo "[4/4] flood-guard / check-throttle fail-open behavior (#230)"
 flood_guard_run=$(extract_run .github/actions/flood-guard/action.yml check)
 check_throttle_run=$(extract_run .github/actions/check-throttle/action.yml check)
 
-# 4a: flood-guard fails open (features_ok=true) when gh pr list errors out.
-d4=$(mktemp -d)
-cat > "$d4/gh" <<'EOF'
-#!/usr/bin/env bash
-exit 1
-EOF
-chmod +x "$d4/gh"
+# 4a: flood-guard fails open (features_ok=true) when its two upstream "list
+# open PRs" steps (nested gh-list-exhaustive composite actions, #396) fail or
+# refuse via continue-on-error — which surfaces here as empty *_JSON.
 out4=/tmp/flood-guard-out.$$
 : > "$out4"
-PATH="$d4:$PATH" GITHUB_OUTPUT="$out4" THRESHOLD=8 REPO=test/repo bash -c "$flood_guard_run" >/dev/null 2>&1 || true
+GITHUB_OUTPUT="$out4" THRESHOLD=8 APP_JSON="" AUTHOR_JSON="" bash -c "$flood_guard_run" >/dev/null 2>&1 || true
 if grep -q '^features_ok=true$' "$out4"; then
-  note "flood-guard fails open (features_ok=true) when gh pr list errors"
+  note "flood-guard fails open (features_ok=true) when APP_JSON/AUTHOR_JSON are empty (upstream lists failed/refused)"
 else
-  bad "flood-guard did not fail open on a gh pr list error (output: $(cat "$out4" 2>/dev/null))"
+  bad "flood-guard did not fail open on empty APP_JSON/AUTHOR_JSON (output: $(cat "$out4" 2>/dev/null))"
 fi
-rm -rf "$d4" "$out4"
+rm -rf "$out4"
+
+# 4a-2: the --app and --author queries return the SAME bot PRs (one GitHub
+# App bot account has exactly one login), so overlapping results must be
+# deduped by number, not summed (#399: summing double-counted every real bot
+# PR and tripped the guard at roughly half its configured threshold).
+out4b=/tmp/flood-guard-dedupe-out.$$
+: > "$out4b"
+GITHUB_OUTPUT="$out4b" THRESHOLD=8 \
+  APP_JSON='[{"number":1},{"number":2},{"number":3}]' \
+  AUTHOR_JSON='[{"number":1},{"number":2},{"number":3}]' \
+  bash -c "$flood_guard_run" >/dev/null 2>&1 || true
+if grep -q '^open_bot_prs=3$' "$out4b"; then
+  note "flood-guard dedupes overlapping --app/--author results instead of summing them (#399)"
+else
+  bad "flood-guard did not dedupe overlapping --app/--author results (expected open_bot_prs=3, output: $(cat "$out4b" 2>/dev/null))"
+fi
+rm -rf "$out4b"
 
 # 4b: check-throttle fails open (level=green, go=true) on gh error and on
 # malformed tracking-issue bodies (missing level line, garbage suffix, wrong case).

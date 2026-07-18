@@ -66,6 +66,22 @@ actual shipped logic (no drift from a hand-copied stand-in) and needs no test
 framework — see `scripts/test-scaffold-caller-regression.sh` for worked examples
 (pr-eligibility, upsert-tracking-issue, flood-guard, check-throttle).
 
+`.github/actions/gh-list-exhaustive` (#396) is the shared helper for the
+"`gh ... list --limit N` then client-side filter" undercount bug class fixed ad hoc
+at least six times (#18, #247, #344, #345, #350, #366) before this: it pages until
+it sees the true end of the list or fails loud instead of returning a
+`--limit`-capped result. Prefer it over a new bespoke bounded list call. A composite
+action CAN call another composite action as a `uses:` step (not just a workflow
+calling one) — reference it by the full `SuxOS/.github/.github/actions/X@main` form
+(a relative path won't resolve in a caller repo's checkout), and add
+`continue-on-error: true` on that step if the calling action has a fail-open
+contract, since a failed nested action otherwise halts the parent; see
+`.github/actions/flood-guard/action.yml` for the reference wiring. Only flood-guard
+is migrated so far — check-throttle, fabric-health, pr-watch, pr-unstick/
+detect-unreachable-checks, and budget-governor still have their own (already
+working) bespoke mitigations and are deliberately left as separate future
+migrations rather than churned in one pass.
+
 `actionlint` does NOT lint `github-script` `with.script:` JS — that JS is a blind spot
 in the gate, so a syntax error there ships silently. Validate any such block with
 `node --check <(yq -r '.jobs.J.steps[]|select(.id=="X").with.script' wf.yml)`, and

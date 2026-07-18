@@ -1,0 +1,94 @@
+name: gh list (exhaustive, cap-detecting)
+description: >-
+  Wrap a `gh <type> list` call so it either fully pages through the true
+  result set or fails loud — never silently returns a `--limit`-capped page
+  that reads as a plausible, complete-looking answer. The same bug shape —
+  a bounded list call followed by client-side filtering, which silently
+  undercounts whenever the true result set exceeds the cap — has been fixed
+  ad hoc at least six times across this repo's history (#18, #247, #344,
+  #345, #350, #366) plus flood-guard (#396). This generalizes the
+  grow-and-reissue loop upsert-tracking-issue already uses for its own
+  lookup: double the page size and re-query until a page comes back shorter
+  than requested (the true end of the list) or the page size exceeds
+  max-limit, in which case it fails loud instead of returning a truncated
+  result. New and existing gh-list-then-filter call sites should prefer this
+  over a bespoke bounded `gh ... list --limit N`.
+
+inputs:
+  args:
+    description: >-
+      Newline-separated `gh` arguments for the list subcommand, one argument
+      per line, e.g. |
+        pr
+        list
+        --repo
+        owner/repo
+        --state
+        open
+      Do NOT include --limit or --json; this action adds both. One-argument-
+      per-line avoids shell word-splitting breaking any argument that itself
+      contains spaces (e.g. --search "phrase with spaces").
+    required: true
+  json-fields:
+    description: Comma-separated fields for `gh ... --json` (passed straight through).
+    required: true
+  github-token:
+    description: Token for the gh call.
+    required: true
+  start-limit:
+    description: Starting page size; doubled on each re-query until a short page is seen.
+    required: false
+    default: "100"
+  max-limit:
+    description: >-
+      Page size ceiling. Still getting a full page at this size means the
+      true result set is implausibly large (or something's wrong) — fail
+      loud rather than silently return a capped/truncated result. Raise on
+      repos/queries genuinely expected to exceed the default.
+    required: false
+    default: "6400"
+
+outputs:
+  json:
+    description: The full JSON array of the true (exhaustive) result set, compact single-line.
+    value: ${{ steps.list.outputs.json }}
+  count:
+    description: Length of the result array.
+    value: ${{ steps.list.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: List exhaustively or fail loud on cap
+      id: list
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARGS: ${{ inputs.args }}
+        JSON_FIELDS: ${{ inputs.json-fields }}
+        START_LIMIT: ${{ inputs.start-limit }}
+        MAX_LIMIT: ${{ inputs.max-limit }}
+      run: |
+        set -uo pipefail
+
+        mapfile -t gh_args <<< "$ARGS"
+
+        limit="$START_LIMIT"
+        while :; do
+          if [ "$limit" -gt "$MAX_LIMIT" ]; then
+            echo "::error::gh ${gh_args[*]} still returned a full page at limit=$((limit / 4)) (next would be $limit > max-limit=$MAX_LIMIT) — true result set may exceed what this action is willing to page through; refusing to silently return a truncated result. Raise max-limit if this query is genuinely expected to be this large."
+            exit 1
+          fi
+          if ! page=$(gh "${gh_args[@]}" --limit "$limit" --json "$JSON_FIELDS" | jq -c '.'); then
+            echo "::error::gh ${gh_args[*]} --limit $limit failed"
+            exit 1
+          fi
+          count=$(printf '%s' "$page" | jq 'length')
+          if [ "$count" -lt "$limit" ]; then
+            break
+          fi
+          limit=$((limit * 4))
+        done
+
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+        echo "json=$page" >> "$GITHUB_OUTPUT"

@@ -31,29 +31,69 @@ outputs:
 runs:
   using: composite
   steps:
+    # The org bot surfaces as "suxbot" in either the app/suxbot or suxbot[bot]
+    # form, so narrow server-side with both --app and --author (#393) rather
+    # than fetching the repo's whole open-PR list and filtering client-side —
+    # that would silently undercount once a repo passes 100 total open PRs.
+    # gh-list-exhaustive (#396) additionally pages each of these two queries
+    # past a single bounded page (or refuses to guess) instead of just
+    # trusting one --limit 100 call, and continue-on-error preserves this
+    # action's fail-open contract: a refusal/failure here still reaches the
+    # count step below with that query's json output empty.
+    - name: List open PRs by app
+      id: list-app
+      continue-on-error: true
+      uses: SuxOS/.github/.github/actions/gh-list-exhaustive@main
+      with:
+        github-token: ${{ inputs.github-token }}
+        json-fields: number
+        args: |
+          pr
+          list
+          --repo
+          ${{ github.repository }}
+          --state
+          open
+          --app
+          suxbot
+
+    - name: List open PRs by author
+      id: list-author
+      continue-on-error: true
+      uses: SuxOS/.github/.github/actions/gh-list-exhaustive@main
+      with:
+        github-token: ${{ inputs.github-token }}
+        json-fields: number
+        args: |
+          pr
+          list
+          --repo
+          ${{ github.repository }}
+          --state
+          open
+          --author
+          suxbot[bot]
+
     - name: Count open bot PRs
       id: check
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github-token }}
         THRESHOLD: ${{ inputs.threshold }}
-        REPO: ${{ github.repository }}
+        APP_JSON: ${{ steps.list-app.outputs.json }}
+        AUTHOR_JSON: ${{ steps.list-author.outputs.json }}
       run: |
         set -uo pipefail
 
-        # Fail-open: a lookup failure leaves count=0 → features_ok=true. The org bot
-        # surfaces as "suxbot" in the PR author login in either the app/suxbot or
-        # suxbot[bot] form, so query both server-side (via --app / --author) rather
-        # than fetching the repo's whole open-PR list and filtering client-side —
-        # a >100-open-PR repo would otherwise truncate the page before the author
-        # filter ever runs, silently undercounting the bot-PR queue (#393). Narrowing
-        # server-side before --limit binds is the same fix pr-unstick.yml already
-        # applies to its needs-human/security-review-retry sweeps.
-        count_app=$(gh pr list --repo "$REPO" --state open --app suxbot --limit 100 --json number 2>/dev/null \
-          | jq 'length') || true
-        count_user=$(gh pr list --repo "$REPO" --state open --author "suxbot[bot]" --limit 100 --json number 2>/dev/null \
-          | jq 'length') || true
-        count=$(( ${count_app:-0} + ${count_user:-0} ))
+        # Fail-open: either query failing/refusing leaves its *_JSON empty, which
+        # falls back to an empty array below — a partial outage undercounts rather
+        # than crashing. A GitHub App's bot account has exactly one login,
+        # <slug>[bot], and --app <slug> is gh's sugar for filtering by that same
+        # login — so these two queries return the SAME PRs, not disjoint sets.
+        # Dedupe by number instead of summing them (#399: summing double-counted
+        # every real bot PR, tripping the guard at roughly half the configured
+        # threshold).
+        count=$(jq -s '[.[][]] | unique_by(.number) | length' \
+          <(printf '%s' "${APP_JSON:-[]}") <(printf '%s' "${AUTHOR_JSON:-[]}")) || count=0
 
         features_ok=true
         [ "$count" -ge "$THRESHOLD" ] && features_ok=false
