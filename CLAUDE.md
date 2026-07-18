@@ -105,3 +105,12 @@ starts with no flags at all, so it silently misses any bug that only manifests u
 errexit (#404: an unguarded no-match command substitution killed the real step but
 passed locally under `bash -c`); `bash -e -c` reproduces the real semantics regardless
 of what the extracted script's own `set` line says (#411).
+
+A plain `var=$(pipeline)` assignment is itself a simple command, so under `-e` it aborts
+the instant the substitution's own exit status is non-zero — with `pipefail`, that's true
+whenever the pipe's rightmost *failing* stage (e.g. a `grep` with no match feeding `sort`/
+`head`, which then both exit 0) is non-zero, even though every stage after it "succeeds".
+A `[ -n "$var" ] || continue` guard written on the *next* line never gets a chance to run;
+the assignment already killed the step (#404 — budget-governor's rate-limit scan aborted
+on every ordinary failed run, since a log with no `five_hour` marker is the exit-1 case).
+Guard the assignment itself, e.g. `var=$( { pipeline; } || true)`, not just its result.

@@ -258,8 +258,16 @@ jobs:
             # as the reset epoch. Same-line pairing + the plausibility cap below bound
             # a forged marker to at most one RATE_LIMIT_MAX_FUTURE_HOURS red window —
             # no worse than an attacker genuinely exhausting the pool.
-            this_reset=$(grep '"rateLimitType":"five_hour"' <<<"$log" \
-              | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+            # `|| true` is load-bearing (#404): under this step's `bash -e`, a plain
+            # `var=$(...)` assignment aborts the whole step the instant the command
+            # substitution's own exit status is non-zero — and with `pipefail`, that's
+            # true of this pipe on every scanned log that (the common case) has NO
+            # five_hour marker at all, since every stage up to `sort`/`head` then exits 1.
+            # The `[ -n ... ] || continue` guard below was written to handle exactly that
+            # "no marker found" case gracefully, but it never got a chance to run — the
+            # assignment itself already killed the step first.
+            this_reset=$( { grep '"rateLimitType":"five_hour"' <<<"$log" \
+              | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1; } || true)
             [ -n "${this_reset:-}" ] || continue
             # resetsAt may be epoch seconds or milliseconds (same normalization as
             # pr-unstick.yml): 13+ digits is milliseconds.

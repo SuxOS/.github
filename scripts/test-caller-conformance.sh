@@ -211,5 +211,20 @@ jobs:
 YAML
 assert_not "(#363) header-comment uses: line is not treated as a live stub reference" "$d" "health-doc\.yml"
 
+# 7d. (#362) `self` mode also runs the (d) STALE REF slice — it's name-independent (keys
+#     off `uses: ...@ref`, not the stub's basename) just like the workflow_run dead-stub
+#     check, so a self-*.yml stub pinned off @main must be caught too.
+d="$(fresh_copy self-stale-ref)"
+cat > "$d/self-stale-audit.yml" <<'YAML'
+name: Self stale audit
+on:
+  schedule: [{ cron: "0 * * * *" }]
+jobs:
+  audit:
+    uses: SuxOS/.github/.github/workflows/audit.yml@v1.2.3
+    secrets: inherit
+YAML
+assert_self_has "self mode: stale non-@main ref on self-* stub caught" "$d" "stub wires audit\.yml at @v1\.2\.3"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"

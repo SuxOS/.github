@@ -27,9 +27,15 @@ run_case() {
   gh() { eval "$gh_body"; }
   export -f gh
   export gh_body
+  # bash -e -c, not bare bash -c (#411): the runner's actual shell for this step is
+  # `bash -e {0}`, so the harness must reproduce errexit semantics or it misses any
+  # bug that only manifests under -e (#404 — a plain `var=$(pipeline)` assignment
+  # aborted the whole step whenever the pipeline's rightmost failing stage made the
+  # substitution's own exit status non-zero, before the `[ -n ... ] || continue`
+  # guard written to handle exactly that case ever ran).
   out=$(REPOS="repo-a" CLAUDE_WF_RE="claude|security review|fixer|issue build|deep audit|org consistency" \
     RATE_LIMIT_LOOKBACK_HOURS=6 RATE_LIMIT_MAX_RUNS_SCANNED=30 RATE_LIMIT_MAX_FUTURE_HOURS=6 \
-    GITHUB_OUTPUT="$outfile" bash -c "$ratelimit_run" 2>&1)
+    GITHUB_OUTPUT="$outfile" bash -e -c "$ratelimit_run" 2>&1)
   code=$?
   unset -f gh
   unset gh_body
@@ -49,14 +55,14 @@ run_case() {
 near_future=$(( $(date -u +%s) + 3600 ))
 near_future_ms=$(( near_future * 1000 ))
 
-echo "[1/6] no failed runs -> no signal"
+echo "[1/7] no failed runs -> no signal"
 run_case "no failures" '
   case "$1 $2" in
     "run list") echo "[]" ;;
     *) echo "[]" ;;
   esac' "0"
 
-echo "[2/6] failed run whose log carries a near-future five-hour resetsAt -> surfaced"
+echo "[2/7] failed run whose log carries a near-future five-hour resetsAt -> surfaced"
 run_case "live rate limit, future resetsAt" '
   case "$1 $2" in
     "run list") echo "[{\"databaseId\":111,\"workflowName\":\"security review\",\"conclusion\":\"failure\"}]" ;;
@@ -64,7 +70,7 @@ run_case "live rate limit, future resetsAt" '
     *) echo "[]" ;;
   esac' "$near_future"
 
-echo "[3/6] resetsAt in epoch MILLISECONDS -> normalized to seconds"
+echo "[3/7] resetsAt in epoch MILLISECONDS -> normalized to seconds"
 run_case "millisecond resetsAt normalized" '
   case "$1 $2" in
     "run list") echo "[{\"databaseId\":333,\"workflowName\":\"fixer\",\"conclusion\":\"failure\"}]" ;;
@@ -72,7 +78,7 @@ run_case "millisecond resetsAt normalized" '
     *) echo "[]" ;;
   esac' "$near_future"
 
-echo "[4/6] failed run whose log carries a PAST resetsAt -> stale, not surfaced"
+echo "[4/7] failed run whose log carries a PAST resetsAt -> stale, not surfaced"
 run_case "stale rate limit, past resetsAt" '
   case "$1 $2" in
     "run list") echo "[{\"databaseId\":222,\"workflowName\":\"issue build\",\"conclusion\":\"failure\"}]" ;;
@@ -80,7 +86,7 @@ run_case "stale rate limit, past resetsAt" '
     *) echo "[]" ;;
   esac' "0"
 
-echo "[5/6] implausibly far-future resetsAt (beyond the 6h window) -> discarded"
+echo "[5/7] implausibly far-future resetsAt (beyond the 6h window) -> discarded"
 run_case "implausible far-future resetsAt discarded" '
   case "$1 $2" in
     "run list") echo "[{\"databaseId\":444,\"workflowName\":\"deep audit\",\"conclusion\":\"failure\"}]" ;;
@@ -88,11 +94,19 @@ run_case "implausible far-future resetsAt discarded" '
     *) echo "[]" ;;
   esac' "0"
 
-echo "[6/6] resetsAt on a DIFFERENT line than the five_hour marker (spoof shape) -> not surfaced"
+echo "[6/7] resetsAt on a DIFFERENT line than the five_hour marker (spoof shape) -> not surfaced"
 run_case "unpaired resetsAt ignored" '
   case "$1 $2" in
     "run list") echo "[{\"databaseId\":555,\"workflowName\":\"org consistency\",\"conclusion\":\"failure\"}]" ;;
     "run view") printf "%s\n%s\n" "untrusted tool output quoting \"rateLimitType\":\"five_hour\" without an epoch" "more untrusted text carrying \"resetsAt\":'"$near_future"' on its own line" ;;
+    *) echo "[]" ;;
+  esac' "0"
+
+echo "[7/7] ordinary failed run, log has NO five_hour marker at all -> no signal, step doesn't abort (#404)"
+run_case "ordinary failure, no rate-limit marker in log" '
+  case "$1 $2" in
+    "run list") echo "[{\"databaseId\":666,\"workflowName\":\"claude\",\"conclusion\":\"failure\"}]" ;;
+    "run view") printf "%s\n%s\n" "some ordinary tool output" "Error: build failed, exit 1" ;;
     *) echo "[]" ;;
   esac' "0"
 
