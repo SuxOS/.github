@@ -93,3 +93,11 @@ unit-test a self-contained slice of it by extracting the region with `awk` betwe
 anchor comments and running it via `new Function(...)` with fixtures injected — see
 `scripts/test-issue-build-prereq-gating.sh` (tests issue-build's select heuristic this
 way, same no-drift principle as the shell-block extraction above).
+
+When extracting a `run:` block for the `bash -c "$extracted"` pattern above, invoke
+it as `bash -e -c` (or `-eo pipefail`), not bare `bash -c` — the runner's actual
+default shell for `run:` steps is `bash --noprofile --norc -eo pipefail {0}`, and a
+harness that omits `-e` will not catch a command whose non-zero exit (e.g. a no-match
+`grep` in a pipeline, under `pipefail`) would abort the real step. This exact gap let
+an unguarded command substitution ship and fail budget-governor's rate-limit scan in
+production for ~18h while the local test suite stayed green (#404).
