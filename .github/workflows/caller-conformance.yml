@@ -26,12 +26,33 @@
 # consumer repo's own stub hygiene is that repo's concern; this only surfaces the drift.
 #
 # Runs directly in this repo — it is NOT a reusable workflow_call file.
+#
+# Closing the loop (#355): the `conformance` job above is deliberately read-only advisory —
+# a warning still needs a human to notice and act, which is exactly how #263 sat "fixed" for
+# hours while every caller stayed dead (docs/design/2026-07-16-suxos-vx-next-arc.md:47,
+# 128-130). The opt-in `remediate` job below closes it for the two findings that can never
+# be wrong to act on unattended (see scripts/remediate-caller-stubs.sh's header for the
+# add-only/remove-only split and why (c)/(d) and ci.yml stay advisory-only). It is opt-in
+# and workflow_dispatch-only: `schedule` triggers can't set workflow_dispatch inputs, so a
+# scheduled run always sees this input's `false` default and the nightly cron sweep stays
+# pure-advisory, same as before. A bigger trust step than the read-only scan — it pushes a
+# branch and opens a PR INTO the consumer repo — so it mints a token scoped to ONLY that one
+# repo and restricted to just the two permissions the remediation needs.
 name: caller-conformance
 
 on:
   schedule:
     - cron: "41 5 * * *"
   workflow_dispatch:
+    inputs:
+      remediate:
+        description: >-
+          Open/refresh a per-repo "chore: sync SuxOS caller stubs" PR for any repo with a
+          missing-stub or dead-stub finding (#355). Opt-in; has no effect on the scheduled
+          run (schedule can't set workflow_dispatch inputs, so it always uses the default
+          below).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,3 +148,92 @@ jobs:
           fi
           echo "### Caller-stub conformance — $REPO" >> "$GITHUB_STEP_SUMMARY"
           bash scripts/check-caller-conformance.sh "$REPO" consumer/.github/workflows
+
+  remediate:
+    # Opt-in only (#355) — see the file header for why this is workflow_dispatch-gated and
+    # what it deliberately does NOT touch. Same degrade-to-skip posture as `conformance`:
+    # a repo the App can't reach, or can't be granted write scope on, is skipped with a
+    # warning, never a hard failure.
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.remediate == 'true'
+    needs: managed-repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        repo: ${{ fromJSON(needs.managed-repos.outputs.repos) }}
+    steps:
+      - name: Checkout .github (this repo — canonical stub source)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Mint repo-scoped app token (contents:write, pull-requests:write only)
+        id: app-token
+        continue-on-error: true
+        # Same pinned version as .github/actions/mint-app-token. Restricted to just the two
+        # permissions this job needs (least privilege beyond what `conformance`'s read-only
+        # scan requests) and to the single target repo via `repositories:`.
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: ${{ matrix.repo }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout SuxOS/${{ matrix.repo }}
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/${{ matrix.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: consumer
+
+      - name: Regenerate missing/dead stubs and open or refresh a remediation PR
+        env:
+          REPO: ${{ matrix.repo }}
+          TOKEN_OK: ${{ steps.app-token.outcome }}
+          CHECKOUT_OK: ${{ steps.checkout.outcome }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: SuxOS/${{ matrix.repo }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$TOKEN_OK" != "success" ]; then
+            echo "::warning::[$REPO] could not mint a write-scoped app token (secret missing, App not installed, or App lacks contents/pull-requests write on this repo) — skipping remediation"
+            exit 0
+          fi
+          if [ "$CHECKOUT_OK" != "success" ] || [ ! -d consumer/.github ]; then
+            echo "::warning::[$REPO] could not check out repo — skipping remediation"
+            exit 0
+          fi
+
+          bash scripts/remediate-caller-stubs.sh consumer/.github/workflows
+
+          cd consumer
+          if [ -z "$(git status --porcelain -- .github/workflows)" ]; then
+            echo "[$REPO] nothing to remediate — caller stubs already conform."
+            exit 0
+          fi
+
+          git config user.name "suxbot[bot]"
+          git config user.email "304711698+suxbot[bot]@users.noreply.github.com"
+          git checkout -B bot/sync-caller-stubs
+          git add .github/workflows
+          git commit -m "chore: sync SuxOS caller stubs"
+          git push -f origin bot/sync-caller-stubs
+
+          existing=$(gh pr list --state open --head bot/sync-caller-stubs --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --body "Refreshed by the latest caller-conformance remediation run: $RUN_URL"
+            echo "[$REPO] refreshed existing remediation PR #$existing."
+          else
+            # shellcheck disable=SC2016  # backticks below are literal Markdown, not command substitution
+            gh pr create \
+              --title "chore: sync SuxOS caller stubs" \
+              --body "$(printf 'Automated caller-stub remediation by SuxOS/.github'\''s **caller-conformance** workflow (#355): adds any wholly missing canonical stub and removes dead R5/#263-class stubs (a stub wiring a SuxOS reusable on `workflow_run`). Only ever touches `.github/workflows/`, never app code — review before merging.\n\nRun: %s' "$RUN_URL")"
+            echo "[$REPO] opened remediation PR."
+          fi

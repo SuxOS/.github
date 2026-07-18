@@ -47,7 +47,11 @@ issues that scheduled Claude workloads read via the `check-throttle` action — 
 successor to the retired binary `budget-guard.yml`) · `deep-audit.yml` (nightly opus pass
 over each repo's merged diff — the compensating control for the sonnet per-PR
 security-review) · `org-consistency.yml` (weekly opus cross-repo drift + refactor sweep,
-files findings into the backlog pipeline).
+files findings into the backlog pipeline) · `caller-conformance.yml` (nightly advisory
+caller-stub drift sweep over every repo in `managed-repos.json` plus this repo's own
+`self-*.yml` stubs, #346/#356; a `workflow_dispatch`-only, opt-in `remediate` input opens/
+refreshes a `chore: sync SuxOS caller stubs` PR per drifted repo for the two findings safe
+to fix unattended — missing canonical stubs and dead `workflow_run` stubs — #355).
 
 **Backlog pipeline** (turns latent work into merged PRs — propose → build):
 `fixer.yml` (propose work as typed issues) · `issue-build.yml` (select the top-priority open
