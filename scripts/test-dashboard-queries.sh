@@ -158,6 +158,51 @@ parse_conditional() {
   done
 }
 
+# --- Metric -> collector pairing (#391) -----------------------------------
+# The #378 fix lets an expr gate a conditionally-emitted metric behind
+# `and on() (min(suxos_collection_ok{collector="X"}) == 1)`, but check_expr's
+# #378 check only requires the LITERAL STRING 'suxos_collection_ok' to be
+# present — it never confirmed collector="X" is the collector that actually
+# gates that metric's own emission in fabric-health.yml. A gate on the wrong
+# (or an always-1) collector would still defeat the #291-class false-green
+# it's supposed to fix, while passing check_expr clean. Derive the real
+# pairing straight from the same `select(.collection.X == 1) | ...` jq
+# statements parse_conditional's reason-strings point at, so this can never
+# drift from what fabric-health.yml actually emits.
+declare -A METRIC_COLLECTOR   # metric -> collector name it's gated on
+parse_metric_collector() {
+  local -a fh_lines
+  mapfile -t fh_lines < "$FABRIC_HEALTH"
+  local n=${#fh_lines[@]}
+  local i in_jq=0 cur_start=-1
+  local -a jq_start=() jq_end=()
+  for ((i = 0; i < n; i++)); do
+    if [ "$in_jq" -eq 0 ]; then
+      if [[ "${fh_lines[$i]}" =~ jq\ -r ]]; then
+        in_jq=1; cur_start=$i
+        [[ "${fh_lines[$i]}" == *'<<< "$status"'* ]] && { jq_start+=("$cur_start"); jq_end+=("$i"); in_jq=0; }
+      fi
+    else
+      if [[ "${fh_lines[$i]}" == *'<<< "$status"'* ]]; then
+        jq_start+=("$cur_start"); jq_end+=("$i"); in_jq=0
+      fi
+    fi
+  done
+
+  local j s e k blk collector metric
+  for ((j = 0; j < ${#jq_start[@]}; j++)); do
+    s=${jq_start[$j]}; e=${jq_end[$j]}
+    blk=""
+    for ((k = s; k <= e; k++)); do blk+="${fh_lines[$k]}"$'\n'; done
+    collector=$(grep -oP '\.collection\.\K[a-z_]+(?=\s*==\s*1)' <<<"$blk" | head -1)
+    [ -z "$collector" ] && continue
+    while IFS= read -r metric; do
+      [ -z "$metric" ] && continue
+      METRIC_COLLECTOR["$metric"]="$collector"
+    done < <(grep -oE 'suxos_[a-z0-9_]+' <<<"$blk" | sort -u)
+  done
+}
+
 # --- Duration literal (Prometheus: 49h, 7d, 20m, 15m, ...) to seconds ---
 dur_to_secs() {
   local d="$1" n u
@@ -255,6 +300,27 @@ check_expr() {
         echo "VIOLATION [$ctx]: aggregates conditionally-emitted metric '$m' (${CONDITIONAL_METRICS[$m]}) with no 'or vector(...)' fallback or suxos_collection_ok gate — can read stale-green when the condition doesn't occur this window (#291)"
     done < <(grep -oE 'suxos_[a-z0-9_]+' <<<"$expr" | sort -u)
   fi
+
+  # (6) collection_ok collector correctness (#391): an expr can satisfy check (5)
+  # by gating on ANY suxos_collection_ok{collector="..."} clause without that
+  # collector being the one that actually gates the aggregated metric's own
+  # emission in fabric-health.yml (METRIC_COLLECTOR, derived above) — e.g.
+  # gating suxos_workflow_red_total (really gated on collector="runs") behind
+  # collector="prs" would pass check (5) while gating on an unrelated
+  # collector, silently defeating the #291/#378 fix. Only fires when BOTH the
+  # gate's collector value AND the metric's real collector are known — a
+  # metric whose collector we can't derive (e.g. it's conditional via a
+  # `[]?`/`select(...)` shape parse_metric_collector doesn't cover) is left to
+  # by-hand review rather than false-flagged.
+  while IFS= read -r g; do
+    [ -z "$g" ] && continue
+    while IFS= read -r m; do
+      [ -z "$m" ] && continue
+      [[ -v METRIC_COLLECTOR["$m"] ]] || continue
+      [ "${METRIC_COLLECTOR[$m]}" = "$g" ] || \
+        echo "VIOLATION [$ctx]: gates on suxos_collection_ok{collector=\"$g\"} but metric '$m' is actually gated on collector \"${METRIC_COLLECTOR[$m]}\" in $FABRIC_HEALTH — wrong-collector gate defeats the #291/#378 fix"
+    done < <(grep -oE 'suxos_[a-z0-9_]+' <<<"$expr" | sort -u)
+  done < <(grep -oP 'suxos_collection_ok\{[^}]*collector="\K[a-z_]+' <<<"$expr" | sort -u)
 }
 
 # Count VIOLATION lines emitted by check_expr for a given expr.
@@ -270,6 +336,8 @@ echo "emitted metrics: ${!EMITTED_LABELS[*]}"
 echo "emitted labels:  ${!EMITTED_LABEL_UNION[*]}"
 parse_conditional
 echo "conditionally-emitted metrics: ${!CONDITIONAL_METRICS[*]}"
+parse_metric_collector
+for m in "${!METRIC_COLLECTOR[@]}"; do echo "  collector pairing: $m -> ${METRIC_COLLECTOR[$m]}"; done
 
 # ===========================================================================
 # Part A — self-test the checker against synthetic known-bad / known-good exprs
@@ -304,6 +372,10 @@ expect_v "max() over a conditionally-emitted series, no fallback (#378)" 'max(su
 expect_v "avg() over a conditionally-emitted series, no fallback (#378)" 'avg(suxos_pipeline_backlog)'         1
 expect_v "sum() over a conditionally-emitted series, gated on collection_ok (fixed, #378)" \
   'sum(last_over_time(suxos_workflow_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="runs"}[20m])) == 1)' 0
+expect_v "sum() over a conditionally-emitted series, gated on WRONG collector (#391)" \
+  'sum(last_over_time(suxos_workflow_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="prs"}[20m])) == 1)' 1
+expect_v "sum() over suxos_pr_red_total, gated on its own correct collector (#391)" \
+  'sum(last_over_time(suxos_pr_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="prs"}[20m])) == 1)' 0
 
 # ===========================================================================
 # Part B — live gate: every expr in the real grafana/*.json must be clean.
