@@ -169,6 +169,14 @@ jobs:
       subagent_model: ${{ steps.pick.outputs.subagent_model }}
       effort: ${{ steps.pick.outputs.effort }}
       turns: ${{ steps.pick.outputs.turns }}
+      # Spine signal outputs (docs/design/2026-07-18-value-ranking-selection-design.md §2.1,
+      # #452): raw fabric-status.json fields, fail-soft (spine_available=false on any miss).
+      # Not consumed by `pick` yet — that's the score-sort slice
+      # (docs/design/2026-07-18-value-ranking-score-spec.md §5), a separate follow-up issue.
+      spine_available: ${{ steps.spine.outputs.available }}
+      spine_backlog_total: ${{ steps.spine.outputs.backlog_total }}
+      spine_workflow_red_total: ${{ steps.spine.outputs.workflow_red_total }}
+      spine_collection_ok: ${{ steps.spine.outputs.collection_ok }}
     steps:
       - name: Preflight — need the token
         id: pre
@@ -192,6 +200,92 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Mint app token for spine signal read (SuxOS/.github)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: spine-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
+
+      # Cross-workflow spine signal fetch (docs/design/2026-07-18-value-ranking-selection-design.md
+      # §2.1, #452): fabric-health.yml uploads fabric-status.json from a DIFFERENT workflow/run
+      # (self-fabric-health.yml in SuxOS/.github, 15-min cron), so this is a cross-repo/cross-run
+      # `gh run`/artifact lookup, not a same-run artifact reference. select runs for every caller
+      # repo with no per-repo blast-radius limit (this repo's own CLAUDE.md), so EVERY failure
+      # path below degrades to available=false and continues rather than failing the build.
+      # Every command-substitution assignment is `|| true`-guarded per this repo's CLAUDE.md note
+      # that `run:` steps execute under `-e` regardless of this script's own `set` line, so an
+      # unguarded failed pipeline would otherwise abort the step instead of falling through to
+      # the degrade path. Nothing downstream consumes these outputs yet — that's the score-sort
+      # slice (docs/design/2026-07-18-value-ranking-score-spec.md), a separate follow-up issue;
+      # this step only lands the raw signal so that slice has real data to read.
+      - name: Fetch fabric-status.json spine signal (fail-soft)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: spine
+        env:
+          GH_TOKEN: ${{ steps.spine-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          available=false
+          backlog_total=""
+          workflow_red_total=""
+          collection_ok=""
+          age_min=""
+          reason=""
+
+          run_id=$( { gh run list --repo SuxOS/.github --workflow self-fabric-health.yml \
+            --status success --limit 1 --json databaseId 2>/dev/null \
+            | jq -r '.[0].databaseId // empty'; } || true)
+
+          if [ -z "$run_id" ]; then
+            reason="no successful self-fabric-health.yml run found"
+          else
+            updated_at=$( { gh run view "$run_id" --repo SuxOS/.github \
+              --json updatedAt --jq '.updatedAt' 2>/dev/null; } || true)
+            if [ -z "$updated_at" ]; then
+              reason="could not read run $run_id updatedAt"
+            else
+              # Staleness cap: 60m gives ~4x the 15-min fabric-health cron cadence of slack.
+              age_min=$(( ( $(date -u +%s) - $(date -u -d "$updated_at" +%s 2>/dev/null || echo 0) ) / 60 ))
+              if [ "$age_min" -gt 60 ]; then
+                reason="stale (${age_min}m old, run $run_id)"
+              else
+                rm -rf /tmp/fabric-status && mkdir -p /tmp/fabric-status
+                if ! gh run download "$run_id" --repo SuxOS/.github --name fabric-status \
+                    --dir /tmp/fabric-status 2>/dev/null; then
+                  reason="artifact download failed for run $run_id"
+                elif [ ! -f /tmp/fabric-status/fabric-status.json ]; then
+                  reason="fabric-status.json missing from artifact"
+                else
+                  backlog_total=$( { jq -r '.backlog_total // empty' /tmp/fabric-status/fabric-status.json; } || true)
+                  workflow_red_total=$( { jq -r '[.repos[].workflow_red] | add // 0' /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
+                  collection_ok=$( { jq -r '.collection_ok // empty' /tmp/fabric-status/fabric-status.json; } || true)
+                  if [ -z "$backlog_total" ] || [ -z "$collection_ok" ]; then
+                    reason="fabric-status.json missing expected fields"
+                  else
+                    available=true
+                  fi
+                fi
+              fi
+            fi
+          fi
+
+          if [ "$available" = "true" ]; then
+            echo "::notice::spine signal fetched: backlog_total=$backlog_total workflow_red_total=$workflow_red_total collection_ok=$collection_ok (run $run_id, ${age_min}m old)"
+          else
+            echo "::notice::spine signal unavailable ($reason) — degrading to tier-only pack"
+          fi
+
+          {
+            echo "available=$available"
+            echo "backlog_total=$backlog_total"
+            echo "workflow_red_total=$workflow_red_total"
+            echo "collection_ok=$collection_ok"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Non-buildable labels
         id: nonbuildable
