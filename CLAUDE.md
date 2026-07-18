@@ -139,3 +139,14 @@ open-PR counts (low single digits per repo), but check the added latency/rate-li
 before reaching for `files` on a list call whose limit could realistically climb into the
 hundreds (#437 added it to pr-drain's DIRTY-CONFLICT sweep for a diagnostic-only sibling
 hot-file-overlap check).
+
+An `effort:large` issue whose own body says it needs "a design/scoping pass first" doesn't have
+to just get REDUCE-dropped every time a builder session hits it (#439 was dropped once already
+for this exact reason before being scoped). Shipping a `docs/design/YYYY-MM-DD-*.md` scoping
+doc — re-deriving a concrete plan, sizing it into small independently-buildable follow-up
+slices, explaining why this session doesn't build it all at once — is a legitimate, gate-passing
+build for that issue (`Closes #n` on the doc commit), not a dodge; see
+`docs/design/2026-07-18-epic-decomposition-design.md` (#433) and
+`docs/design/2026-07-18-value-ranking-selection-design.md` (#439) as the two precedents. Beats
+leaving it to rot as an indefinite drop, and gives the next build (or a human) something durable
+to act on instead of re-deriving the same plan from scratch a third time.
