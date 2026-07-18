@@ -103,6 +103,14 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: repos/claude-config
 
+      - name: Checkout suxlib
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/suxlib
+          token: ${{ steps.app-token.outputs.token }}
+          path: repos/suxlib
+
       - name: Claude — cross-repo consistency and refactor sweep
         id: claude
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
@@ -128,8 +136,8 @@ jobs:
           prompt: |
             You are the weekly org-consistency auditor. The workspace root is the org's
             `.github` hub repo (reusable workflows + scaffold); the product repos are checked
-            out under `repos/sux`, `repos/suxrouter`, `repos/sux-fileops`, and
-            `repos/claude-config`. You see what no single-repo pass can: drift BETWEEN them.
+            out under `repos/sux`, `repos/suxrouter`, `repos/claude-config`, and
+            `repos/suxlib`. You see what no single-repo pass can: drift BETWEEN them.
 
             Hunt, in priority order:
               1. Caller-stub drift: each repo's `.github/workflows/*.yml` thin callers vs.
@@ -141,7 +149,7 @@ jobs:
                  taxonomies, branch naming, CLAUDE.md guidance that contradicts another
                  repo's, node versions, lint/test entry points) where convergence is cheap.
               3. Duplicated logic that wants extraction: near-identical code/scripts in two+
-                 repos (especially sux ↔ sux-fileops) that belongs in one place.
+                 repos (especially sux ↔ suxlib) that belongs in one place.
               4. API-shape drift: suxrouter's vendored/consumed interfaces vs. what sux
                  actually serves; docs describing cross-repo behavior that no longer matches.
               5. Intra-repo refactor opportunities ONLY when they generalize across repos
