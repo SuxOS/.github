@@ -41,7 +41,9 @@ before it goes live on `schedule`/`issues` triggers across the whole org.
 
 This repo's own gate is `self-check.yml`: **actionlint** (which also runs
 shellcheck over embedded `run:` blocks) plus the `scripts/test-*.sh` invariant
-scripts (five as of #307/#308) — run those locally, not `yamllint`. `yamllint` is
+scripts (ten as of #413; check `.github/workflows/self-check.yml` for the current
+count/list, don't trust a hardcoded number here) — run those locally, not
+`yamllint`. `yamllint` is
 on the runner but its default 80-col config flags nearly every pre-existing line
 here and is *not* the gate. Each script is wired into `self-check.yml` by explicit
 name, not a glob, so adding a new one means adding its step there too.
