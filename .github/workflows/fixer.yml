@@ -224,7 +224,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]},"epic":{"type":"object","properties":{"id":{"type":"string"},"repos":{"type":"array","items":{"type":"string"}}},"required":["id","repos"],"additionalProperties":false}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       - name: Claude — scan and propose issues (retry — first attempt produced no output)
         id: claude_retry
@@ -319,7 +319,7 @@ jobs:
           claude_args: >-
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-list:*),Bash(gh issue list:*)"
-            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"proposals":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"body":{"type":"string"},"type":{"type":"string","enum":["bug","enhancement","documentation"]},"security":{"type":"boolean"},"effort":{"type":"string","enum":["small","medium","large"]},"epic":{"type":"object","properties":{"id":{"type":"string"},"repos":{"type":"array","items":{"type":"string"}}},"required":["id","repos"],"additionalProperties":false}},"required":["title","body","type","security","effort"],"additionalProperties":false}},"discarded_count":{"type":"integer"}},"required":["proposals","discarded_count"],"additionalProperties":false}'
 
       # The ONLY step that ever calls `gh issue create` — the agent above has no gh-write
       # access at all. Re-validates type against an allowlist even though the JSON schema

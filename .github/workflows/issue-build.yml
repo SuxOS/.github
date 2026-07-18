@@ -742,19 +742,27 @@ jobs:
 
           git push -f origin "$BRANCH"
 
+          original_nums="$nums"
+          batch_size=$(echo "$original_nums" | wc -w | tr -d ' ')
+
           # The builder's disposition.json (§4 of the prompt) is the source of truth for which
-          # issues actually shipped in this push — falls back to the original static selection
-          # if the model didn't write it (e.g. an older run, or it skipped step 4), so this stays
-          # safe even when the file is missing or malformed.
+          # issues actually shipped in this push. `disposition_valid` tracks whether it's
+          # present and well-formed (a `.built` array) — used below to decide whether the
+          # original batch can safely be auto-closed (#446: a missing/malformed file used to
+          # fall back to closing the WHOLE original batch via `Closes #n`, silently closing
+          # issues the model dropped or never touched, e.g. because it judged them too large
+          # and wrote no disposition at all).
+          disposition_valid=false
           built=""
-          if [ -s "$DISPOSITION_FILE" ]; then
+          if [ -s "$DISPOSITION_FILE" ] && jq -e '.built | type == "array"' "$DISPOSITION_FILE" >/dev/null 2>&1; then
+            disposition_valid=true
             built=$(jq -r '.built // [] | .[]' "$DISPOSITION_FILE" 2>/dev/null || true)
           fi
           if [ -n "$built" ]; then
             nums="$built"
           fi
 
-          if [ -s "$DISPOSITION_FILE" ]; then
+          if [ "$disposition_valid" = true ]; then
             dropped_nums=$(jq -r '.dropped // [] | .[].number' "$DISPOSITION_FILE" 2>/dev/null || true)
             for n in $dropped_nums; do
               reason=$(jq -r --arg n "$n" '.dropped[] | select((.number|tostring) == $n) | .reason // "no reason given"' "$DISPOSITION_FILE" 2>/dev/null || echo "no reason given")
@@ -764,7 +772,23 @@ jobs:
             done
           fi
 
-          closes=$(for n in $nums; do echo "Closes #$n"; done)
+          # Fail closed, not open: a multi-issue batch with no valid disposition record is
+          # exactly the ambiguous case (#446) — the commit might address only some of the
+          # original issues, or none of the harder ones. Don't auto-close any of them; flag
+          # each instead so it's visible, and leave the `building` claim in place (the reaper
+          # frees it after REAP_STALE_HOURS if this PR doesn't merge, so it can be retried). A
+          # single-issue batch has no such ambiguity — a real commit can only be about that one
+          # issue — so it keeps auto-closing even without a disposition file.
+          if [ "$disposition_valid" = false ] && [ "$batch_size" -gt 1 ]; then
+            closes=$(for n in $nums; do echo "Related to #$n (not auto-closed — no disposition record, please verify)"; done)
+            for n in $nums; do
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 This batch pushed a commit but no valid disposition record was written, so we can't tell which issue(s) it actually addresses. Not auto-closing — please verify against the PR and close manually if appropriate. Run: $RUN_URL" 2>/dev/null || true
+            done
+          else
+            closes=$(for n in $nums; do echo "Closes #$n"; done)
+          fi
+
           title="build: drain ${TIER}-priority backlog ($(echo "$nums" | wc -w | tr -d ' ') issues)"
           body=$(printf 'Batch build of the %s-priority backlog.\n\n%s\n\n%s\n\nRun: %s' \
             "$TIER" "$closes" "🤖 Opened automatically by issue-build.yml." "$RUN_URL")
