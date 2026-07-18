@@ -114,3 +114,13 @@ A `[ -n "$var" ] || continue` guard written on the *next* line never gets a chan
 the assignment already killed the step (#404 — budget-governor's rate-limit scan aborted
 on every ordinary failed run, since a log with no `five_hour` marker is the exit-1 case).
 Guard the assignment itself, e.g. `var=$( { pipeline; } || true)`, not just its result.
+
+A reusable workflow's `run:` step that shells out to `scripts/X.sh` only works when the job's
+checkout actually put that file at that cwd. `workflow_call`'s default Checkout step (no
+`repository:` override) checks out the CALLER repo, not SuxOS/.github — so a bare
+`bash scripts/X.sh` silently 404s in every caller and any `|| echo <fallback>` around it masks
+the failure as a legitimate result (#428: security-review.yml's no-verdict classifier always
+fell back to `fail-closed` in every caller repo this way). If a reusable step needs a script that
+lives only in this repo, add an explicit second `actions/checkout@... with: {repository:
+SuxOS/.github, ref: main, path: .suxos-ci}` and call it from that subpath — don't sync copies
+into callers.
