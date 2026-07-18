@@ -233,12 +233,24 @@ jobs:
           # must bind on that, applied globally by recency.
           all_candidates="[]"
           for r in $REPOS; do
-            runs=$(gh run list --repo "SuxOS/$r" --limit 50 --created ">=$since" \
-                --json databaseId,workflowName,conclusion,createdAt 2>/dev/null \
-              | jq -c --arg cre "$CLAUDE_WF_RE" --arg repo "$r" \
-                '[.[] | select(.conclusion == "failure") | select(.workflowName | test($cre; "i")) |
-                  {repo: $repo, id: .databaseId, createdAt}]') \
+            raw=$(gh run list --repo "SuxOS/$r" --limit 50 --created ">=$since" \
+                --json databaseId,workflowName,conclusion,createdAt 2>/dev/null) \
               || { echo "::warning::gh run list (rate-limit scan) failed for SuxOS/$r — skipping"; continue; }
+            # Cap-hit detection (#438): --limit 50 bounds ALL runs of any workflow in the
+            # window, not just Claude-workflow failures, so a repo with >50 total runs in
+            # RATE_LIMIT_LOOKBACK_HOURS can silently drop an older-but-still-recent failed
+            # Claude run off the page before the jq filter below ever sees it. Same
+            # exactly-at-the-cap signal fabric-health.yml uses (#345, #381) — warn rather
+            # than treat as a collection failure, since this scan is already best-effort
+            # per repo (not a DoD-gating collector) and a full page of 50 doesn't by itself
+            # prove a Claude-workflow failure was truncated off it.
+            if [ "$(jq 'length' <<<"$raw")" -eq 50 ]; then
+              echo "::warning::rate-limit scan: SuxOS/$r returned exactly 50 runs (the --limit cap) in the lookback window — an older failed Claude run may have been truncated off the page, so a live rate-limit could go undetected for this repo"
+            fi
+            runs=$(jq -c --arg cre "$CLAUDE_WF_RE" --arg repo "$r" \
+                '[.[] | select(.conclusion == "failure") | select(.workflowName | test($cre; "i")) |
+                  {repo: $repo, id: .databaseId, createdAt}]' <<<"$raw") \
+              || { echo "::warning::rate-limit scan: jq filter failed for SuxOS/$r — skipping"; continue; }
             all_candidates=$(jq -c -n --argjson a "$all_candidates" --argjson b "$runs" '$a + $b')
           done
           scan_targets=$(jq -c --argjson cap "$RATE_LIMIT_MAX_RUNS_SCANNED" \
