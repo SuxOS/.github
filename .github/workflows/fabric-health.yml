@@ -156,9 +156,18 @@ jobs:
               }')
 
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
-            if wfs=$(gh workflow list --repo "$slug" --all \
+            # Same cap-hit detection as the issues/prs collectors above (#345, #381):
+            # --limit 101 (one past the assumed real cap of 100 workflow files — far
+            # more than any known caller repo has) so a full page reads as a collection
+            # failure (wfs_ok=0) instead of a silent undercount that would omit
+            # workflows past the page boundary from wf_red / suxos_workflow_disabled.
+            if wfs=$(gh workflow list --repo "$slug" --all --limit 101 \
                 --json id,name,path,state 2>/dev/null); then
-              wfs_ok=1
+              if [ "$(printf '%s' "$wfs" | jq 'length')" -gt 100 ]; then
+                wfs="[]"; wfs_ok=0
+              else
+                wfs_ok=1
+              fi
             else
               wfs="[]"; wfs_ok=0
             fi
