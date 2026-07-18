@@ -235,6 +235,13 @@ jobs:
             --max-turns ${{ inputs.max-turns }} --model ${{ inputs.model }}
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --json-schema '{"type":"object","properties":{"critical":{"type":"integer"},"high":{"type":"integer"},"note":{"type":"string"}},"required":["critical","high","note"],"additionalProperties":false}'
+      - name: Checkout classifier (SuxOS/.github — scripts/classify-security-noverdict.sh lives only there, never in caller repos)
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
       - name: Gate — classify no-verdict (infra retry vs diff fail-closed); block on high/critical
         if: steps.pre.outputs.go == 'true'
         env:
@@ -274,7 +281,7 @@ jobs:
           # (the evasion vector — must FAIL CLOSED). The classifier reads the execution logs
           # and returns `infra` ONLY on a genuine account-level rate-limit signal; anything
           # else (incl. unreadable logs / internal error) returns `fail-closed`.
-          cls=$(bash scripts/classify-security-noverdict.sh "$EXEC_MAIN" "$EXEC_RETRY" "$EXEC_APIKEY" </dev/null || echo fail-closed)
+          cls=$(bash .suxos-ci/scripts/classify-security-noverdict.sh "$EXEC_MAIN" "$EXEC_RETRY" "$EXEC_APIKEY" </dev/null || echo fail-closed)
           echo "no-verdict classification: $cls"
 
           if [ "$cls" = "infra" ]; then
