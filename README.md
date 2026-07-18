@@ -14,6 +14,14 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 - `suxlib` — SuxOS v2 op-engine library (`@suxos/lib`), no Cloudflare Worker to deploy.
 - `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
 
+## Cross-repo contracts
+
+Typed contracts that span two repos live here, not in either side, so neither becomes
+accidentally authoritative over the other — see
+[docs/design/2026-07-16-residential-egress-contract.md](docs/design/2026-07-16-residential-egress-contract.md)
+for the `sux` ↔ `suxrouter` residential-egress contract (schema at
+`contracts/residential-egress.schema.json`, conformance stubs in `scripts/contracts/`).
+
 ## The two groups
 
 **Gates** (required checks that block merge):

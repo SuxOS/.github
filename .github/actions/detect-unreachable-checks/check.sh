@@ -66,6 +66,7 @@ found_any=0
 # with an empty commit. A PR with even one disabled-workflow cause is left
 # out here: that has its own remedy (re-enable the workflow), not a push.
 declare -a generic_prs=()
+workflows_json=""
 
 for row in $(echo "$prs" | jq -c '.[]'); do
   n=$(echo "$row" | jq -r '.number')
@@ -144,7 +145,6 @@ for row in $(echo "$prs" | jq -c '.[]'); do
   fi
 
   found_any=1
-  workflows_json=""
   if [ -z "${workflows_json}" ]; then
     workflows_json=$(gh api "repos/${GH_REPO}/actions/workflows" --paginate 2>/dev/null || echo '{}')
   fi
