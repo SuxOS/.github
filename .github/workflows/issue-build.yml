@@ -946,6 +946,33 @@ jobs:
               return;
             }
 
+            // Cheap first-pass hot-file mitigation (#441): #437 found self-check.yml and
+            // CLAUDE.md are by far the two most common files touched across recent
+            // bot/issue-build-* PRs (nearly every batch that adds a scripts/test-*.sh gate
+            // touches the former; the RECORD DISPOSITION/CAPTURE INSIGHT instructions often
+            // produce the latter), and a sibling builder PR overlapping on one of them is
+            // #437's main observed collision source. Only matters when parallel-batches>1 —
+            // with cap 1 there's no sibling batch to collide with. Exact-match on the newest
+            // already-open builder PR's changed files only (no text-mining an issue's body);
+            // if it touches either file, hold further dispatch until it merges rather than
+            // attempt #437's general select-time overlap heuristic.
+            if (cap > 1) {
+              const HOT_FILES = new Set([".github/workflows/self-check.yml", "CLAUDE.md"]);
+              const builderPrs = openPrs
+                .filter((pr) => /^bot\/issue-build-\d+$/.test(pr.head.ref))
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              const newestBuilderPr = builderPrs[0];
+              if (newestBuilderPr) {
+                const changedFiles = await github.rest.pulls.listFiles({
+                  owner, repo, pull_number: newestBuilderPr.number, per_page: 100,
+                }).then((r) => r.data.map((f) => f.filename)).catch(() => []);
+                if (changedFiles.some((f) => HOT_FILES.has(f))) {
+                  core.info(`holding requeue dispatch — newest open builder PR #${newestBuilderPr.number} touches a hot file (self-check.yml/CLAUDE.md, #441); waiting for it to merge before dispatching another parallel batch`);
+                  return;
+                }
+              }
+            }
+
             // How many issue-build runs are already in flight for this repo (this run's own
             // requeue job still counts its run as in_progress, so it's included — we top UP to
             // the cap, we don't add cap-many on top). GitHub has no "runs for workflow X" filter
