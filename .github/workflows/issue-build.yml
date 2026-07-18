@@ -204,7 +204,7 @@ jobs:
       - name: Mint app token for spine signal read (SuxOS/.github)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: spine-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
@@ -619,7 +619,7 @@ jobs:
       - name: Mint app token for suxlib (private sibling dependency)
         id: suxlib-token
         if: inputs.needs-suxlib
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
@@ -1013,6 +1013,7 @@ jobs:
           WORKFLOW_REF: ${{ github.workflow_ref }}
           REF_NAME: ${{ github.ref_name }}
           MAX_ISSUES: ${{ inputs.max-issues }}
+          EFFORT_BUDGET: ${{ inputs.effort-budget }}
           PARALLEL_BATCHES: ${{ inputs.parallel-batches }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           INCLUDE: ${{ inputs.include }}
@@ -1022,6 +1023,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const maxIssues = Math.max(1, Number(process.env.MAX_ISSUES) || 10);
+            const effortBudget = Math.max(1, Number(process.env.EFFORT_BUDGET) || maxIssues * 2);
             const cap = Math.max(1, Number(process.env.PARALLEL_BATCHES) || 1);
             const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
             const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
@@ -1049,7 +1051,11 @@ jobs:
               if (!isTrusted(pr.user, pr.author_association)) continue;
               for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
             }
-            const unclaimed = all.filter((i) => {
+            // Same point scale `select` uses (1/16-21 above) so requeue's dispatch count
+            // reflects actual remaining work, not just issue count (#455) — a backlog skewed
+            // toward effort:large issues packs fewer per batch than max-issues alone implies.
+            const pointsFor = (labels) => (labels.includes("effort:large") ? 4 : labels.includes("effort:small") ? 1 : 2);
+            const unclaimedIssues = all.filter((i) => {
               if (i.pull_request) return false;
               const labels = i.labels.map((l) => l.name);
               if (nonBuildableLabels.some((l) => labels.includes(l))) return false;
@@ -1057,7 +1063,9 @@ jobs:
               if (include.length > 0 && !include.some((l) => labels.includes(l))) return false;
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return isTrusted(i.user, i.author_association);
-            }).length;
+            });
+            const unclaimed = unclaimedIssues.length;
+            const unclaimedPoints = unclaimedIssues.reduce((sum, i) => sum + pointsFor(i.labels.map((l) => l.name)), 0);
 
             if (unclaimed === 0) {
               core.info("no unclaimed buildable backlog — idling until the next scheduled run or new issue");
@@ -1104,10 +1112,12 @@ jobs:
             const inFlight = [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
 
             // Dispatch enough to reach the cap, but never more batches than there is unclaimed
-            // work to fill (each batch drains ~maxIssues), and never negative.
-            const wantForWork = Math.ceil(unclaimed / maxIssues);
+            // work to fill (each batch drains ~effortBudget points, capped at maxIssues issues),
+            // and never negative. Sized against points, not raw issue count, to match the
+            // documented contract on effort-budget/parallel-batches above (#455).
+            const wantForWork = Math.max(Math.ceil(unclaimedPoints / effortBudget), Math.ceil(unclaimed / maxIssues));
             const toDispatch = Math.max(0, Math.min(cap - inFlight, wantForWork));
-            core.info(`unclaimed=${unclaimed} inFlight=${inFlight} cap=${cap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
+            core.info(`unclaimed=${unclaimed} unclaimedPoints=${unclaimedPoints} inFlight=${inFlight} cap=${cap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
             if (toDispatch === 0) {
               core.info("cap already saturated (or no headroom) — a running batch's own requeue will top up as it finishes");
               return;
