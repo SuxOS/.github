@@ -87,3 +87,7 @@ jobs:
       - name: Assert gh-list-exhaustive pages past a capped page or fails loud
         run: bash scripts/test-gh-list-exhaustive.sh
         shell: bash
+
+      - name: Assert fabric-health workflow_red batch/fallback/cap-hit rollup
+        run: bash scripts/test-fabric-health-sweep.sh
+        shell: bash
