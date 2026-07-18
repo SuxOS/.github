@@ -173,6 +173,21 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
+            # #454: the candidate list was fetched once before this loop started, and a full
+            # sweep can take minutes (many gh calls + sleep 2 per PR) — re-read this PR's live
+            # labels immediately before mutating so a hold/keep added mid-sweep (e.g. an operator
+            # pinning the PR precisely because they're now investigating it) is honored, mirroring
+            # the reachability sweep's live-label pattern below and pr-drain.yml's documented
+            # re-read-before-acting principle.
+            if ! live_labels=$(gh pr view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+              echo "::warning::could not re-fetch live labels for PR #$n — skipping this run rather than acting on a stale snapshot"
+              echo "::endgroup::"; continue
+            fi
+            if echo "$live_labels" | jq -e '(index("hold") or index("keep"))' >/dev/null 2>&1; then
+              echo "#$n now has hold/keep (added since the sweep's PR list was fetched) — leaving to the operator"
+              echo "::endgroup::"; continue
+            fi
+
             next_cycle=$(( cycle + 1 ))
             echo "#$n unstick cycle $next_cycle/$MAX_CYCLES — re-running failed checks + updating branch"
 
@@ -240,6 +255,19 @@ jobs:
 
           for n in $(echo "$prs" | jq -r '.[].number'); do
             echo "::group::PR #$n (security-review-retry)"
+
+            # #454: same live-label re-check as the needs-human sweep above — this PR's labels
+            # were snapshotted once before the loop; re-read them now so a hold/keep added
+            # mid-sweep is honored before we rerun a check or drop the marker label.
+            if ! live_labels=$(gh pr view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
+              echo "::warning::could not re-fetch live labels for PR #$n — skipping this run rather than acting on a stale snapshot"
+              echo "::endgroup::"; continue
+            fi
+            if echo "$live_labels" | jq -e '(index("hold") or index("keep"))' >/dev/null 2>&1; then
+              echo "#$n now has hold/keep (added since the sweep's PR list was fetched) — leaving to the operator"
+              echo "::endgroup::"; continue
+            fi
+
             sha=$(echo "$prs" | jq -r --argjson n "$n" '.[] | select(.number == $n) | .headRefOid')
 
             # Latest security-review run for the CURRENT head SHA. The reusable job is always

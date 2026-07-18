@@ -872,15 +872,18 @@ jobs:
           # each instead so it's visible, and leave the `building` claim in place (the reaper
           # frees it after REAP_STALE_HOURS if this PR doesn't merge, so it can be retried). A
           # single-issue batch has no such ambiguity — a real commit can only be about that one
-          # issue — so it keeps auto-closing even without a disposition file.
-          if [ "$disposition_valid" = false ] && [ "$batch_size" -gt 1 ]; then
+          # issue — so it keeps auto-closing even without a disposition file. #453: a
+          # well-formed-but-empty `built: []` (e.g. every original issue got REDUCE-dropped but
+          # an incidental commit still landed) must NOT fall through to auto-close either — gate
+          # on `built` actually having entries, not just on the file being valid JSON.
+          if [ -n "$built" ] || { [ "$disposition_valid" = false ] && [ "$batch_size" -eq 1 ]; }; then
+            closes=$(for n in $nums; do echo "Closes #$n"; done)
+          else
             closes=$(for n in $nums; do echo "Related to #$n (not auto-closed — no disposition record, please verify)"; done)
             for n in $nums; do
               gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                --body "🤖 This batch pushed a commit but no valid disposition record was written, so we can't tell which issue(s) it actually addresses. Not auto-closing — please verify against the PR and close manually if appropriate. Run: $RUN_URL" 2>/dev/null || true
+                --body "🤖 This batch pushed a commit but the disposition record doesn't confirm this issue shipped, so we can't tell which issue(s) it actually addresses. Not auto-closing — please verify against the PR and close manually if appropriate. Run: $RUN_URL" 2>/dev/null || true
             done
-          else
-            closes=$(for n in $nums; do echo "Closes #$n"; done)
           fi
 
           title="build: drain ${TIER}-priority backlog ($(echo "$nums" | wc -w | tr -d ' ') issues)"
