@@ -34,7 +34,7 @@ check_pr_eligibility() {
   local desc="$1" prs_json="$2" expect="$3" out
   local outfile=/tmp/pr-eligibility-out.$$
   : > "$outfile"
-  PRS_JSON="$prs_json" GITHUB_OUTPUT="$outfile" bash -c "$pr_eligibility_run" >/dev/null 2>&1 || true
+  PRS_JSON="$prs_json" GITHUB_OUTPUT="$outfile" bash -e -c "$pr_eligibility_run" >/dev/null 2>&1 || true
   out=$(grep '^eligible-numbers=' "$outfile" | cut -d= -f2-)
   rm -f "$outfile"
   if [ "$out" = "$expect" ]; then
@@ -48,6 +48,11 @@ check_pr_eligibility "safe-type + breaking bang, automerge label" '[{"number":2,
 check_pr_eligibility "label-only eligibility with a breaking title" '[{"number":3,"title":"feat!: foo","labels":["automerge"]}]' ""
 check_pr_eligibility "mixed-case conventional type" '[{"number":4,"title":"FIX: foo","labels":[]}]' "4"
 check_pr_eligibility "non-matching title, no label" '[{"number":5,"title":"wip: nonsense","labels":[]}]' ""
+# Guards against the #404 bug class under the harness's real `bash -e -c`: an
+# empty PRS_JSON drives the jq pipeline's `.[]` generator to zero iterations,
+# a no-match/empty-result shape that must produce eligible-numbers="" rather
+# than aborting the step (#411).
+check_pr_eligibility "empty PR list (no-match/empty-result)" '[]' ""
 
 echo "[3/4] upsert-tracking-issue list/match fixtures (#228)"
 upsert_run=$(extract_run .github/actions/upsert-tracking-issue/action.yml upsert)
@@ -57,7 +62,7 @@ run_upsert() {
   PATH="$fakegh_dir:$PATH" GITHUB_OUTPUT="$out_file" \
     REPO=test/repo TITLE="Tracking Issue" BODY="body" MODE=close \
     UPDATE_MODE=comment LIST_LIMIT="$list_limit" LABELS="" \
-    bash -c "$upsert_run"
+    bash -e -c "$upsert_run"
 }
 
 # 3a: exhaustive lookup finds a title match past the first (bounded) page.
@@ -142,7 +147,7 @@ check_throttle_run=$(extract_run .github/actions/check-throttle/action.yml check
 # refuse via continue-on-error — which surfaces here as empty *_JSON.
 out4=/tmp/flood-guard-out.$$
 : > "$out4"
-GITHUB_OUTPUT="$out4" THRESHOLD=8 APP_JSON="" AUTHOR_JSON="" bash -c "$flood_guard_run" >/dev/null 2>&1 || true
+GITHUB_OUTPUT="$out4" THRESHOLD=8 APP_JSON="" AUTHOR_JSON="" bash -e -c "$flood_guard_run" >/dev/null 2>&1 || true
 if grep -q '^features_ok=true$' "$out4"; then
   note "flood-guard fails open (features_ok=true) when APP_JSON/AUTHOR_JSON are empty (upstream lists failed/refused)"
 else
@@ -159,7 +164,7 @@ out4b=/tmp/flood-guard-dedupe-out.$$
 GITHUB_OUTPUT="$out4b" THRESHOLD=8 \
   APP_JSON='[{"number":1},{"number":2},{"number":3}]' \
   AUTHOR_JSON='[{"number":1},{"number":2},{"number":3}]' \
-  bash -c "$flood_guard_run" >/dev/null 2>&1 || true
+  bash -e -c "$flood_guard_run" >/dev/null 2>&1 || true
 if grep -q '^open_bot_prs=3$' "$out4b"; then
   note "flood-guard dedupes overlapping --app/--author results instead of summing them (#399)"
 else
@@ -182,7 +187,7 @@ EOF
   fi
   chmod +x "$d/gh"
   : > "$out_file"
-  PATH="$d:$PATH" GITHUB_OUTPUT="$out_file" DEFER_AT="$defer_at" REPO=test/repo bash -c "$check_throttle_run" >/dev/null 2>&1 || true
+  PATH="$d:$PATH" GITHUB_OUTPUT="$out_file" DEFER_AT="$defer_at" REPO=test/repo bash -e -c "$check_throttle_run" >/dev/null 2>&1 || true
   rm -rf "$d"
 }
 check_fail_open() {
