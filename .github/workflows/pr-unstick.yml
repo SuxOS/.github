@@ -1,15 +1,20 @@
-name: PR unstick — periodic retry for needs-human + security-review-retry PRs (reusable)
+name: PR unstick — periodic retry for needs-human + security-review-retry + unreachable-context PRs (reusable)
 
 # Long-lived unstuck mechanism (docs/design/three-loop-pipeline.md §3.3 extension,
 # 2026-07-15).
 #
-# Two independent stuck-states are swept here (see the two steps below):
+# Three independent stuck-states are swept here (see the steps below):
 #   - `needs-human`         — the autofix ladder gave up; retry the free/cheap moves.
 #   - `security-review-retry` — the org security gate deferred on an account five-hour
 #     rate-limit (INFRA, not a finding); actively re-run the review instead of waiting on
 #     `main` to move (SuxOS/.github#272). This one DOES re-invoke the reviewer — but that
 #     run never reviewed the diff (the pool was exhausted), so it's the FIRST real review,
 #     not a wasted duplicate.
+#   - unreachable required context, generic cause (SuxOS/.github#379) — a required check
+#     that has never reported at all (no failure to retry). detect-unreachable-checks
+#     narrows this to the sub-case an empty commit can actually fix (predates-the-context
+#     "onboarding window", or a harmless-no-op path-filter case) and excludes the
+#     disabled-workflow sub-case, which needs re-enabling instead.
 #
 # The rebase/autofix ladder (pr-auto-update.yml -> claude-autofix.yml) already bounds
 # itself: claude-autofix.yml gives up after `max-attempts` bot commits and tags
@@ -306,10 +311,131 @@ jobs:
       # workflow, path-filtered required workflow, onboarding window) — a PR
       # blocked forever with no failing check to fix, invisible to both sweeps
       # above (SuxOS/.github#323). Detects and explains only: never reruns
-      # checks, never edits the PR.
+      # checks, never edits the PR. Runs even if the throttle deferred the
+      # sweeps above — it's read-only, not LLM spend.
       - name: Detect required contexts that can never report on an open PR's head
+        id: detect-unreachable
         uses: SuxOS/.github/.github/actions/detect-unreachable-checks@main
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           grace-minutes: ${{ inputs.reachability-grace-minutes }}
           pr-limit: ${{ inputs.pr-limit }}
+
+      # Auto-remediates the majority sub-case the detector above can only warn about
+      # (SuxOS/.github#379): a required context that never reports because this PR
+      # predates it ("onboarding window"). detect-unreachable-checks already narrowed
+      # this to PRs whose ONLY never-reporting cause is generic (not a disabled
+      # workflow, which needs re-enabling instead — not ours to auto-fix). Pushing an
+      # empty commit re-fires `synchronize` for real; if the actual cause is instead a
+      # path-filtered required workflow, the push is a harmless no-op — that workflow
+      # still won't match the diff and the PR stays flagged for a human. Bounded by the
+      # same cooldown/cycle-cap marker-comment pattern as the needs-human sweep above so
+      # a genuine path-filter case can't loop forever.
+      - name: Push an empty commit for onboarding-window unreachable-context PRs, honoring the cycle cap
+        if: (success() || failure()) && steps.throttle.outputs.go == 'true' && steps.detect-unreachable.outputs.generic-unreachable-prs != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          GENERIC_PRS: ${{ steps.detect-unreachable.outputs.generic-unreachable-prs }}
+        run: |
+          set -uo pipefail
+
+          if ! [[ "$COOLDOWN_HOURS" =~ ^[0-9]+$ ]] || ! [[ "$MAX_CYCLES" =~ ^[0-9]+$ ]]; then
+            echo "::error::cooldown-hours ('$COOLDOWN_HOURS') and max-cycles ('$MAX_CYCLES') must be non-negative integers"
+            exit 1
+          fi
+          cooldown_sec=$(( COOLDOWN_HOURS * 3600 ))
+          now=$(date -u +%s)
+          MARKER='<!-- pr-unstick-reachability:'
+
+          IFS=',' read -ra prs_arr <<< "$GENERIC_PRS"
+          for n in "${prs_arr[@]}"; do
+            [ -z "$n" ] && continue
+            echo "::group::PR #$n (unreachable required context, generic cause)"
+
+            if ! pr=$(gh pr view "$n" --json isDraft,labels,headRefName,headRefOid,isCrossRepository 2>/dev/null); then
+              echo "::warning::could not fetch PR #$n — skipping"
+              echo "::endgroup::"; continue
+            fi
+            is_draft=$(echo "$pr" | jq -r '.isDraft')
+            has_hold=$(echo "$pr" | jq -r '([.labels[].name] | index("hold")) or ([.labels[].name] | index("keep")) // false')
+            if [ "$is_draft" = "true" ] || [ "$has_hold" = "true" ]; then
+              echo "#$n is draft or hold/keep-labeled — leaving to the operator"
+              echo "::endgroup::"; continue
+            fi
+            if [ "$(echo "$pr" | jq -r '.isCrossRepository')" = "true" ]; then
+              echo "#$n head branch is on a fork — pushing there isn't ours to force; skipping"
+              echo "::endgroup::"; continue
+            fi
+
+            if ! comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null); then
+              echo "::warning::could not fetch comments for PR #$n — skipping this run rather than resetting the cycle cap"
+              echo "::endgroup::"; continue
+            fi
+            marker=$(echo "$comments" | jq -c --arg m "$MARKER" '[.[] | select(.body | startswith($m))] | last')
+            cycle=0
+            last_at_epoch=0
+            comment_id=""
+            if [ "$marker" != "null" ] && [ -n "$marker" ]; then
+              comment_id=$(echo "$marker" | jq -r '.id')
+              body=$(echo "$marker" | jq -r '.body')
+              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2)
+              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2)
+              last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
+              cycle=${cycle:-0}
+            fi
+
+            if [ "$cycle" -ge "$MAX_CYCLES" ]; then
+              echo "#$n already used $cycle/$MAX_CYCLES reachability-retry cycles — leaving to the operator"
+              echo "::endgroup::"; continue
+            fi
+            age=$(( now - last_at_epoch ))
+            if [ "$last_at_epoch" -gt 0 ] && [ "$age" -lt "$cooldown_sec" ]; then
+              echo "#$n last attempt ${age}s ago, cooldown is ${cooldown_sec}s — skipping this run"
+              echo "::endgroup::"; continue
+            fi
+
+            head_sha=$(echo "$pr" | jq -r '.headRefOid')
+            head_ref=$(echo "$pr" | jq -r '.headRefName')
+
+            # Re-read the branch tip right before writing: skip rather than race a push
+            # that landed between detect-unreachable-checks running and this step running.
+            current_sha=$(gh api "repos/${GH_REPO}/git/refs/heads/${head_ref}" --jq '.object.sha' 2>/dev/null || echo "")
+            if [ -z "$current_sha" ] || [ "$current_sha" != "$head_sha" ]; then
+              echo "::warning::PR #$n branch ${head_ref} moved (or is unreadable) since it was last checked — skipping this run rather than racing a concurrent push"
+              echo "::endgroup::"; continue
+            fi
+
+            tree_sha=$(gh api "repos/${GH_REPO}/git/commits/${head_sha}" --jq '.tree.sha' 2>/dev/null || echo "")
+            if [ -z "$tree_sha" ]; then
+              echo "::warning::could not read the tree for PR #$n head ${head_sha} — skipping"
+              echo "::endgroup::"; continue
+            fi
+
+            next_cycle=$(( cycle + 1 ))
+            msg="chore: empty commit to re-fire required checks (pr-unstick reachability retry ${next_cycle}/${MAX_CYCLES})"
+            new_sha=$(gh api "repos/${GH_REPO}/git/commits" -f message="$msg" -f "tree=${tree_sha}" -f "parents[]=${head_sha}" --jq '.sha' 2>/dev/null || echo "")
+            if [ -z "$new_sha" ]; then
+              echo "::warning::could not create an empty commit for PR #$n — skipping"
+              echo "::endgroup::"; continue
+            fi
+            if ! gh api "repos/${GH_REPO}/git/refs/heads/${head_ref}" -X PATCH -f "sha=${new_sha}" -F force=false >/dev/null 2>&1; then
+              echo "::warning::could not update ${head_ref} to the new empty commit for PR #$n — skipping"
+              echo "::endgroup::"; continue
+            fi
+            echo "#$n pushed empty commit ${new_sha} onto ${head_ref} to re-fire 'synchronize' (reachability cycle ${next_cycle}/${MAX_CYCLES})"
+
+            marker_line="${MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
+            summary_line="🔁 Auto-unstick attempt ${next_cycle}/${MAX_CYCLES}: pushed an empty commit to re-fire \`synchronize\` because a required check has never reported on this PR's head — most likely because this PR predates that check being required (the 'onboarding window' case). If the real cause is instead a path-filtered required workflow, this was a harmless no-op and the PR stays flagged for a human. After ${MAX_CYCLES} cycles this stops auto-retrying until a human looks."
+            new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
+            if [ -n "$comment_id" ]; then
+              gh api "repos/${GH_REPO}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
+                || echo "::warning::could not update the marker comment on PR #$n"
+            else
+              gh pr comment "$n" --body "$new_body" 2>/dev/null \
+                || echo "::warning::could not post the marker comment on PR #$n"
+            fi
+
+            echo "::endgroup::"
+            sleep 2
+          done

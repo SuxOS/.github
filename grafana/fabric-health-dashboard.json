@@ -279,7 +279,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(last_over_time(suxos_workflow_red_total[20m]))"
+          "expr": "sum(last_over_time(suxos_workflow_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector=\"runs\"}[20m])) == 1)"
         }
       ]
     },

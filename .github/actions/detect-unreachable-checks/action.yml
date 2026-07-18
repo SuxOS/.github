@@ -31,10 +31,21 @@ inputs:
     required: false
     default: "50"
 
+outputs:
+  generic-unreachable-prs:
+    description: >-
+      Comma-separated PR numbers whose ONLY never-reporting required context
+      cause is generic (path-filtered required workflow, or the PR predates
+      the context — "onboarding window"), i.e. NOT a disabled workflow. Safe
+      candidates for pr-unstick.yml's empty-commit reachability retry: a
+      harmless no-op if the real cause turns out to be a path filter.
+    value: ${{ steps.check.outputs.generic-unreachable-prs }}
+
 runs:
   using: composite
   steps:
     - name: Diff required(base) against reported(head) per open PR
+      id: check
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}

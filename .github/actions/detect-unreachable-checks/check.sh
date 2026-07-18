@@ -60,6 +60,12 @@ if [ "$count" -eq 0 ]; then exit 0; fi
 declare -A required_cache
 declare -A readable_cache
 found_any=0
+# PRs whose ONLY never-reporting cause is generic (not a disabled workflow) —
+# i.e. path-filtered required workflow or onboarding-window, the two causes
+# pr-unstick.yml's reachability sweep (SuxOS/.github#379) can safely retry
+# with an empty commit. A PR with even one disabled-workflow cause is left
+# out here: that has its own remedy (re-enable the workflow), not a push.
+declare -a generic_prs=()
 
 for row in $(echo "$prs" | jq -c '.[]'); do
   n=$(echo "$row" | jq -r '.number')
@@ -142,20 +148,38 @@ for row in $(echo "$prs" | jq -c '.[]'); do
   if [ -z "${workflows_json}" ]; then
     workflows_json=$(gh api "repos/${GH_REPO}/actions/workflows" --paginate 2>/dev/null || echo '{}')
   fi
+  pr_has_disabled=0
+  pr_has_generic=0
   while IFS= read -r gate; do
     [ -z "$gate" ] && continue
     disabled_wf=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
       '[.workflows[]? | select(.state == "disabled_manually") | select(.name == $g or (.name | endswith(" / " + $g)))] | .[0].name // empty' 2>/dev/null || true)
     if [ -n "$disabled_wf" ]; then
+      pr_has_disabled=1
       echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
     else
+      pr_has_generic=1
       echo "::warning::required context '${gate}' has not reported on PR #$n head ${sha} after ${grace_minutes}m. Remedy: if it's a path-filtered required workflow that doesn't match this PR's diff, drop it from required or add a no-op reporting job; if this PR predates the context (onboarding window), push an empty commit to re-fire 'synchronize' (close/reopen does NOT work)."
     fi
   done <<< "$never_reporting"
+  # Only queue for the empty-commit retry when EVERY never-reporting gate on this PR is
+  # the generic cause — a PR with a disabled-workflow gate mixed in needs the operator
+  # to re-enable that workflow, and an empty commit wouldn't fix it anyway.
+  if [ "$pr_has_generic" -eq 1 ] && [ "$pr_has_disabled" -eq 0 ]; then
+    generic_prs+=("$n")
+  fi
   n_missing=$(printf '%s\n' "$never_reporting" | grep -c .)
   echo "::error::PR #$n: ${n_missing} required context(s) on ${base} cannot report on head ${sha} — see warnings above for cause + remedy. This PR is likely PERMANENTLY BLOCKED with no failing check to fix."
   echo "::endgroup::"
 done
+
+# Machine-readable handoff for pr-unstick.yml's reachability-retry sweep (#379): the PR
+# numbers here are safe to retry with an empty commit (harmless no-op if the real cause
+# turns out to be a path filter — the PR just stays flagged for a human either way).
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  joined=$(IFS=,; echo "${generic_prs[*]:-}")
+  echo "generic-unreachable-prs=${joined}" >> "$GITHUB_OUTPUT"
+fi
 
 if [ "$found_any" -eq 1 ]; then
   exit 1
