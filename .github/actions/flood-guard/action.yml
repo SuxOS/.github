@@ -43,13 +43,17 @@ runs:
 
         # Fail-open: a lookup failure leaves count=0 → features_ok=true. The org bot
         # surfaces as "suxbot" in the PR author login in either the app/suxbot or
-        # suxbot[bot] form, so match the substring rather than an exact login. A
-        # deleted/ghost GitHub account reports `author.login: null` — guard it before
-        # `test()` (which throws on non-string input) so one null-author PR can't crash
-        # the whole pipeline and silently zero the count for every OTHER open PR too.
-        count=$(gh pr list --repo "$REPO" --state open --limit 100 --json author 2>/dev/null \
-          | jq '[.[] | select(.author.login != null) | select(.author.login | test("suxbot"))] | length') || true
-        count=${count:-0}
+        # suxbot[bot] form, so query both server-side (via --app / --author) rather
+        # than fetching the repo's whole open-PR list and filtering client-side —
+        # a >100-open-PR repo would otherwise truncate the page before the author
+        # filter ever runs, silently undercounting the bot-PR queue (#393). Narrowing
+        # server-side before --limit binds is the same fix pr-unstick.yml already
+        # applies to its needs-human/security-review-retry sweeps.
+        count_app=$(gh pr list --repo "$REPO" --state open --app suxbot --limit 100 --json number 2>/dev/null \
+          | jq 'length') || true
+        count_user=$(gh pr list --repo "$REPO" --state open --author "suxbot[bot]" --limit 100 --json number 2>/dev/null \
+          | jq 'length') || true
+        count=$(( ${count_app:-0} + ${count_user:-0} ))
 
         features_ok=true
         [ "$count" -ge "$THRESHOLD" ] && features_ok=false
