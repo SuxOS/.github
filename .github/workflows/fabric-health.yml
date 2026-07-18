@@ -198,11 +198,11 @@ jobs:
                   [.[] | select(.workflowDatabaseId == $id)][0]
                   | select(. != null) | select(.status == "completed") | .conclusion // "none"')
                 if [ -n "$batch_concl" ]; then
-                  [ "$batch_concl" = "failure" ] && wf_red=$((wf_red + 1))
+                  { [ "$batch_concl" = "failure" ] || [ "$batch_concl" = "timed_out" ]; } && wf_red=$((wf_red + 1))
                 elif last_run=$(gh run list --repo "$slug" --workflow "$wf_id" --limit 1 \
                     --json conclusion,status 2>/dev/null); then
                   concl=$(printf '%s' "$last_run" | jq -r '.[0] | select(.status == "completed") | .conclusion // empty')
-                  [ "$concl" = "failure" ] && wf_red=$((wf_red + 1))
+                  { [ "$concl" = "failure" ] || [ "$concl" = "timed_out" ]; } && wf_red=$((wf_red + 1))
                 else
                   runs_ok=0
                 fi

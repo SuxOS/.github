@@ -40,7 +40,7 @@ usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out-dir)         OUT_DIR="${2:?}"; shift 2 ;;
-    -w|--wrangler-config) WRANGLER_CONFIG="${2-}"; shift 2 ;;
+    -w|--wrangler-config) [ $# -ge 2 ] || die "missing value for $1 (pass \"\" for no Worker)"; WRANGLER_CONFIG="$2"; shift 2 ;;
     -r|--ref)             REF="${2:?}"; shift 2 ;;
     -f|--force)           FORCE=1; shift ;;
     -h|--help)            usage; exit 0 ;;
