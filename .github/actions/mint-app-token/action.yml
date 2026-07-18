@@ -12,6 +12,25 @@ inputs:
   private-key:
     description: GitHub App private key (pass secrets.SUX_BOT_PRIVATE_KEY).
     required: true
+  owner:
+    description: >-
+      Optional org/user to scope the token to (passthrough to create-github-app-token's
+      own `owner:`). Leave unset for the default same-calling-repo-only behavior.
+    required: false
+    default: ""
+  repositories:
+    description: >-
+      Optional comma-separated repo list to scope the token to (passthrough to
+      create-github-app-token's own `repositories:`). Requires `owner` to also be set.
+      Leave unset for the default same-calling-repo-only behavior.
+    required: false
+    default: ""
+  permission-contents:
+    description: >-
+      Optional `contents` permission override (passthrough to create-github-app-token's
+      own `permission-contents:`), e.g. `read` for a checkout-only token.
+    required: false
+    default: ""
 
 outputs:
   token:
@@ -27,3 +46,6 @@ runs:
       with:
         app-id: ${{ inputs.app-id }}
         private-key: ${{ inputs.private-key }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repositories }}
+        permission-contents: ${{ inputs.permission-contents }}

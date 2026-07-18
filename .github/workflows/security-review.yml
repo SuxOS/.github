@@ -240,13 +240,13 @@ jobs:
       # auth-prompt, since GitHub returns 404 rather than 403 for a private repo a token can't
       # see. This fails the job on EVERY run (clean-verdict included) once .github went private,
       # not just on findings — a false-red gating the whole fleet's merges (#457). Mint a token
-      # explicitly scoped to `.github` (mirrors issue-build.yml's "Mint app token for suxlib"
-      # sibling-checkout pattern) rather than reusing mint-app-token@main, which defaults to the
-      # CALLING repo only when no owner/repositories is passed.
+      # explicitly scoped to `.github` via mint-app-token's owner/repositories passthrough
+      # (mirrors issue-build.yml's "Mint app token for suxlib" sibling-checkout pattern) — the
+      # default call with no owner/repositories still scopes to the CALLING repo only.
       - name: Mint app token for classifier checkout (SuxOS/.github)
         if: steps.pre.outputs.go == 'true'
         id: classifier-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
