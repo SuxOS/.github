@@ -150,3 +150,19 @@ build for that issue (`Closes #n` on the doc commit), not a dodge; see
 `docs/design/2026-07-18-value-ranking-selection-design.md` (#439) as the two precedents. Beats
 leaving it to rot as an indefinite drop, and gives the next build (or a human) something durable
 to act on instead of re-deriving the same plan from scratch a third time.
+
+A concurrency cap that counts in_progress/queued WORKFLOW RUNS silently undercounts once a
+run finishes but leaves behind a durable artifact (an open PR) that keeps mattering after the
+run itself disappears from that list — the cap then lets new work dispatch past its own
+intended ceiling (#434: issue-build.yml's `requeue` job capped `parallel-batches` against
+in-flight runs only, so once a batch's `build` job finished and opened a PR, the run stopped
+counting even though the PR stayed open for hours, and requeue kept dispatching more batches
+— 7 concurrently-open builder PRs piled up and mutually DIRTY-conflicted on shared hot files).
+When a cap is meant to bound "how many X are outstanding," count the outstanding X directly
+(here, open PRs matching the builder's branch pattern) alongside — via `max()`, not sum, to
+avoid double-counting the common case — any in-flight run that hasn't produced one yet. And
+gate that outstanding-artifact count by the SAME trust predicate its siblings use (`isTrusted`):
+counting ALL open PRs by branch-name prefix alone lets an untrusted fork PR named
+`bot/issue-build-*` inflate the cap and stall the autonomous drain — a cheap unauthenticated
+DoS on shared CI (the #193 decoy-PR class). A count that feeds an automation gate must apply
+the author gate, not just a name match.

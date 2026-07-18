@@ -246,6 +246,11 @@ jobs:
       - name: Mint app token for classifier checkout (SuxOS/.github)
         if: steps.pre.outputs.go == 'true'
         id: classifier-token
+        # Matches the continue-on-error pattern on the three review-attempt steps above (see
+        # lines 104-111): without it, a transient App-installation/token-mint hiccup aborts the
+        # job before Gate ever runs, reproducing the #457 fleet-wide stall via a different root
+        # cause (a bare failed required check, no hold, no explanation).
+        continue-on-error: true
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
@@ -254,6 +259,7 @@ jobs:
           repositories: .github
       - name: Checkout classifier (SuxOS/.github — scripts/classify-security-noverdict.sh lives only there, never in caller repos)
         if: steps.pre.outputs.go == 'true'
+        continue-on-error: true
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: SuxOS/.github
@@ -261,7 +267,7 @@ jobs:
           path: .suxos-ci
           token: ${{ steps.classifier-token.outputs.token }}
       - name: Gate — classify no-verdict (infra retry vs diff fail-closed); block on high/critical
-        if: steps.pre.outputs.go == 'true'
+        if: always() && steps.pre.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
