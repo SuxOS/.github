@@ -25,7 +25,7 @@ on:
   workflow_call:
     inputs:
       pr-limit:
-        description: "Starting page size for the exhaustive open-PR list (doubles until a short page is seen, or fails loud past gh-list-exhaustive's max-limit — see #401). Raise only if a repo's open-PR count is large enough that the default start makes the first page-doubling pass slower than useful."
+        description: "Starting page size for the exhaustive open-PR list (quadruples until a short page is seen, or fails loud past gh-list-exhaustive's max-limit — see #401). Raise only if a repo's open-PR count is large enough that the default start makes the first page-quadrupling pass slower than useful."
         type: string
         default: "100"
 
