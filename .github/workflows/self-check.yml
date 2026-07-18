@@ -107,3 +107,7 @@ jobs:
       - name: Assert pr-drain DIRTY-conflict sweep flags sibling builder-PR hot-file collisions
         run: bash scripts/test-pr-drain-dirty-collision.sh
         shell: bash
+
+      - name: Assert shared live hold/keep re-check helper (clear/blocked/fetch-failed)
+        run: bash scripts/test-check-live-hold-keep.sh
+        shell: bash

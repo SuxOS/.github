@@ -754,8 +754,13 @@ jobs:
             4. RECORD DISPOSITION (mandatory once you've pushed a commit — this is what the next
                step reads to open the PR, so don't skip it). Write a JSON object to
                `${{ runner.temp }}/disposition.json` using the Write tool (absolute path, OUTSIDE
-               the repo tree): `{"built": [n, ...], "dropped": [{"number": n, "reason": "..."}]}`.
-               `built` is every issue number actually shipped in this push — the original batch
+               the repo tree): `{"built": [n, ...], "dropped": [{"number": n, "reason": "...",
+               "superseded": true|false}]}`. Set `superseded: true` on a dropped entry when the
+               issue itself is resolved/redundant (not merely deferred) — that closes it
+               (`gh issue close --reason "not planned"`) instead of just releasing the `building`
+               claim, so it doesn't get re-claimed and re-dropped by every future builder run.
+               Omit or set `false` for an ordinary deferral. `built` is every issue number
+               actually shipped in this push — the original batch
                MINUS anything you REDUCE-dropped PLUS anything you EXPAND-claimed — this is what
                drives the PR's `Closes #n` list, so an EXPAND issue missing from `built` won't get
                closed on merge and a REDUCE-dropped issue left IN `built` will get wrongly
@@ -860,9 +865,21 @@ jobs:
             dropped_nums=$(jq -r '.dropped // [] | .[].number' "$DISPOSITION_FILE" 2>/dev/null || true)
             for n in $dropped_nums; do
               reason=$(jq -r --arg n "$n" '.dropped[] | select((.number|tostring) == $n) | .reason // "no reason given"' "$DISPOSITION_FILE" 2>/dev/null || echo "no reason given")
+              # #465: a `superseded: true` entry means the builder judged the issue itself
+              # resolved/redundant, not merely deferred — closing it (instead of just releasing
+              # the claim) stops it re-entering the backlog to be independently rediscovered and
+              # re-dropped by every future builder run (#449 was flagged this way 5 times before
+              # a human closed it directly).
+              superseded=$(jq -r --arg n "$n" '.dropped[] | select((.number|tostring) == $n) | .superseded // false' "$DISPOSITION_FILE" 2>/dev/null || echo false)
               gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
-              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+              if [ "$superseded" = "true" ]; then
+                gh issue close "$n" --repo "$GITHUB_REPOSITORY" --reason "not planned" \
+                  --comment "🤖 Closed as superseded/redundant (not shipped in this PR): $reason. Run: $RUN_URL" 2>/dev/null \
+                  || echo "::warning::could not close superseded issue #$n"
+              else
+                gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                  --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+              fi
             done
           fi
 
