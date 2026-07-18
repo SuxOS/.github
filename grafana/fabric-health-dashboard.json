@@ -511,7 +511,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[49h:15m])) >= 172800) or vector(0)"
+          "expr": "count((timestamp(suxos_workflow_disabled) - min_over_time(timestamp(suxos_workflow_disabled)[49h:15m])) >= 172800 and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"workflows\"}[49h])) == 1)) or vector(0)"
         }
       ]
     },
