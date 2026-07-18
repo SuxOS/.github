@@ -84,6 +84,10 @@ jobs:
         run: bash scripts/test-caller-conformance.sh
         shell: bash
 
+      - name: Assert caller-stub remediation only ever adds missing / removes dead stubs
+        run: bash scripts/test-remediate-caller-stubs.sh
+        shell: bash
+
       - name: Assert gh-list-exhaustive pages past a capped page or fails loud
         run: bash scripts/test-gh-list-exhaustive.sh
         shell: bash
