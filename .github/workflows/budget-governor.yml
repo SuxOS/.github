@@ -63,16 +63,20 @@ env:
   OPUS_WF_RE: "deep audit|org consistency"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
-  # 2026-07-19 (operator: subscription running cold at ~5% usage — open the throttle,
-  # but shift the mix toward sonnet, not opus): TOTAL doubled 6000 -> 12000 to widen
-  # sonnet headroom, while OPUS is deliberately held at 900 so its share of the total
-  # SHRINKS — opus-tier work (nightly deep-audit + weekly org-consistency, the only opus
-  # consumers) throttles to yellow/red sooner relative to the wider total, keeping the
-  # bulk of the new headroom for sonnet workloads (fixer tiers, issue-build). These are
-  # runner-minute PROXIES, not a hard bill; the live five-hour rate-limit scan below still
-  # forces `red` the instant the real account pool is actually hit, so raising the total
-  # proxy widens automation headroom without risking a true overrun. Recalibrate against
-  # claude.ai's usage page per the design-doc ritual if real usage climbs toward the ceiling.
+  # 2026-07-19 (operator: subscription running cold, drive automation harder before the
+  # cycle resets). TOTAL raised 6000 -> 12000 because sonnet had climbed to ~5806 of the
+  # old 6000 runner-min cap (report issue #153) while REAL claude.ai usage was only ~33%
+  # — the runner-minute proxy is calibrated tight relative to actual spend, so the old cap
+  # was about to throttle sonnet well before the true ceiling; doubling it is what actually
+  # unblocks more sonnet burn. OPUS held at 900 NOT to suppress opus but because that already
+  # comfortably funds the opus workloads that are genuinely opus-worthy — the nightly
+  # deep-audit + (now also nightly, #org-consistency) cross-repo audits, the stronger second
+  # pass that catches what the fast sonnet build cadence misses. Both nightly audits together
+  # run ~260-300 of the 900 opus min/week (~30%; opus used just 65 min last week), so 900 has
+  # ample headroom. These are runner-minute PROXIES, not a hard bill; the live five-hour
+  # rate-limit scan below still forces `red` the instant the real account pool is actually
+  # hit, so raising the total proxy widens headroom without risking a true overrun.
+  # Recalibrate against claude.ai's usage page per the design-doc ritual as real usage climbs.
   OPUS_BUDGET_MIN: "900"
   TOTAL_BUDGET_MIN: "12000"
   # Fraction of a budget at which the throttle goes yellow.

@@ -12,7 +12,10 @@ name: Org consistency sweep
 
 on:
   schedule:
-    - cron: "47 6 * * 1"
+    - cron: "47 6 * * *" # nightly (was weekly Mon; 2026-07-19 operator: fast build cadence
+    # needs a nightly cross-repo consistency net, not weekly). Offset from deep-audit's 03:33
+    # so the two opus passes don't collide. Cost ~1 opus run/night; both nightly audits ≈ 30%
+    # of the 900 opus budget (65 of 900 min used last week — opus is deeply underutilized).
   workflow_dispatch:
 
 permissions:
