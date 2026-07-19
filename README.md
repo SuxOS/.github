@@ -54,13 +54,19 @@ refreshes a `chore: sync SuxOS caller stubs` PR per drifted repo for the two fin
 to fix unattended — missing canonical stubs and dead `workflow_run` stubs — #355).
 
 **Backlog pipeline** (turns latent work into merged PRs — propose → build):
-`fixer.yml` (propose work as typed issues) · `issue-build.yml` (select the top-priority open
+`fixer.yml` (propose work as typed issues, run at 3 cadence tiers — 15m bugs-only /
+30m bugs+feats / 1h deep, `scaffold-caller.sh` emits all three as `fixer-bugs.yml` /
+`fixer-30m.yml` / `fixer.yml`) · `issue-build.yml` (select the top-priority open
 issues, one builder session over the batch, always ≥1, never waits; PRs auto-merge on
 green). The separate Opus `triage` stage, the `confidence:*` taxonomy, and the Claude
 `cluster` pass were removed in the
 three-loop rework — see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)
 (current design) and [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md)
-(historical). Caller-stub examples below.
+(historical). Caller-stub examples below. Model/effort defaults for both (sonnet pinned
+org-wide, no Opus escalation) are single-sourced in
+[`.github/model-policy.json`](.github/model-policy.json), gated by
+`scripts/test-model-policy.sh` so the reusable defaults, caller-stub pins, and
+`budget-governor.yml`'s opus/sonnet classification can't silently drift from each other.
 
 **Self-hosted (`self-*.yml`)** — this repo also runs the backlog pipeline on itself:
 `self-fixer.yml` · `self-issue-build.yml` · `self-automerge.yml` ·
@@ -152,13 +158,20 @@ The event triggers live in the caller (a `workflow_call` file can't re-expose
 `issues:` / `schedule:`). See [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
 
 ```yaml
-# fixer.yml — propose. Time/manual (nothing "happens" to trigger a scan).
-name: Fixer
+# fixer-bugs.yml — propose, tightest tier. 3-tier cadence standardized org-wide
+# 2026-07-17 (docs/design/2026-07-17-automation-structure-and-anti-drift.md, propose row):
+# fixer-bugs.yml (15m, scope: bugs) / fixer-30m.yml (30m, scope: bugs-feats) / fixer.yml
+# (1h, scope: deep) — three stubs, same fixer.yml reusable, distinct workflow names so each
+# gets its own concurrency group. See scripts/scaffold-caller.sh for the other two tiers.
+name: Fixer (15m, bugs only)
 on:
-  schedule: [{ cron: "17 8 * * *" }] # daily, off-minute; drop for manual-only
+  schedule: [{ cron: "9,24,39,54 * * * *" }]
   workflow_dispatch:
 jobs:
-  fixer: { uses: SuxOS/.github/.github/workflows/fixer.yml@main, secrets: inherit }
+  fixer:
+    uses: SuxOS/.github/.github/workflows/fixer.yml@main
+    with: { model: sonnet, max-turns: 10, scope: bugs }
+    secrets: inherit
 ```
 
 ```yaml

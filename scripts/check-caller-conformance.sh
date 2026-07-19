@@ -57,6 +57,25 @@ warn() {
 # `#`, so it doesn't either.
 CANON_STUBS="$(grep -oE '^emit [a-z][a-z0-9-]*' "$SCAFFOLD" | awk '{print $2}' | sort -u)"
 
+# Canonical REUSABLE targets, one per `emit NAME` block — usually identical to the stub's
+# own basename (ci.yml wires ci.yml, audit.yml wires audit.yml, ...), but the 3-tier fixer
+# cadence (#368) multiplexes three distinctly-named stubs (fixer-bugs/fixer-30m/fixer) onto
+# the SAME fixer.yml reusable. Check (a) below tests reusable ADOPTION (is fixer.yml wired
+# by any of them), not per-stub-name identity, or it would warn "no live caller stub wires
+# fixer-bugs.yml" forever — no stub is ever literally named that as a *reusable*, only as a
+# file. Derived by taking each emit block's FIRST `uses:` line (ci.yml's block has a second,
+# for the job-chained claude-autofix — deliberately not its own canonical target, same as it
+# isn't its own canonical stub) so this can't drift from scaffold-caller.sh either.
+CANON_TARGETS="$(awk '
+  /^emit [a-z][a-z0-9-]*/ { name=$2; target=""; next }
+  name != "" && target == "" && /uses: \$REPO\/\.github\/workflows\/[a-z][a-z0-9-]*\.yml@\$REF/ {
+    line=$0
+    sub(/.*workflows\//, "", line); sub(/\.yml@\$REF.*/, "", line)
+    print line
+    target=line
+  }
+' "$SCAFFOLD" | sort -u)"
+
 if [ ! -d "$WFDIR" ]; then
   warn "no .github/workflows directory — no SuxOS caller stubs wired at all"
   echo "[$REPO_LABEL] conformance: $count finding(s)"
@@ -89,7 +108,7 @@ if [ "$MODE" = "full" ]; then
     if ! printf '%s\n' "$wired_names" | grep -qxF "$c"; then
       warn "no live caller stub wires $c.yml (scaffold-caller.sh emits one — reusable adopted org-wide but not here)"
     fi
-  done <<< "$CANON_STUBS"
+  done <<< "$CANON_TARGETS"
 fi
 
 if [ "$MODE" = "full" ] || [ "$MODE" = "self" ]; then
