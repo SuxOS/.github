@@ -108,6 +108,14 @@ jobs:
             exit 1
           fi
 
+          # gh pr list returns created-desc order with no way to narrow further, so hitting
+          # the cap silently drops the OLDEST open PRs — exactly the ones CLOSE-STALE is
+          # meant to close (SuxOS/.github#482, same pattern as detect-unreachable-checks).
+          pr_count=$(printf '%s' "$prs" | jq 'length')
+          if [ "$pr_count" -eq "$PR_LIMIT" ]; then
+            echo "::warning::open PR count hit pr-limit ($PR_LIMIT) — oldest open PRs beyond the cap were not swept this run"
+          fi
+
           stale=$(( STALE_DAYS * 86400 ))
 
           # shellcheck disable=SC2016  # jq program; $now/$stale/$l are jq vars, not shell
