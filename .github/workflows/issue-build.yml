@@ -59,7 +59,9 @@ on:
         # small failure blast radius) rather than one big batch's internal subagent fan-out
         # (shared checkout, trusted-not-verified disjointness). Dynamic expand (§3.1.5) still
         # lets a builder push higher when the work in its own batch is light.
-        default: 3
+        # 3 -> 5 (2026-07-19, operator: open the throttle at ~5% usage) — more work per batch
+        # without more concurrent open PRs, since parallel-batches stays at 2 (collision cap).
+        default: 5
       effort-budget:
         description: >-
           Points budget for the bundle, oldest-first within the chosen tier (spilling into
@@ -73,7 +75,9 @@ on:
         # 80 -> 48 -> 16 -> 6 (2026-07-15, operator: target 2-3 issues/batch): shrunk alongside
         # max-issues so a typical backlog splits into more concurrent small batches instead of
         # one big serial one — see max-issues above and `parallel-batches` below.
-        default: 6
+        # 6 -> 10 (2026-07-19, operator: open the throttle at ~5% usage) — bumped alongside
+        # max-issues 3->5 so a batch can carry the wider issue count; parallel-batches held at 2.
+        default: 10
       parallel-batches:
         description: >-
           Max concurrent issue-build runs (this run plus requeued ones) for one repo.

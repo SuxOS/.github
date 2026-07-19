@@ -63,8 +63,18 @@ env:
   OPUS_WF_RE: "deep audit|org consistency"
   # Weekly runner-minute budgets for AUTOMATION (not the whole subscription) — see the
   # design doc for how these were derived and how to calibrate them.
+  # 2026-07-19 (operator: subscription running cold at ~5% usage — open the throttle,
+  # but shift the mix toward sonnet, not opus): TOTAL doubled 6000 -> 12000 to widen
+  # sonnet headroom, while OPUS is deliberately held at 900 so its share of the total
+  # SHRINKS — opus-tier work (nightly deep-audit + weekly org-consistency, the only opus
+  # consumers) throttles to yellow/red sooner relative to the wider total, keeping the
+  # bulk of the new headroom for sonnet workloads (fixer tiers, issue-build). These are
+  # runner-minute PROXIES, not a hard bill; the live five-hour rate-limit scan below still
+  # forces `red` the instant the real account pool is actually hit, so raising the total
+  # proxy widens automation headroom without risking a true overrun. Recalibrate against
+  # claude.ai's usage page per the design-doc ritual if real usage climbs toward the ceiling.
   OPUS_BUDGET_MIN: "900"
-  TOTAL_BUDGET_MIN: "6000"
+  TOTAL_BUDGET_MIN: "12000"
   # Fraction of a budget at which the throttle goes yellow.
   YELLOW_FRACTION: "0.75"
   LOOKBACK_DAYS: "7"
