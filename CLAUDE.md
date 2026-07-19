@@ -187,3 +187,10 @@ set `go=false` on a missing `CLAUDE_CODE_OAUTH_TOKEN`, which skipped Gate too an
 completely unreviewed). This is distinct from an ordinary best-effort workflow's own internal
 `go` skip (e.g. claude-autofix.yml's cap/gate checks) — those are fine to skip on, because nothing
 downstream treats that job's SUCCESS as "reviewed" the way a required check's is.
+
+A job whose body is a `uses:` reusable-workflow call cannot ALSO carry its own `steps:` —
+so a caller stub that wants to derive a `with:` input from a file in this repo (e.g. the
+`.github/managed-repos.json` repo list, #499) needs a separate job that checks out, computes,
+and exposes an `outputs:`, with the reusable-calling job pulling it via `needs.<job>.outputs.x`
+— it can't just add a step ahead of its own `uses:` line. `pin-consistency.yml`'s
+`managed-repos` job and `self-fabric-health.yml`'s `load-repos` job are the reference shape.
