@@ -889,7 +889,18 @@ jobs:
             if [ -n "$overlap" ]; then
               echo "::warning::disposition.json lists issue(s) in both built and dropped: $(echo "$overlap" | tr '\n' ' ')"
               built=$(comm -23 <(echo "$built" | tr ' ' '\n' | sort -u) <(echo "$overlap" | sort -u) | tr '\n' ' ')
-              nums="$built"
+              if [ -n "$built" ]; then
+                nums="$built"
+              else
+                # #481: full overlap (every originally-built issue was also listed as
+                # dropped) would otherwise empty `nums` too, orphaning the PR from all
+                # issue linkage (empty Closes/Related-to, "(0 issues)" title) even though
+                # a real commit shipped. Fall through to the "Related to ... please
+                # verify" treatment for the overlapped issues instead of silently
+                # dropping linkage — `built` stays empty so this can't also auto-close.
+                echo "::warning::disposition.json's built/dropped overlap is total — falling back to Related-to linkage for $(echo "$overlap" | tr '\n' ' ')"
+                nums=$(echo "$overlap" | tr '\n' ' ')
+              fi
             fi
           fi
 
