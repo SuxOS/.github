@@ -195,33 +195,63 @@ jobs:
             | awk -F@ '{print $1"\t"$2}' \
             | sort -u || true)"
 
-          if [ -z "$pairs" ]; then
+          # ── DOCKER: same as `check`'s DOCKER rule (a docker://image:tag ref is invisible
+          # to the owner/repo@ref regex above and must be pinned to a sha256 digest) — ported
+          # here so the advisory scan doesn't silently miss it in a consumer repo (#520).
+          docker_unpinned="$(grep -rhoE "uses:[[:space:]]*['\"]?docker://[^'\"[:space:]]+" \
+              consumer/.github/workflows/ consumer/.github/actions/*/action.yml 2>/dev/null \
+            | sed -E "s/uses:[[:space:]]*['\"]?//" \
+            | grep -vE '@sha256:[0-9a-fA-F]{64}$' || true)"
+
+          # ── LOCAL: same as `check`'s LOCAL rule — a ./path local composite action ref is
+          # exempt-by-design (nothing to pin) but logged so it isn't a silent blind spot.
+          local_refs="$(grep -rhoE "uses:[[:space:]]*['\"]?\./[^'\"[:space:]]+" \
+              consumer/.github/workflows/ consumer/.github/actions/*/action.yml 2>/dev/null \
+            | sed -E "s/uses:[[:space:]]*['\"]?//" \
+            | sort -u || true)"
+
+          if [ -z "$pairs" ] && [ -z "$docker_unpinned" ] && [ -z "$local_refs" ]; then
             echo "[$REPO] no third-party action refs found under .github/ — nothing to scan."
             exit 0
           fi
 
           violations=0
-          while IFS=$'\t' read -r action ref; do
-            [ -z "$action" ] && continue
-            case "$action" in SuxOS/*) continue ;; esac
-            if ! printf '%s' "$ref" | grep -qE '^[0-9a-fA-F]{40}$'; then
-              echo "::warning::[$REPO] third-party action not SHA-pinned (mutable tag/branch): $action@$ref"
+          if [ -n "$pairs" ]; then
+            while IFS=$'\t' read -r action ref; do
+              [ -z "$action" ] && continue
+              case "$action" in SuxOS/*) continue ;; esac
+              if ! printf '%s' "$ref" | grep -qE '^[0-9a-fA-F]{40}$'; then
+                echo "::warning::[$REPO] third-party action not SHA-pinned (mutable tag/branch): $action@$ref"
+                violations=$((violations + 1))
+                continue
+              fi
+              case "$action" in
+                actions/checkout)
+                  if [ "$ref" != "$CANON_CHECKOUT" ]; then
+                    echo "::warning::[$REPO] actions/checkout pinned to $ref — canonical org value is $CANON_CHECKOUT # v7.0.0"
+                    violations=$((violations + 1))
+                  fi ;;
+                actions/setup-node)
+                  if [ "$ref" != "$CANON_SETUP_NODE" ]; then
+                    echo "::warning::[$REPO] actions/setup-node pinned to $ref — canonical org value is $CANON_SETUP_NODE # v7.0.0"
+                    violations=$((violations + 1))
+                  fi ;;
+              esac
+            done <<< "$pairs"
+          fi
+
+          if [ -n "$docker_unpinned" ]; then
+            while IFS= read -r d; do
+              [ -z "$d" ] && continue
+              echo "::warning::[$REPO] docker action not pinned to a sha256 digest (mutable tag): $d"
               violations=$((violations + 1))
-              continue
-            fi
-            case "$action" in
-              actions/checkout)
-                if [ "$ref" != "$CANON_CHECKOUT" ]; then
-                  echo "::warning::[$REPO] actions/checkout pinned to $ref — canonical org value is $CANON_CHECKOUT # v7.0.0"
-                  violations=$((violations + 1))
-                fi ;;
-              actions/setup-node)
-                if [ "$ref" != "$CANON_SETUP_NODE" ]; then
-                  echo "::warning::[$REPO] actions/setup-node pinned to $ref — canonical org value is $CANON_SETUP_NODE # v7.0.0"
-                  violations=$((violations + 1))
-                fi ;;
-            esac
-          done <<< "$pairs"
+            done <<< "$docker_unpinned"
+          fi
+
+          if [ -n "$local_refs" ]; then
+            echo "[$REPO] local composite action ref(s) found (exempt-by-design, no @ref to pin):"
+            printf '%s\n' "$local_refs" | sed 's/^/    /'
+          fi
 
           if [ "$violations" -gt 0 ]; then
             echo "[$REPO] advisory: $violations pin issue(s) reported above (not blocking)."

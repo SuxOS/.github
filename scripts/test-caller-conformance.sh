@@ -94,6 +94,19 @@ fi
 d="$(fresh_copy partial-fixer-tiers)"; rm -f "$d/fixer.yml" "$d/fixer-30m.yml"
 assert_not "(a) one fixer tier (fixer-bugs.yml) satisfies reusable adoption" "$d" "no live caller stub wires fixer\.yml"
 
+# 1d. (e) (#492) The exact stale-shape scenario: an existing caller still on the OLD
+#     pre-multiplex single fixer.yml stub (missing fixer-bugs.yml/fixer-30m.yml entirely)
+#     must be flagged as an incomplete/stale multiplex adopt, not silently pass just
+#     because (a) alone considers the reusable "adopted".
+d="$(fresh_copy old-single-tier-fixer)"; rm -f "$d/fixer-bugs.yml" "$d/fixer-30m.yml"
+assert_has "(e) old single-tier fixer.yml missing 3-tier siblings" "$d" \
+  "wires fixer\.yml via stub\(s\) \[fixer\] but is missing sibling tier stub\(s\) \[fixer-30m fixer-bugs\]"
+
+# 1e. (e) must NOT fire when a multiplex group is entirely unadopted — that's (a)'s job,
+#     not (e)'s (no sibling present at all is "not adopted", not "adopted incompletely").
+d="$(fresh_copy no-fixer-at-all)"; rm -f "$d/fixer.yml" "$d/fixer-bugs.yml" "$d/fixer-30m.yml"
+assert_not "(e) fully-unadopted multiplex group is not flagged as stale-shape" "$d" "missing sibling tier stub"
+
 # 2. (b) DEAD workflow_run stub — the exact R5/#263 class.
 d="$(fresh_copy dead-autofix)"
 cat > "$d/claude-autofix.yml" <<'YAML'
