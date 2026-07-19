@@ -88,6 +88,62 @@ jobs:
         id: nonbuildable
         uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
 
+      # Self cross-run artifact fetch (docs/design/2026-07-18-drain-controller-design.md
+      # §2.2, #475): the drain-controller's integral_error is a running sum, so each run
+      # needs the PREVIOUS run's value. Mirrors issue-build.yml's cross-WORKFLOW spine
+      # fetch (#452), just pointed at THIS workflow's own run history — fabric-health.yml
+      # is only ever invoked by self-fabric-health.yml in THIS repo, so the already-granted
+      # actions:read GITHUB_TOKEN is enough; no cross-repo app token needed. Collection-
+      # integrity discipline (#305): a genuine cold start (no prior run yet) is NOT the
+      # same as a failed fetch of a run that does exist — the former is a legitimate zero,
+      # the latter must not silently read as one, so `state` distinguishes them and
+      # `integral_ok` below only goes 0 for the latter.
+      - name: Fetch prior fabric-status.json (drain-controller integral state)
+        id: prior
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          state="cold_start"
+
+          run_id=$( { gh run list --repo "${GITHUB_REPOSITORY}" --workflow self-fabric-health.yml \
+            --status success --limit 1 --json databaseId 2>/dev/null \
+            | jq -r '.[0].databaseId // empty'; } || true)
+
+          if [ -n "$run_id" ]; then
+            updated_at=$( { gh run view "$run_id" --repo "${GITHUB_REPOSITORY}" \
+              --json updatedAt --jq '.updatedAt' 2>/dev/null; } || true)
+            if [ -z "$updated_at" ]; then
+              state="unavailable"
+            else
+              age_min=$(( ( $(date -u +%s) - $(date -u -d "$updated_at" +%s 2>/dev/null || echo 0) ) / 60 ))
+              if [ "$age_min" -gt 60 ]; then
+                # Stale prior run (~4x this workflow's 15-min cadence, same staleness cap
+                # issue-build.yml's spine fetch uses) — a real cron gap (missed run,
+                # disabled window), not normal cadence. integral_error was never
+                # calibrated to integrate across a gap this size, so reset instead of
+                # carrying it forward. A designed reset, not a fetch failure.
+                state="stale"
+              else
+                rm -rf /tmp/prior-fabric-status && mkdir -p /tmp/prior-fabric-status
+                if gh run download "$run_id" --repo "${GITHUB_REPOSITORY}" --name fabric-status \
+                    --dir /tmp/prior-fabric-status 2>/dev/null \
+                    && [ -f /tmp/prior-fabric-status/fabric-status.json ] \
+                    && jq -e . /tmp/prior-fabric-status/fabric-status.json >/dev/null 2>&1; then
+                  state="ok"
+                else
+                  state="unavailable"
+                fi
+              fi
+            fi
+          fi
+
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          if [ "$state" = "ok" ]; then
+            echo "prior-file=/tmp/prior-fabric-status/fabric-status.json" >> "$GITHUB_OUTPUT"
+          fi
+          echo "drain-controller prior state: $state (run ${run_id:-none})"
+
       - name: Collect cross-repo health into fabric-status.json
         id: collect
         env:
@@ -99,6 +155,8 @@ jobs:
           STUCK_IDLE_DAYS: ${{ inputs.stuck-idle-days }}
           DISABLED_EXEMPT: ${{ inputs.workflow-disabled-exempt }}
           MERGED_WINDOW_HOURS: ${{ inputs.merged-window-hours }}
+          PRIOR_STATE: ${{ steps.prior.outputs.state }}
+          PRIOR_FILE: ${{ steps.prior.outputs.prior-file }}
         run: |
           set -euo pipefail
 
@@ -108,6 +166,24 @@ jobs:
           merged_window_hours="${MERGED_WINDOW_HOURS:-2}"
           merged_cutoff=$(date -u -d "-${merged_window_hours} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
             || date -u -v-"${merged_window_hours}"H +%Y-%m-%dT%H:%M:%SZ)
+
+          # --- Drain-controller state (#475): load the prior run's per-repo integral_error,
+          # if the "prior" step found one. Absent/stale/unavailable all degrade to "{}" (no
+          # prior data), which reads as prior_integral=0 per repo below — a fresh start, same
+          # fail-soft shape as every other spine signal.
+          prior_state="${PRIOR_STATE:-cold_start}"
+          if [ -n "${PRIOR_FILE:-}" ] && [ -f "${PRIOR_FILE:-}" ]; then
+            prior_json=$(cat "$PRIOR_FILE")
+          else
+            prior_json="{}"
+          fi
+          # cold_start/stale are legitimate, EXPECTED zero-resets (no run yet / gap too wide
+          # to integrate across) — only "unavailable" (a run exists but couldn't be fetched)
+          # is a real collection failure (#305: don't mask it as a healthy cold start).
+          case "$prior_state" in
+            ok|cold_start|stale) integral_ok=1 ;;
+            *) integral_ok=0 ;;
+          esac
 
           # jq filter reused per repo: mark a PR "stuck" if it is BEHIND/DIRTY, has a
           # failing status rollup, or has been idle past the threshold.
@@ -182,6 +258,26 @@ jobs:
             else
               merged_ok=0; merged_count=0
             fi
+
+            # --- Drain-controller integral_error (#475, formula spec
+            # docs/design/2026-07-19-drain-controller-pi-formula-spec.md §2). Per-repo, not
+            # fabric-wide (parent design doc §2.1). Constants match the spec exactly:
+            # TARGET_DRAIN_HOURS=48, INTEGRAL_FLOOR=0, INTEGRAL_CAP=20. This step only
+            # persists the state (integral_error/checked_at) — raw_output/consumption is a
+            # separate follow-up (parent design doc §4 item 4).
+            prior_integral=$(printf '%s' "$prior_json" | jq -r --arg r "$repo" \
+              '(.repos // [])[] | select(.repo == $r) | .integral_error // empty' 2>/dev/null || true)
+            prior_integral="${prior_integral:-0}"
+            integral_error=$(awk -v prior="$prior_integral" -v backlog="$backlog" \
+              -v merged="$merged_count" -v window="$merged_window_hours" 'BEGIN {
+                merged_rate = (window > 0) ? merged / window : 0
+                setpoint = backlog / 48
+                err = setpoint - merged_rate
+                v = prior + err
+                if (v < 0) v = 0
+                if (v > 20) v = 20
+                printf "%.6f", v
+              }')
 
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             # Same cap-hit detection as the issues/prs collectors above (#345, #381):
@@ -260,12 +356,16 @@ jobs:
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
               --argjson disabled "$disabled_json" \
               --argjson merged "$merged_count" \
+              --argjson integral "$integral_error" --argjson checked_at "$now_epoch" \
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
               --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
+              --argjson gok "$integral_ok" \
               '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
                 workflows_disabled: $disabled,
                 merged_prs_in_window: $merged,
-                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok}}')
+                integral_error: $integral,
+                checked_at: $checked_at,
+                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
             # A single failed collector anywhere degrades the whole spine to "unknown".
@@ -273,7 +373,8 @@ jobs:
             # backlog can't be asserted zero (the merge-relevant 7-day DoD streak).
             [ "$issues_ok" -eq 1 ] || issues_all_ok=0
             if [ "$issues_ok" -eq 0 ] || [ "$prs_ok" -eq 0 ] \
-                || [ "$runs_ok" -eq 0 ] || [ "$wfs_ok" -eq 0 ] || [ "$merged_ok" -eq 0 ]; then
+                || [ "$runs_ok" -eq 0 ] || [ "$wfs_ok" -eq 0 ] || [ "$merged_ok" -eq 0 ] \
+                || [ "$integral_ok" -eq 0 ]; then
               collection_all_ok=0
             fi
           done
@@ -383,6 +484,10 @@ jobs:
             # misleading-zero contract as the other derived per-repo series above.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.merged == 1) |
               "suxos_merged_prs_in_window,repo=\(.repo) value=\(.merged_prs_in_window) \($ts)"' <<< "$status"
+            # Gated on collection.integral (#475/#305) — same absent-sample-not-a-
+            # misleading-zero contract as the other derived per-repo series above.
+            jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1) |
+              "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt
             # disabled_manually or disabled_inactivity workflow — the dashboard
             # flags any that persists >48h.
