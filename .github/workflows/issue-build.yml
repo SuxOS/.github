@@ -475,9 +475,18 @@ jobs:
                 if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
               }
               if (TITLE_EXT.test(title)) {
+                // Bare #N refs anywhere in title+body are candidates, but a casual
+                // cross-reference ("see also #205 for context", "#300 discusses related
+                // prior art") is NOT a dependency — only exclude via a negative filter on
+                // the surrounding text so the #339-in-body-with-no-adjacent-verb case above
+                // (a real prerequisite) still matches (#489).
+                const CASUAL_REF = /\b(?:see also|for context|for reference|related work|prior art|discusses|related to|similar to)\b/i;
                 for (const m of text.matchAll(REF)) {
                   const n = Number(m[1]);
-                  if (n !== issue.number && blockerNumbers.has(n)) blockers.add(n);
+                  if (n === issue.number || !blockerNumbers.has(n)) continue;
+                  const window = text.slice(Math.max(0, m.index - 30), Math.min(text.length, m.index + m[0].length + 30));
+                  if (CASUAL_REF.test(window)) continue;
+                  blockers.add(n);
                 }
               }
               return [...blockers];

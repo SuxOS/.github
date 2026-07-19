@@ -50,6 +50,7 @@ ALLOWLIST=(
   ".github/workflows/fixer.yml::gh issue list --limit 300 --state all"
   ".github/workflows/pr-auto-update.yml::A bounded \`gh pr list --limit N\`"
   ".github/actions/upsert-tracking-issue/action.yml::gh issue list --repo \"\$REPO\" --state open --limit \"\$limit\""
+  ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/.github\" --state open"
 )
 
 is_allowlisted() {
@@ -79,6 +80,46 @@ while IFS=: read -r file lineno content; do
   echo "        is genuinely intentional, add it to ALLOWLIST in $0." >&2
   fail=1
 done < <(grep -rnE 'gh (issue|pr|run|workflow) list\b[^|]*--limit' .github/workflows .github/actions 2>/dev/null)
+
+# Second pass: a call site split across a line continuation ("gh issue list ... \" on one
+# line, "--limit N ..." on the next) is invisible to the single-physical-line regex above
+# (#488). Join a verb line ending in `\` (with no --limit of its own) with its continuation
+# line(s) and re-check the joined text for --limit.
+while IFS=: read -r file lineno content; do
+  [ -z "$file" ] && continue
+  if is_allowlisted "$file" "$content"; then
+    continue
+  fi
+  echo "FAIL: $file:$lineno: new bespoke 'gh ... list ... --limit' call site (split across a line continuation) not on the allowlist" >&2
+  echo "        $content" >&2
+  echo "        Prefer .github/actions/gh-list-exhaustive (CLAUDE.md), or if this bounded call" >&2
+  echo "        is genuinely intentional, add it to ALLOWLIST in $0." >&2
+  fail=1
+done < <(
+  for file in $(grep -rlE 'gh (issue|pr|run|workflow) list\b' .github/workflows .github/actions 2>/dev/null); do
+    case "$file" in
+      .github/actions/gh-list-exhaustive/*) continue ;;
+    esac
+    mapfile -t lines < "$file"
+    n=${#lines[@]}
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      line="${lines[$i]}"
+      if [[ "$line" =~ gh\ (issue|pr|run|workflow)\ list\b ]] && [[ "$line" != *--limit* ]] && [[ "$line" == *\\ ]]; then
+        joined="$line"
+        j=$i
+        while [[ "${lines[$j]}" == *\\ ]] && [ "$j" -lt $((n - 1)) ]; do
+          j=$((j + 1))
+          joined="$joined ${lines[$j]}"
+        done
+        if [[ "$joined" == *--limit* ]]; then
+          echo "$file:$((i + 1)):$joined"
+        fi
+      fi
+      i=$((i + 1))
+    done
+  done
+)
 
 if [ "$fail" -eq 0 ]; then
   echo "ok: no new bespoke 'gh ... list --limit' call sites outside the tracked allowlist"
