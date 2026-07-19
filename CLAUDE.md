@@ -177,3 +177,13 @@ path: .suxos-ci}`, same private-repo token pattern as the reusable-workflow-scri
 and `bash .suxos-ci/.github/actions/<name>/check.sh "$item"` directly inside the loop — same
 file the composite action wraps, so there's still exactly one copy of the logic, just two entry
 points into it. See `.github/actions/pr-live-hold-check` + its two call sites in pr-unstick.yml.
+
+A REQUIRED status check's terminal Gate step must run unconditionally (`if: always()`, no
+trailing `&& steps.X.outputs.go == 'true'`) and treat any upstream skip condition (a missing
+secret, a preflight failure) as an explicit fail-closed branch inside that same step — GitHub
+scores a *skipped* step as non-blocking, so gating the Gate step itself on an upstream flag lets
+the whole job report SUCCESS with nothing actually checked (#507: security-review.yml's Preflight
+set `go=false` on a missing `CLAUDE_CODE_OAUTH_TOKEN`, which skipped Gate too and merged PRs
+completely unreviewed). This is distinct from an ordinary best-effort workflow's own internal
+`go` skip (e.g. claude-autofix.yml's cap/gate checks) — those are fine to skip on, because nothing
+downstream treats that job's SUCCESS as "reviewed" the way a required check's is.
