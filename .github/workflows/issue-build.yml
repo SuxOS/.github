@@ -94,7 +94,12 @@ on:
         # and pr-auto-update's rebase can't clear those (observed live: 7 PRs stuck `dirty`
         # for 40+ minutes with no auto-resolver — closed and released back to backlog).
         # 2 concurrent batches keeps real wall-clock parallelism while halving collision odds.
-        default: 2
+        # 2 -> 3 (2026-07-19, operator: subscription running cold, backlog oversupplied at
+        # ~109 buildable org-wide — drain rate is the binding constraint, not supply, so open
+        # the one knob that actually raises it). Held below the old 4 that caused the #434
+        # pileup; the requeue cap now also counts outstanding open builder PRs (isTrusted-gated,
+        # via max()) so 3 is a true ceiling on concurrent open PRs, not just in-flight runs.
+        default: 3
       use-recommended-parallel-batches:
         description: >-
           Comparison flag (#476, docs/design/2026-07-18-drain-controller-design.md §2.3-2.5):
