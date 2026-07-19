@@ -166,3 +166,14 @@ counting ALL open PRs by branch-name prefix alone lets an untrusted fork PR name
 `bot/issue-build-*` inflate the cap and stall the autonomous drain — a cheap unauthenticated
 DoS on shared CI (the #193 decoy-PR class). A count that feeds an automation gate must apply
 the author gate, not just a name match.
+
+A composite action's `uses:` step cannot be invoked from inside a bash `for`/`while` loop in a
+`run:` block — GitHub Actions steps are static, not callable mid-script. When a mutating sweep
+needs the SAME shared check logic on every loop iteration (e.g. `gh pr view` + a hold/keep
+re-check right before acting, #461), wrapping it in a composite action only gives you a `uses:`
+entry point for OTHER workflows shaped as one-step-per-item (e.g. a matrix job). For the loop
+itself, check out this repo (`actions/checkout@... with: {repository: SuxOS/.github, ref: main,
+path: .suxos-ci}`, same private-repo token pattern as the reusable-workflow-script gotcha above)
+and `bash .suxos-ci/.github/actions/<name>/check.sh "$item"` directly inside the loop — same
+file the composite action wraps, so there's still exactly one copy of the logic, just two entry
+points into it. See `.github/actions/pr-live-hold-check` + its two call sites in pr-unstick.yml.

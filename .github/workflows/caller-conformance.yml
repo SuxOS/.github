@@ -113,9 +113,7 @@ jobs:
       - name: Mint org-scoped app token
         id: app-token
         continue-on-error: true
-        # Same pinned version as .github/actions/mint-app-token (kept in lock-step so
-        # pin-consistency's DRIFT check stays green). Scoped to the single target repo.
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
@@ -171,10 +169,9 @@ jobs:
       - name: Mint repo-scoped app token (contents:write, pull-requests:write only)
         id: app-token
         continue-on-error: true
-        # Same pinned version as .github/actions/mint-app-token. Restricted to just the two
-        # permissions this job needs (least privilege beyond what `conformance`'s read-only
-        # scan requests) and to the single target repo via `repositories:`.
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        # Restricted to just the two permissions this job needs (least privilege beyond
+        # what `conformance`'s read-only scan requests) and to the single target repo.
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}

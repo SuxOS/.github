@@ -153,12 +153,7 @@ jobs:
       - name: Mint org-scoped app token
         id: app-token
         continue-on-error: true
-        # Same pinned version as .github/actions/mint-app-token (kept in lock-step so
-        # the DRIFT check above stays green). `owner:` with no `repositories:` scopes
-        # the token to every SuxOS repo the App is installed on — the cross-repo read
-        # this job needs. Direct use (not the composite) because mint-app-token is
-        # repo-scoped by design and other callers depend on that.
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
