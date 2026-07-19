@@ -462,6 +462,20 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
+            # #454/#461: same shared live-recheck helper as the needs-human and
+            # security-review-retry sweeps above — this PR's hold/keep labels were last
+            # read when `pr` was fetched at the top of this loop iteration; re-check live
+            # now, immediately before pushing, so a hold/keep added mid-sweep is honored
+            # (SuxOS/.github#487).
+            HELPER=".suxos-ci/.github/actions/pr-live-hold-check/check.sh"
+            if [ ! -f "$HELPER" ]; then
+              echo "::warning::shared live-recheck helper unavailable (checkout failed) — skipping PR #$n rather than mutating without a fresh label check"
+              echo "::endgroup::"; continue
+            fi
+            if [ "$(bash "$HELPER" "$n")" = "true" ]; then
+              echo "::endgroup::"; continue
+            fi
+
             tree_sha=$(gh api "repos/${GH_REPO}/git/commits/${head_sha}" --jq '.tree.sha' 2>/dev/null || echo "")
             if [ -z "$tree_sha" ]; then
               echo "::warning::could not read the tree for PR #$n head ${head_sha} — skipping"

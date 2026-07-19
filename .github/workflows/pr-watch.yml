@@ -64,6 +64,14 @@ jobs:
           prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
             --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt)
 
+          # gh pr list returns created-desc order with no way to narrow further, so hitting
+          # the cap silently drops the OLDEST open PRs — exactly the ones most likely to be
+          # stuck (SuxOS/.github#482, same pattern as detect-unreachable-checks).
+          pr_count=$(printf '%s' "$prs" | jq 'length')
+          if [ "$pr_count" -eq "$PR_LIMIT" ]; then
+            echo "::warning::open PR count hit pr-limit ($PR_LIMIT) — oldest open PRs beyond the cap were not flagged this run"
+          fi
+
           if ! [[ "$STALE_HOURS" =~ ^[0-9]+$ ]]; then
             echo "::error::stale-hours must be a non-negative integer, got '${STALE_HOURS}'"
             exit 1
