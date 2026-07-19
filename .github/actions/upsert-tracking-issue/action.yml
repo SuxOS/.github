@@ -7,6 +7,14 @@ description: >-
   flow lives in one place.
 
 inputs:
+  repo:
+    description: >-
+      "owner/name" of the repo to upsert the tracking issue in. Defaults to the
+      calling workflow's own repo; set this to target a different repo (e.g. a
+      caller repo's fixer upserting a cross-repo tracking issue in `.github`,
+      #480) — the token in github-token must have issues:write on that repo.
+    required: false
+    default: ${{ github.repository }}
   title:
     description: Exact issue title used to find (and, when creating, name) the tracking issue.
     required: true
@@ -58,7 +66,7 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
-        REPO: ${{ github.repository }}
+        REPO: ${{ inputs.repo }}
         TITLE: ${{ inputs.title }}
         BODY: ${{ inputs.body }}
         MODE: ${{ inputs.mode }}
