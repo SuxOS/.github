@@ -50,7 +50,10 @@ const pullsList = Symbol("pulls.list");
 
 // Runs the real extracted script with fixture GitHub state; returns how many new batches
 // it dispatched plus the `inFlight=` summary line for direct assertions on the cap math.
-const run = async ({ issues = [], prs = [], inProgressRuns = [], queuedRuns = [], cap = 2, maxIssues = 3 }) => {
+const run = async ({
+  issues = [], prs = [], inProgressRuns = [], queuedRuns = [], cap = 2, maxIssues = 3,
+  useRecommended, spineAvailable, spineRecommended, throttleLevel,
+}) => {
   const dispatched = [];
   const infoLines = [];
   const core = { info: (m) => infoLines.push(m), warning: () => {} };
@@ -79,11 +82,19 @@ const run = async ({ issues = [], prs = [], inProgressRuns = [], queuedRuns = []
   process.env.NONBUILDABLE_LABELS = "tracking,epic";
   process.env.INCLUDE = "";
   process.env.EXCLUDE = "";
+  // Drain-controller inputs (#476) — undefined (matches an unset env var) unless a test
+  // passes them explicitly, so every existing case above still runs with the recommendation
+  // path fully inert (spineAvailable !== "true" -> effectiveCap === cap, unchanged behaviour).
+  if (useRecommended !== undefined) process.env.USE_RECOMMENDED = String(useRecommended); else delete process.env.USE_RECOMMENDED;
+  if (spineAvailable !== undefined) process.env.SPINE_AVAILABLE = String(spineAvailable); else delete process.env.SPINE_AVAILABLE;
+  if (spineRecommended !== undefined) process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES = String(spineRecommended); else delete process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES;
+  if (throttleLevel !== undefined) process.env.THROTTLE_LEVEL = String(throttleLevel); else delete process.env.THROTTLE_LEVEL;
 
   const fn = new Function("github", "context", "core", `return (async () => { ${scriptBody} })();`);
   await fn(github, context, core);
   const summary = infoLines.find((l) => l.startsWith("unclaimed=")) || "";
-  return { dispatchedCount: dispatched.length, summary };
+  const drainLine = infoLines.find((l) => l.startsWith("drain-controller:")) || "";
+  return { dispatchedCount: dispatched.length, summary, drainLine };
 };
 
 let failures = 0;
@@ -95,6 +106,16 @@ const check = async (name, opts, expectDispatched) => {
 };
 
 const backlog5 = [1, 2, 3, 4, 5].map((n) => issue(n));
+const backlog10 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => issue(n));
+
+const checkDrain = async (name, opts, expectDispatched, expectDrainSubstring) => {
+  const { dispatchedCount, summary, drainLine } = await run(opts);
+  const dispatchOk = dispatchedCount === expectDispatched;
+  const drainOk = expectDrainSubstring === null ? drainLine === "" : drainLine.includes(expectDrainSubstring);
+  if (dispatchOk && drainOk) { console.log(`ok   - ${name} (${summary}) [${drainLine}]`); return; }
+  failures++;
+  console.log(`FAIL - ${name}: got dispatched=${dispatchedCount} want ${expectDispatched}, drainLine="${drainLine}" want ${expectDrainSubstring === null ? "(none)" : `to include "${expectDrainSubstring}"`} (${summary})`);
+};
 
 (async () => {
   // 1. The #434 bug case: no runs in_progress/queued (both prior batches already finished
@@ -133,6 +154,50 @@ const backlog5 = [1, 2, 3, 4, 5].map((n) => issue(n));
     "no unclaimed backlog -> no dispatch even with headroom",
     { issues: [], prs: [], cap: 2 },
     0,
+  );
+
+  // 6-10: drain-controller recommended_parallel_batches consumption (#476). backlog10 gives
+  // wantForWork=4 (unclaimedPoints=20/effortBudget-default-6 -> ceil=4, unclaimed=10/maxIssues-
+  // default-3 -> ceil=4), wide enough headroom that effectiveCap alone decides dispatch count.
+
+  // 6. Spine signal unavailable -> recommendation ignored entirely (fail-soft), no log line,
+  //    even though useRecommended is true and a recommendation value is present.
+  await checkDrain(
+    "spine unavailable -> recommendation ignored, static cap governs",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: false, spineRecommended: 4, throttleLevel: "green" },
+    2, null,
+  );
+
+  // 7. Comparison-only (useRecommended false, the default): always logged, never applied —
+  //    dispatch still bound by the static cap even though the recommendation (4) is higher.
+  await checkDrain(
+    "comparison-only (flag off) -> logged but static cap still governs dispatch",
+    { issues: backlog10, cap: 2, useRecommended: false, spineAvailable: true, spineRecommended: 4, throttleLevel: "green" },
+    2, "comparison-only, not applied",
+  );
+
+  // 8. Flag on, green headroom -> recommendation (4) raises the ceiling above the static
+  //    default and dispatch actually reaches it.
+  await checkDrain(
+    "flag on, green headroom -> recommendation raises the ceiling",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4, throttleLevel: "green" },
+    4, "USING",
+  );
+
+  // 9. Flag on, yellow headroom -> raw 4 dampened by 0.5 to 2, which floors right back at the
+  //    static default (max(2,2)=2) — dampening pulls it toward, not below, the static default.
+  await checkDrain(
+    "flag on, yellow headroom -> dampened recommendation lands back at the static default",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4, throttleLevel: "yellow" },
+    2, "dampened=2",
+  );
+
+  // 10. Flag on, a recommendation BELOW the static default must never lower the ceiling —
+  //     max(static, dampened) floors at the operator-configured value.
+  await checkDrain(
+    "flag on, recommendation below static default -> never pushed below the floor",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 1, throttleLevel: "green" },
+    2, "recommended ceiling=2",
   );
 
   if (failures) { console.error(`\n${failures} assertion(s) failed`); process.exit(1); }

@@ -259,25 +259,31 @@ jobs:
               merged_ok=0; merged_count=0
             fi
 
-            # --- Drain-controller integral_error (#475, formula spec
-            # docs/design/2026-07-19-drain-controller-pi-formula-spec.md §2). Per-repo, not
-            # fabric-wide (parent design doc §2.1). Constants match the spec exactly:
-            # TARGET_DRAIN_HOURS=48, INTEGRAL_FLOOR=0, INTEGRAL_CAP=20. This step only
-            # persists the state (integral_error/checked_at) — raw_output/consumption is a
-            # separate follow-up (parent design doc §4 item 4).
+            # --- Drain-controller integral_error + recommended_parallel_batches (#475/#476,
+            # formula spec docs/design/2026-07-19-drain-controller-pi-formula-spec.md §2). Per-
+            # repo, not fabric-wide (parent design doc §2.1). Constants match the spec exactly:
+            # TARGET_DRAIN_HOURS=48, INTEGRAL_FLOOR=0, INTEGRAL_CAP=20, Kp=1, Ki=0.2,
+            # OUTPUT_CAP=4. raw_output is written below as recommended_parallel_batches —
+            # consumption (issue-build.yml's requeue) dampens it by budget-governor headroom
+            # and floors at the static parallel-batches default (parent doc §2.4/§2.5); this
+            # step only computes and persists the raw per-repo signal.
             prior_integral=$(printf '%s' "$prior_json" | jq -r --arg r "$repo" \
               '(.repos // [])[] | select(.repo == $r) | .integral_error // empty' 2>/dev/null || true)
             prior_integral="${prior_integral:-0}"
-            integral_error=$(awk -v prior="$prior_integral" -v backlog="$backlog" \
+            read -r integral_error raw_output <<<"$(awk -v prior="$prior_integral" -v backlog="$backlog" \
               -v merged="$merged_count" -v window="$merged_window_hours" 'BEGIN {
                 merged_rate = (window > 0) ? merged / window : 0
                 setpoint = backlog / 48
                 err = setpoint - merged_rate
-                v = prior + err
-                if (v < 0) v = 0
-                if (v > 20) v = 20
-                printf "%.6f", v
-              }')
+                integral = prior + err
+                if (integral < 0) integral = 0
+                if (integral > 20) integral = 20
+                raw = 1 * err + 0.2 * integral
+                out = (raw >= 0) ? int(raw + 0.5) : -int(-raw + 0.5)
+                if (out < 0) out = 0
+                if (out > 4) out = 4
+                printf "%.6f %d", integral, out
+              }')"
 
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             # Same cap-hit detection as the issues/prs collectors above (#345, #381):
@@ -357,6 +363,7 @@ jobs:
               --argjson disabled "$disabled_json" \
               --argjson merged "$merged_count" \
               --argjson integral "$integral_error" --argjson checked_at "$now_epoch" \
+              --argjson recommended "$raw_output" \
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
               --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
               --argjson gok "$integral_ok" \
@@ -364,6 +371,7 @@ jobs:
                 workflows_disabled: $disabled,
                 merged_prs_in_window: $merged,
                 integral_error: $integral,
+                recommended_parallel_batches: $recommended,
                 checked_at: $checked_at,
                 collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
@@ -487,7 +495,8 @@ jobs:
             # Gated on collection.integral (#475/#305) — same absent-sample-not-a-
             # misleading-zero contract as the other derived per-repo series above.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1) |
-              "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)"' <<< "$status"
+              "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)\n" +
+              "suxos_recommended_parallel_batches,repo=\(.repo) value=\(.recommended_parallel_batches) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt
             # disabled_manually or disabled_inactivity workflow — the dashboard
             # flags any that persists >48h.
