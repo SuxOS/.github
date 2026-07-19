@@ -1115,6 +1115,10 @@ jobs:
             const rawRecommended = Number(process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES);
             let effectiveCap = cap;
             if (spineAvailable && Number.isFinite(rawRecommended) && rawRecommended >= 0) {
+              // check-throttle only exposes the coarse green/yellow/red level, not
+              // budget-governor's actual opus_avail_min/total_avail_min ratio (that's only
+              // in the tracking-issue body as prose today, #501) — 0.5 on yellow is a
+              // deliberate stand-in until #501 lands a structured fraction to read instead.
               const headroomFraction = process.env.THROTTLE_LEVEL === "yellow" ? 0.5 : 1;
               const dampened = Math.round(rawRecommended * headroomFraction);
               const recommendedCeiling = Math.max(cap, dampened);
