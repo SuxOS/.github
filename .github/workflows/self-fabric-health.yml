@@ -13,7 +13,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  # .github/managed-repos.json is the single source of truth for the org repo list
+  # (pin-consistency.yml/deep-audit.yml/budget-governor.yml/caller-conformance.yml all
+  # derive their matrix from it, #233) — this repeats that same derivation instead of
+  # the hardcoded literal fabric-health.yml previously carried here, so a repo
+  # added/retired there (as sux-fileops was) doesn't silently go stale in the fabric
+  # spine too (#499). A job calling a reusable workflow via `uses:` can't have its own
+  # `steps:`, hence the separate job + `needs:` output hop (same shape pin-consistency.yml
+  # uses for its `managed-repos` job).
+  load-repos:
+    name: Load managed-repo list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      repos: ${{ steps.load.outputs.repos }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: load
+        run: |
+          set -euo pipefail
+          echo "repos=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
   spine:
+    needs: load-repos
     permissions:
       contents: read
       issues: read
@@ -22,7 +46,7 @@ jobs:
       checks: read
     uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
     with:
-      repos: "sux suxlib suxrouter claude-config .github"
+      repos: ${{ needs.load-repos.outputs.repos }}
       # Edge deploy health: sux is the only deployed Worker (suxos.net). Its /mcp
       # endpoint is public-but-auth-gated, so 401 is the healthy signal (same probe
       # the sux repo's own health.yml uses). Add more `service=url=status` lines here
