@@ -88,6 +88,10 @@ jobs:
         run: bash scripts/test-issue-build-requeue-cap.sh
         shell: bash
 
+      - name: Assert issue-build disposition dropped/superseded close path
+        run: bash scripts/test-issue-build-disposition-close.sh
+        shell: bash
+
       - name: Assert caller-stub conformance check flags missing/dead/stale/misconfigured stubs
         run: bash scripts/test-caller-conformance.sh
         shell: bash

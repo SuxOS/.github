@@ -267,10 +267,15 @@ jobs:
           path: .suxos-ci
           token: ${{ steps.classifier-token.outputs.token }}
       - name: Gate — classify no-verdict (infra retry vs diff fail-closed); block on high/critical
-        if: always() && steps.pre.outputs.go == 'true'
+        # ALWAYS runs now, even when Preflight set go=false (missing CLAUDE_CODE_OAUTH_TOKEN) —
+        # this is the required merge-gate check, so a skipped Gate reports the job as SUCCESS
+        # (GitHub treats a skipped step as non-blocking) and merges the PR with zero review
+        # performed. See the GO check below for the fail-closed handling of that case.
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          GO: ${{ steps.pre.outputs.go }}
           # Read the verdict from whichever attempt produced one (OAuth first, OAuth retry, then
           # the metered break-glass — each only runs if the prior produced nothing).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output || steps.claude_apikey.outputs.structured_output }}
@@ -283,6 +288,18 @@ jobs:
         run: |
           set -euo pipefail
           verdict="${VERDICT:-}"
+
+          # ── NO KEY (#507) ───────────────────────────────────────────────────────────────
+          # Preflight found no CLAUDE_CODE_OAUTH_TOKEN, so every review step above was
+          # skipped — there is no verdict to read and never will be. This is NOT the same as
+          # the "reviewer engaged but produced nothing" case below: treat it as fail-closed
+          # up front instead of falling through into verdict/classifier logic that has
+          # nothing to read (empty VERDICT, no execution logs, no .suxos-ci checkout).
+          if [ "${GO:-}" != "true" ]; then
+            gh pr edit "$PR" --add-label hold 2>/dev/null || true
+            gh pr comment "$PR" --body "🛑 **security review**: \`CLAUDE_CODE_OAUTH_TOKEN\` is not configured, so no review could run on this diff. Failing closed and applying \`hold\` so this PR cannot merge unreviewed. Configure the secret (see README § Auth), then remove \`hold\` once a clean review has run." 2>/dev/null || true
+            echo "::error::security review inert (CLAUDE_CODE_OAUTH_TOKEN not set) — failing closed (hold)"; exit 1
+          fi
 
           # ── PRODUCED VERDICT ─────────────────────────────────────────────────────────────
           # The reviewer finished and emitted structured output → trust it. Clean → pass;
