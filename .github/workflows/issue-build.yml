@@ -755,14 +755,18 @@ jobs:
             4. RECORD DISPOSITION (mandatory once you've pushed a commit — this is what the next
                step reads to open the PR, so don't skip it). Write a JSON object to
                `${{ runner.temp }}/disposition.json` using the Write tool (absolute path, OUTSIDE
-               the repo tree): `{"built": [n, ...], "dropped": [{"number": n, "reason": "..."}]}`.
-               `built` is every issue number actually shipped in this push — the original batch
-               MINUS anything you REDUCE-dropped PLUS anything you EXPAND-claimed — this is what
-               drives the PR's `Closes #n` list, so an EXPAND issue missing from `built` won't get
-               closed on merge and a REDUCE-dropped issue left IN `built` will get wrongly
-               auto-closed without ever having been built. `dropped` is every issue you
-               REDUCE-dropped, each with a short reason; those get their `building` claim released
-               immediately instead of sitting locked until the reaper's timeout.
+               the repo tree): `{"built": [n, ...], "dropped": [{"number": n, "reason": "...",
+               "superseded": true|false}]}`. `built` is every issue number actually shipped in
+               this push — the original batch MINUS anything you REDUCE-dropped PLUS anything you
+               EXPAND-claimed — this is what drives the PR's `Closes #n` list, so an EXPAND issue
+               missing from `built` won't get closed on merge and a REDUCE-dropped issue left IN
+               `built` will get wrongly auto-closed without ever having been built. `dropped` is
+               every issue you REDUCE-dropped, each with a short reason; those get their `building`
+               claim released immediately instead of sitting locked until the reaper's timeout —
+               UNLESS you set `"superseded": true` on that entry (the issue is stale/already
+               resolved/redundant, not merely deferred), in which case it gets closed as "not
+               planned" instead, so it stops being re-claimed and re-dropped by every future
+               builder run forever. Omit the field or set it `false` for an ordinary defer.
 
             5. CAPTURE INSIGHT (secondary — only after the build is done and pushed; skip if you
                couldn't finish the build). While working these issues you have the deepest view
@@ -861,9 +865,18 @@ jobs:
             dropped_nums=$(jq -r '.dropped // [] | .[].number' "$DISPOSITION_FILE" 2>/dev/null || true)
             for n in $dropped_nums; do
               reason=$(jq -r --arg n "$n" '.dropped[] | select((.number|tostring) == $n) | .reason // "no reason given"' "$DISPOSITION_FILE" 2>/dev/null || echo "no reason given")
+              superseded=$(jq -r --arg n "$n" '.dropped[] | select((.number|tostring) == $n) | .superseded // false' "$DISPOSITION_FILE" 2>/dev/null || echo false)
               gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
-              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+              if [ "$superseded" = "true" ]; then
+                # #465: the builder is telling us this issue is stale/already-resolved, not
+                # merely deferred — closing it here (instead of just releasing `building`)
+                # stops it being re-claimed and re-dropped by every future builder run forever.
+                gh issue close "$n" --repo "$GITHUB_REPOSITORY" --reason "not planned" \
+                  --comment "🤖 Closed as superseded/redundant (not shipped in this PR): $reason. Run: $RUN_URL" 2>/dev/null || true
+              else
+                gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                  --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+              fi
             done
 
             # A number the model listed in BOTH built and dropped is an inconsistent
