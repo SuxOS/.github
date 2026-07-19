@@ -91,6 +91,21 @@ on:
         # for 40+ minutes with no auto-resolver — closed and released back to backlog).
         # 2 concurrent batches keeps real wall-clock parallelism while halving collision odds.
         default: 2
+      use-recommended-parallel-batches:
+        description: >-
+          Comparison flag (#476, docs/design/2026-07-18-drain-controller-design.md §2.3-2.5):
+          fabric-health computes a per-repo drain-controller recommendation
+          (`recommended_parallel_batches` in fabric-status.json, a PI-formula output over
+          backlog/merged-PR-rate) and `requeue` always logs it against the static
+          `parallel-batches` above. Default false means comparison-only — the static value
+          above still governs dispatch. Set true to let `requeue` actually use the
+          recommendation (dampened by budget-governor headroom, floored at the static
+          default above — it can only raise the ceiling, never lower it below what's
+          configured here). Per the design doc's own §3 caution against making this
+          load-bearing in one pass — flip only after watching the comparison-mode logs
+          track real backlog behavior.
+        type: boolean
+        default: false
       flood-threshold:
         description: "Open bot-PR count at which mid-build feature observations stand down (flood-guard backpressure); bug/security/doc observations always file."
         type: number
@@ -177,6 +192,8 @@ jobs:
       spine_backlog_total: ${{ steps.spine.outputs.backlog_total }}
       spine_workflow_red_total: ${{ steps.spine.outputs.workflow_red_total }}
       spine_collection_ok: ${{ steps.spine.outputs.collection_ok }}
+      # This repo's own drain-controller recommendation (#476), consumed by `requeue` below.
+      spine_recommended_parallel_batches: ${{ steps.spine.outputs.recommended_parallel_batches }}
     steps:
       - name: Preflight — need the token
         id: pre
@@ -220,9 +237,10 @@ jobs:
       # Every command-substitution assignment is `|| true`-guarded per this repo's CLAUDE.md note
       # that `run:` steps execute under `-e` regardless of this script's own `set` line, so an
       # unguarded failed pipeline would otherwise abort the step instead of falling through to
-      # the degrade path. Nothing downstream consumes these outputs yet — that's the score-sort
-      # slice (docs/design/2026-07-18-value-ranking-score-spec.md), a separate follow-up issue;
-      # this step only lands the raw signal so that slice has real data to read.
+      # the degrade path. Most of these outputs still have no downstream consumer — that's the
+      # score-sort slice (docs/design/2026-07-18-value-ranking-score-spec.md), a separate
+      # follow-up issue — EXCEPT recommended_parallel_batches, which `requeue` below reads
+      # (#476, docs/design/2026-07-18-drain-controller-design.md §2.3-2.5).
       - name: Fetch fabric-status.json spine signal (fail-soft)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
         id: spine
@@ -234,8 +252,10 @@ jobs:
           backlog_total=""
           workflow_red_total=""
           collection_ok=""
+          recommended_parallel_batches=""
           age_min=""
           reason=""
+          repo_name="${GITHUB_REPOSITORY##*/}"
 
           run_id=$( { gh run list --repo SuxOS/.github --workflow self-fabric-health.yml \
             --status success --limit 1 --json databaseId 2>/dev/null \
@@ -264,6 +284,13 @@ jobs:
                   backlog_total=$( { jq -r '.backlog_total // empty' /tmp/fabric-status/fabric-status.json; } || true)
                   workflow_red_total=$( { jq -r '[.repos[].workflow_red] | add // 0' /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   collection_ok=$( { jq -r '.collection_ok // empty' /tmp/fabric-status/fabric-status.json; } || true)
+                  # This repo's own drain-controller recommendation (#476). Only trusted when
+                  # that repo's own integral collector succeeded (same collection-integrity gate
+                  # fabric-health.yml applies before emitting it) — empty on any miss, same
+                  # fail-soft contract as every other spine field here.
+                  recommended_parallel_batches=$( { jq -r --arg r "$repo_name" \
+                    '(.repos // [])[] | select(.repo == $r) | select(.collection.integral == 1) | .recommended_parallel_batches // empty' \
+                    /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   if [ -z "$backlog_total" ] || [ -z "$collection_ok" ]; then
                     reason="fabric-status.json missing expected fields"
                   else
@@ -275,7 +302,7 @@ jobs:
           fi
 
           if [ "$available" = "true" ]; then
-            echo "::notice::spine signal fetched: backlog_total=$backlog_total workflow_red_total=$workflow_red_total collection_ok=$collection_ok (run $run_id, ${age_min}m old)"
+            echo "::notice::spine signal fetched: backlog_total=$backlog_total workflow_red_total=$workflow_red_total collection_ok=$collection_ok recommended_parallel_batches=${recommended_parallel_batches:-n/a} (run $run_id, ${age_min}m old)"
           else
             echo "::notice::spine signal unavailable ($reason) — degrading to tier-only pack"
           fi
@@ -285,6 +312,7 @@ jobs:
             echo "backlog_total=$backlog_total"
             echo "workflow_red_total=$workflow_red_total"
             echo "collection_ok=$collection_ok"
+            echo "recommended_parallel_batches=$recommended_parallel_batches"
           } >> "$GITHUB_OUTPUT"
 
       - name: Non-buildable labels
@@ -1056,6 +1084,10 @@ jobs:
           MAX_ISSUES: ${{ inputs.max-issues }}
           EFFORT_BUDGET: ${{ inputs.effort-budget }}
           PARALLEL_BATCHES: ${{ inputs.parallel-batches }}
+          USE_RECOMMENDED: ${{ inputs.use-recommended-parallel-batches }}
+          SPINE_AVAILABLE: ${{ needs.select.outputs.spine_available }}
+          SPINE_RECOMMENDED_PARALLEL_BATCHES: ${{ needs.select.outputs.spine_recommended_parallel_batches }}
+          THROTTLE_LEVEL: ${{ steps.throttle.outputs.level }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           INCLUDE: ${{ inputs.include }}
           EXCLUDE: ${{ inputs.exclude }}
@@ -1066,6 +1098,29 @@ jobs:
             const maxIssues = Math.max(1, Number(process.env.MAX_ISSUES) || 10);
             const effortBudget = Math.max(1, Number(process.env.EFFORT_BUDGET) || maxIssues * 2);
             const cap = Math.max(1, Number(process.env.PARALLEL_BATCHES) || 1);
+
+            // Drain-controller recommended ceiling (#476,
+            // docs/design/2026-07-18-drain-controller-design.md §2.3-2.5,
+            // docs/design/2026-07-19-drain-controller-pi-formula-spec.md §4): `select`'s
+            // spine-fetch step already read this repo's fail-soft recommended_parallel_batches
+            // (0-4, a PI-formula output over backlog/merged-PR-rate). Dampen by budget headroom
+            // — only yellow needs it, since red already fully defers before this step runs at
+            // all (defer-at: red above) — and floor at the static `cap` (never push the
+            // ceiling BELOW what an operator configured): effectiveCap = max(cap, round(raw *
+            // headroom)). Gated behind use-recommended-parallel-batches (default false, per the
+            // design doc's own §3 caution against making this load-bearing in one pass) — always
+            // logged for comparison, only APPLIED when the flag is flipped true.
+            const useRecommended = String(process.env.USE_RECOMMENDED) === "true";
+            const spineAvailable = process.env.SPINE_AVAILABLE === "true";
+            const rawRecommended = Number(process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES);
+            let effectiveCap = cap;
+            if (spineAvailable && Number.isFinite(rawRecommended) && rawRecommended >= 0) {
+              const headroomFraction = process.env.THROTTLE_LEVEL === "yellow" ? 0.5 : 1;
+              const dampened = Math.round(rawRecommended * headroomFraction);
+              const recommendedCeiling = Math.max(cap, dampened);
+              core.info(`drain-controller: raw_output=${rawRecommended} headroom_fraction=${headroomFraction} -> dampened=${dampened} vs static parallel-batches=${cap} -> recommended ceiling=${recommendedCeiling} (${useRecommended ? "USING" : "comparison-only, not applied"})`);
+              if (useRecommended) effectiveCap = recommendedCeiling;
+            }
             const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
             const include = (process.env.INCLUDE || "").split(",").filter(Boolean);
             const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
@@ -1122,8 +1177,10 @@ jobs:
             // with cap 1 there's no sibling batch to collide with. Exact-match on the newest
             // already-open builder PR's changed files only (no text-mining an issue's body);
             // if it touches either file, hold further dispatch until it merges rather than
-            // attempt #437's general select-time overlap heuristic.
-            if (cap > 1) {
+            // attempt #437's general select-time overlap heuristic. Gated on effectiveCap (not
+            // the static cap) so a flipped-on drain-controller recommendation that raises the
+            // real ceiling also gets this collision guard.
+            if (effectiveCap > 1) {
               const HOT_FILES = new Set([".github/workflows/self-check.yml", "CLAUDE.md"]);
               const builderPrs = openPrs
                 .filter((pr) => isTrusted(pr.user, pr.author_association) && /^bot\/issue-build-\d+$/.test(pr.head.ref))
@@ -1168,8 +1225,8 @@ jobs:
             // and never negative. Sized against points, not raw issue count, to match the
             // documented contract on effort-budget/parallel-batches above (#455).
             const wantForWork = Math.max(Math.ceil(unclaimedPoints / effortBudget), Math.ceil(unclaimed / maxIssues));
-            const toDispatch = Math.max(0, Math.min(cap - inFlight, wantForWork));
-            core.info(`unclaimed=${unclaimed} unclaimedPoints=${unclaimedPoints} inFlight=${inFlight} cap=${cap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
+            const toDispatch = Math.max(0, Math.min(effectiveCap - inFlight, wantForWork));
+            core.info(`unclaimed=${unclaimed} unclaimedPoints=${unclaimedPoints} inFlight=${inFlight} cap=${cap} effectiveCap=${effectiveCap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
             if (toDispatch === 0) {
               core.info("cap already saturated (or no headroom) — a running batch's own requeue will top up as it finishes");
               return;
