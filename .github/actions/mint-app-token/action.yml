@@ -31,6 +31,12 @@ inputs:
       own `permission-contents:`), e.g. `read` for a checkout-only token.
     required: false
     default: ""
+  permission-pull-requests:
+    description: >-
+      Optional `pull-requests` permission override (passthrough to create-github-app-token's
+      own `permission-pull-requests:`), e.g. `write` for a token that opens/updates PRs.
+    required: false
+    default: ""
 
 outputs:
   token:
@@ -49,3 +55,4 @@ runs:
         owner: ${{ inputs.owner }}
         repositories: ${{ inputs.repositories }}
         permission-contents: ${{ inputs.permission-contents }}
+        permission-pull-requests: ${{ inputs.permission-pull-requests }}

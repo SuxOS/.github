@@ -1102,7 +1102,7 @@ jobs:
             if (cap > 1) {
               const HOT_FILES = new Set([".github/workflows/self-check.yml", "CLAUDE.md"]);
               const builderPrs = openPrs
-                .filter((pr) => /^bot\/issue-build-\d+$/.test(pr.head.ref))
+                .filter((pr) => isTrusted(pr.user, pr.author_association) && /^bot\/issue-build-\d+$/.test(pr.head.ref))
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
               const newestBuilderPr = builderPrs[0];
               if (newestBuilderPr) {

@@ -1,0 +1,39 @@
+name: PR live hold/keep re-check
+description: >-
+  Re-fetch a PR's CURRENT labels immediately before a mutating sweep acts on it, and
+  report whether hold/keep is present (or the live fetch itself failed, fail-closed) —
+  the shared fix for the bug class SuxOS/.github#454 patched ad hoc: a sweep acting on
+  a label snapshot taken once at the top of a loop instead of re-checking live right
+  before mutating, so an operator's hold/keep added mid-sweep went unnoticed. See
+  SuxOS/.github#461. A `uses:` step can't run mid-loop, so a sweep that loops over many
+  PRs in one `run:` step should instead check out this repo and call this action's
+  check.sh directly (same file, same behavior, no drift) — see pr-unstick.yml for the
+  pattern.
+
+inputs:
+  pr-number:
+    description: The PR number to re-check.
+    required: true
+  github-token:
+    description: Token gh CLI should use (GH_TOKEN) — needs at least read access to the PR.
+    required: true
+
+outputs:
+  hold:
+    description: >-
+      "true" if the PR currently has hold/keep, or the live re-fetch itself failed
+      (fail-closed — never act on a stale snapshot); "false" if clear to mutate.
+    value: ${{ steps.check.outputs.hold }}
+  reason:
+    description: Empty when hold=false, else "fetch-failed" or "hold-keep".
+    value: ${{ steps.check.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: Re-check live hold/keep
+      id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "${{ github.action_path }}/check.sh" "${{ inputs.pr-number }}"

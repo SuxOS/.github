@@ -109,6 +109,36 @@ jobs:
           github-token: ${{ steps.app-token.outputs.token }}
           defer-at: "red"
 
+      # The needs-human and security-review-retry sweeps below each loop over many PRs in
+      # one `run:` step and re-check live hold/keep right before mutating each one (#454) —
+      # a `uses:` step can't run mid-loop, so they call .github/actions/pr-live-hold-check's
+      # check.sh directly instead of re-deriving the jq snippet (#461). SuxOS/.github is
+      # PRIVATE, so this needs its own token scoped to just `.github` (same reasoning as
+      # security-review.yml's classifier-token). continue-on-error degrades to skip (guarded
+      # in the loops below), same posture as this file's other cross-repo steps.
+      - name: Mint app token for shared-helper checkout (SuxOS/.github)
+        id: helper-token
+        if: steps.throttle.outputs.go == 'true'
+        continue-on-error: true
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
+          permission-contents: read
+
+      - name: Checkout SuxOS/.github (pr-live-hold-check helper)
+        id: helper-checkout
+        if: steps.throttle.outputs.go == 'true'
+        continue-on-error: true
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          token: ${{ steps.helper-token.outputs.token }}
+          path: .suxos-ci
+
       - name: Retry needs-human PRs past their cooldown, up to the cycle cap
         if: steps.throttle.outputs.go == 'true'
         env:
@@ -173,18 +203,16 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
-            # #454: the candidate list was fetched once before this loop started, and a full
-            # sweep can take minutes (many gh calls + sleep 2 per PR) — re-read this PR's live
-            # labels immediately before mutating so a hold/keep added mid-sweep (e.g. an operator
-            # pinning the PR precisely because they're now investigating it) is honored, mirroring
-            # the reachability sweep's live-label pattern below and pr-drain.yml's documented
-            # re-read-before-acting principle.
-            if ! live_labels=$(gh pr view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
-              echo "::warning::could not re-fetch live labels for PR #$n — skipping this run rather than acting on a stale snapshot"
+            # #461: shared live-recheck helper (generalizes #454's fix) — re-reads this PR's
+            # live labels immediately before mutating so a hold/keep added mid-sweep (e.g. an
+            # operator pinning the PR precisely because they're now investigating it) is
+            # honored. See .github/actions/pr-live-hold-check/check.sh.
+            HELPER=".suxos-ci/.github/actions/pr-live-hold-check/check.sh"
+            if [ ! -f "$HELPER" ]; then
+              echo "::warning::shared live-recheck helper unavailable (checkout failed) — skipping PR #$n rather than mutating without a fresh label check"
               echo "::endgroup::"; continue
             fi
-            if echo "$live_labels" | jq -e '(index("hold") or index("keep"))' >/dev/null 2>&1; then
-              echo "#$n now has hold/keep (added since the sweep's PR list was fetched) — leaving to the operator"
+            if [ "$(bash "$HELPER" "$n")" = "true" ]; then
               echo "::endgroup::"; continue
             fi
 
@@ -256,15 +284,15 @@ jobs:
           for n in $(echo "$prs" | jq -r '.[].number'); do
             echo "::group::PR #$n (security-review-retry)"
 
-            # #454: same live-label re-check as the needs-human sweep above — this PR's labels
-            # were snapshotted once before the loop; re-read them now so a hold/keep added
-            # mid-sweep is honored before we rerun a check or drop the marker label.
-            if ! live_labels=$(gh pr view "$n" --json labels --jq '[.labels[].name]' 2>/dev/null); then
-              echo "::warning::could not re-fetch live labels for PR #$n — skipping this run rather than acting on a stale snapshot"
+            # #461: same shared live-recheck helper as the needs-human sweep above — this PR's
+            # labels were snapshotted once before the loop; re-check live now so a hold/keep
+            # added mid-sweep is honored before we rerun a check or drop the marker label.
+            HELPER=".suxos-ci/.github/actions/pr-live-hold-check/check.sh"
+            if [ ! -f "$HELPER" ]; then
+              echo "::warning::shared live-recheck helper unavailable (checkout failed) — skipping PR #$n rather than mutating without a fresh label check"
               echo "::endgroup::"; continue
             fi
-            if echo "$live_labels" | jq -e '(index("hold") or index("keep"))' >/dev/null 2>&1; then
-              echo "#$n now has hold/keep (added since the sweep's PR list was fetched) — leaving to the operator"
+            if [ "$(bash "$HELPER" "$n")" = "true" ]; then
               echo "::endgroup::"; continue
             fi
 
