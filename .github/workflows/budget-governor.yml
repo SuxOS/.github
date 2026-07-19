@@ -417,6 +417,8 @@ jobs:
           fi
           body=$(printf '%s\n' \
             "level: ${LEVEL}" \
+            "opus_avail_min: ${OPUS_AVAIL_MIN}" \
+            "total_avail_min: ${TOTAL_AVAIL_MIN}" \
             "" \
             "Auto-maintained by SuxOS/.github budget-governor.yml (${stamp}); scheduled Claude workloads in this repo read the level line above via the check-throttle action. Token-bucket headroom: opus-tier ${OPUS_AVAIL_MIN}/${OPUS_BUDGET_MIN} runner-min available, total ${TOTAL_AVAIL_MIN}/${TOTAL_BUDGET_MIN} runner-min available (raw trailing-7-day sum: opus-tier ${OPUS_MIN}, total ${TOTAL_MIN}). ${rate_limit_line} To pin a level manually, edit the level line and add the \`throttle-manual\` label — the governor skips labeled issues.")
           for r in $REPOS; do
