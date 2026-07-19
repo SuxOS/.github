@@ -59,7 +59,9 @@ on:
         # small failure blast radius) rather than one big batch's internal subagent fan-out
         # (shared checkout, trusted-not-verified disjointness). Dynamic expand (§3.1.5) still
         # lets a builder push higher when the work in its own batch is light.
-        default: 3
+        # 3 -> 5 (2026-07-19, operator: open the throttle at ~5% usage) — more work per batch
+        # without more concurrent open PRs, since parallel-batches stays at 2 (collision cap).
+        default: 5
       effort-budget:
         description: >-
           Points budget for the bundle, oldest-first within the chosen tier (spilling into
@@ -73,7 +75,9 @@ on:
         # 80 -> 48 -> 16 -> 6 (2026-07-15, operator: target 2-3 issues/batch): shrunk alongside
         # max-issues so a typical backlog splits into more concurrent small batches instead of
         # one big serial one — see max-issues above and `parallel-batches` below.
-        default: 6
+        # 6 -> 10 (2026-07-19, operator: open the throttle at ~5% usage) — bumped alongside
+        # max-issues 3->5 so a batch can carry the wider issue count; parallel-batches held at 2.
+        default: 10
       parallel-batches:
         description: >-
           Max concurrent issue-build runs (this run plus requeued ones) for one repo.
@@ -90,7 +94,12 @@ on:
         # and pr-auto-update's rebase can't clear those (observed live: 7 PRs stuck `dirty`
         # for 40+ minutes with no auto-resolver — closed and released back to backlog).
         # 2 concurrent batches keeps real wall-clock parallelism while halving collision odds.
-        default: 2
+        # 2 -> 3 (2026-07-19, operator: subscription running cold, backlog oversupplied at
+        # ~109 buildable org-wide — drain rate is the binding constraint, not supply, so open
+        # the one knob that actually raises it). Held below the old 4 that caused the #434
+        # pileup; the requeue cap now also counts outstanding open builder PRs (isTrusted-gated,
+        # via max()) so 3 is a true ceiling on concurrent open PRs, not just in-flight runs.
+        default: 3
       use-recommended-parallel-batches:
         description: >-
           Comparison flag (#476, docs/design/2026-07-18-drain-controller-design.md §2.3-2.5):
