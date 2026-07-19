@@ -813,6 +813,14 @@ jobs:
                resolved/redundant, not merely deferred), in which case it gets closed as "not
                planned" instead, so it stops being re-claimed and re-dropped by every future
                builder run forever. Omit the field or set it `false` for an ordinary defer.
+               CAVEAT (#496): this only works when the disposition-handling logic you're
+               relying on already existed BEFORE this run started — a workflow step runs the
+               script as it was when the job was triggered, not as edited mid-run by your own
+               commit. If this batch's own changes add/alter disposition handling here, don't
+               mark anything `superseded` in this same run's disposition.json expecting it to
+               close; use a literal `Closes #n` / `Fixes #n` in the PR body or commit message
+               instead — GitHub parses that itself on merge, independent of which script
+               version the job happened to load.
 
             5. CAPTURE INSIGHT (secondary — only after the build is done and pushed; skip if you
                couldn't finish the build). While working these issues you have the deepest view

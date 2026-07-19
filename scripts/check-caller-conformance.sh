@@ -20,18 +20,22 @@
 # this check with no edits here. Override the repo root with CALLER_CONFORMANCE_ROOT (the
 # test harness points it at the real repo while feeding fixture consumer dirs).
 #
-# Four checks, matching the issue: (a) a canonical reusable with no live caller; (b) a
-# dead/superseded stub still present (the workflow_run autofix class); (c) a present stub
-# missing `secrets: inherit`, or a security-review stub missing `ready_for_review`; (d) a
-# stub pinned to a stale `uses: …@ref` (first-party refs are canonically @main). It is NOT
-# an exhaustive per-stub trigger diff (like test-dashboard-queries.sh isn't a full PromQL
-# linter) — it covers the highest-severity, unambiguous cases.
+# Five checks, matching the issue plus #492's follow-up: (a) a canonical reusable with no
+# live caller; (b) a dead/superseded stub still present (the workflow_run autofix class);
+# (c) a present stub missing `secrets: inherit`, or a security-review stub missing
+# `ready_for_review`; (d) a stub pinned to a stale `uses: …@ref` (first-party refs are
+# canonically @main); (e) a reusable multiplexed across several canonical stub names (the
+# 3-tier fixer cadence, #368) adopted via only SOME of its sibling stub files — a stale
+# pre-multiplex shape that (a) alone can't see, since (a) treats any one sibling as
+# sufficient adoption of the reusable. It is NOT an exhaustive per-stub trigger diff (like
+# test-dashboard-queries.sh isn't a full PromQL linter) — it covers the highest-severity,
+# unambiguous cases.
 #
 # Optional 3rd arg `self` switches to .github's OWN self-*.yml caller-stub scan (#356):
 # those stubs are legitimately named self-<name>[-<variant>].yml rather than <name>.yml
 # (and self-fixer-30m.yml/self-fixer-bugs.yml legitimately multiplex one reusable across
-# several cadence/model variants), so the naming-derived checks (a)/(c)/(d) would false-
-# positive on every single one. Only the workflow_run dead-stub sub-case of (b) is
+# several cadence/model variants), so the naming-derived checks (a)/(c)/(d)/(e) would
+# false-positive on every single one. Only the workflow_run dead-stub sub-case of (b) is
 # prefix-independent — it keys off the `workflow_run:` trigger shape, not the stub's name —
 # so `self` mode restricts the scan to self-*.yml files and only runs that sub-case.
 MODE="full"
@@ -76,6 +80,19 @@ CANON_TARGETS="$(awk '
   }
 ' "$SCAFFOLD" | sort -u)"
 
+# name<TAB>target pairs, one per `emit NAME` block (same derivation as CANON_TARGETS above,
+# just keeping the name alongside instead of discarding it) — lets check (e) below group
+# canonical stub NAMES by the reusable they multiplex onto.
+NAME_TARGET_PAIRS="$(awk '
+  /^emit [a-z][a-z0-9-]*/ { name=$2; target=""; next }
+  name != "" && target == "" && /uses: \$REPO\/\.github\/workflows\/[a-z][a-z0-9-]*\.yml@\$REF/ {
+    line=$0
+    sub(/.*workflows\//, "", line); sub(/\.yml@\$REF.*/, "", line)
+    print name"\t"line
+    target=line
+  }
+' "$SCAFFOLD")"
+
 if [ ! -d "$WFDIR" ]; then
   warn "no .github/workflows directory — no SuxOS caller stubs wired at all"
   echo "[$REPO_LABEL] conformance: $count finding(s)"
@@ -109,6 +126,35 @@ if [ "$MODE" = "full" ]; then
       warn "no live caller stub wires $c.yml (scaffold-caller.sh emits one — reusable adopted org-wide but not here)"
     fi
   done <<< "$CANON_TARGETS"
+
+  # (e) STALE MULTIPLEX SHAPE — a reusable multiplexed across several canonical stub
+  # NAMES (e.g. the 3-tier fixer cadence: fixer-bugs/fixer-30m/fixer all wiring fixer.yml,
+  # #368) is "adopted" per check (a) the moment ANY one sibling stub FILE is present, so a
+  # caller still on the pre-multiplex single-stub shape looks fully conformant to (a) even
+  # though it's missing the other tiers entirely (#492). Flag it: for every target wired by
+  # more than one canonical stub name, if at least one sibling stub FILE is present but not
+  # all of them are, the missing ones are almost certainly a stale cadence, not an
+  # intentional partial adopt (unlike (a), which explicitly treats one-tier as sufficient
+  # adoption — this check is about completeness of an already-adopted multiplex group, not
+  # adoption itself).
+  targets_multi="$(printf '%s\n' "$NAME_TARGET_PAIRS" | awk -F'\t' '{print $2}' | sort | uniq -c | awk '$1>1{print $2}')"
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    group="$(printf '%s\n' "$NAME_TARGET_PAIRS" | awk -F'\t' -v t="$t" '$2==t{print $1}' | sort)"
+    present=""
+    missing=""
+    while IFS= read -r c; do
+      [ -z "$c" ] && continue
+      if [ -f "$WFDIR/$c.yml" ] || [ -f "$WFDIR/$c.yaml" ]; then
+        present="$present$c "
+      else
+        missing="$missing$c "
+      fi
+    done <<< "$group"
+    if [ -n "$present" ] && [ -n "$missing" ]; then
+      warn "wires $t.yml via stub(s) [${present% }] but is missing sibling tier stub(s) [${missing% }] — stale pre-multiplex shape (scaffold-caller.sh now emits all of: $(printf '%s\n' "$group" | tr '\n' ' ' | sed 's/ $//') for this reusable)"
+    fi
+  done <<< "$targets_multi"
 fi
 
 if [ "$MODE" = "full" ] || [ "$MODE" = "self" ]; then
