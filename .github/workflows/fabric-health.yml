@@ -42,6 +42,15 @@ on:
         description: "An open PR untouched for at least this many days counts as stuck."
         type: string
         default: "2"
+      merged-window-hours:
+        description: >-
+          Trailing window (hours) for the per-repo merged_prs_in_window drain-controller
+          signal (docs/design/2026-07-18-drain-controller-design.md §2.1). Deliberately an
+          order of magnitude past this workflow's 15-min run cadence — the design doc's
+          #357 log shows a 14-23 minute sample being too noisy to feed a controller
+          directly.
+        type: string
+        default: "2"
       edge-smoke-checks:
         description: >-
           Newline-separated `service=url=expected-status` triples for edge deploy
@@ -89,12 +98,16 @@ jobs:
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           STUCK_IDLE_DAYS: ${{ inputs.stuck-idle-days }}
           DISABLED_EXEMPT: ${{ inputs.workflow-disabled-exempt }}
+          MERGED_WINDOW_HOURS: ${{ inputs.merged-window-hours }}
         run: |
           set -euo pipefail
 
           now_epoch=$(date -u +%s)
           stuck_before=$(date -u -d "-${STUCK_IDLE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
             || date -u -v-"${STUCK_IDLE_DAYS}"d +%Y-%m-%dT%H:%M:%SZ)
+          merged_window_hours="${MERGED_WINDOW_HOURS:-2}"
+          merged_cutoff=$(date -u -d "-${merged_window_hours} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -v-"${merged_window_hours}"H +%Y-%m-%dT%H:%M:%SZ)
 
           # jq filter reused per repo: mark a PR "stuck" if it is BEHIND/DIRTY, has a
           # failing status rollup, or has been idle past the threshold.
@@ -154,6 +167,21 @@ jobs:
                     | ($m == "BEHIND" or $m == "DIRTY")
                     or (.updatedAt < $before)) ] | length)
               }')
+
+            # --- Merged PRs in the trailing window (drain-controller signal, #473) ---
+            # Count-only, same collection-integrity contract as every other collector
+            # here: a failed query degrades collection.merged to 0 (never a healthy-
+            # looking zero) so consumers can't mistake "couldn't measure" for "no drain".
+            if merged=$(gh pr list --repo "$slug" --state merged --limit 201 \
+                --search "merged:>=${merged_cutoff}" --json number 2>/dev/null); then
+              if [ "$(printf '%s' "$merged" | jq 'length')" -gt 200 ]; then
+                merged_ok=0; merged_count=0
+              else
+                merged_ok=1; merged_count=$(printf '%s' "$merged" | jq 'length')
+              fi
+            else
+              merged_ok=0; merged_count=0
+            fi
 
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             # Same cap-hit detection as the issues/prs collectors above (#345, #381):
@@ -231,11 +259,13 @@ jobs:
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
               --argjson disabled "$disabled_json" \
+              --argjson merged "$merged_count" \
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
-              --argjson rok "$runs_ok" --argjson wok "$wfs_ok" \
+              --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
               '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
                 workflows_disabled: $disabled,
-                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok}}')
+                merged_prs_in_window: $merged,
+                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
             # A single failed collector anywhere degrades the whole spine to "unknown".
@@ -243,7 +273,7 @@ jobs:
             # backlog can't be asserted zero (the merge-relevant 7-day DoD streak).
             [ "$issues_ok" -eq 1 ] || issues_all_ok=0
             if [ "$issues_ok" -eq 0 ] || [ "$prs_ok" -eq 0 ] \
-                || [ "$runs_ok" -eq 0 ] || [ "$wfs_ok" -eq 0 ]; then
+                || [ "$runs_ok" -eq 0 ] || [ "$wfs_ok" -eq 0 ] || [ "$merged_ok" -eq 0 ]; then
               collection_all_ok=0
             fi
           done
@@ -349,6 +379,10 @@ jobs:
               "suxos_pr_stuck_total,repo=\(.repo) value=\(.prs.stuck) \($ts)"' <<< "$status"
             jq -r --arg ts "$ts" '.repos[] | select(.collection.runs == 1) |
               "suxos_workflow_red_total,repo=\(.repo) value=\(.workflow_red) \($ts)"' <<< "$status"
+            # Gated on collection.merged (#473/#305) — same absent-sample-not-a-
+            # misleading-zero contract as the other derived per-repo series above.
+            jq -r --arg ts "$ts" '.repos[] | select(.collection.merged == 1) |
+              "suxos_merged_prs_in_window,repo=\(.repo) value=\(.merged_prs_in_window) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt
             # disabled_manually or disabled_inactivity workflow — the dashboard
             # flags any that persists >48h.

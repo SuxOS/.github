@@ -39,6 +39,7 @@ ALLOWLIST=(
   ".github/workflows/fabric-health.yml::gh run list --limit 200"
   ".github/workflows/fabric-health.yml::gh run list --repo \"\$slug\" --limit 100"
   ".github/workflows/fabric-health.yml::gh run list --repo \"\$slug\" --workflow \"\$wf_id\" --limit 1"
+  ".github/workflows/fabric-health.yml::gh pr list --repo \"\$slug\" --state merged --limit 201"
   ".github/workflows/deep-audit.yml::gh issue list --limit 200 --state all"
   ".github/workflows/pr-unstick.yml::gh pr list --state open --label needs-human --limit \"\$PR_LIMIT\""
   ".github/workflows/pr-unstick.yml::gh run list --repo \"\$GH_REPO\" --commit \"\$sha\" --limit 100 --json databaseId,conclusion"

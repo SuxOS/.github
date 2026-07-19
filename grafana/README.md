@@ -33,6 +33,7 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | `suxos_pr_red_total` | `repo` | PRs with a failing check rollup |
 | `suxos_pr_stuck_total` | `repo` | PRs BEHIND/DIRTY or idle past the threshold |
 | `suxos_workflow_red_total` | `repo` | Workflows whose last completed run failed |
+| `suxos_merged_prs_in_window` | `repo` | PRs merged in the trailing `merged-window-hours` window (drain-controller signal, #473) |
 | `suxos_workflow_disabled` | `repo`, `workflow` | `1` per disabled_manually/disabled_inactivity workflow (non-exempt) |
 | `suxos_edge_deploy_ok` | `service` | Edge smoke check passed (opt-in via input) |
 | `suxos_collector_ok` | — | Heartbeat / freshness (`1` each run) |
