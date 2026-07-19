@@ -1,0 +1,38 @@
+{
+  "_comment": "Single source of truth for the 2026-07-17 'sonnet pinned org-wide, no Opus escalation' operator directive (docs/design/2026-07-17-automation-structure-and-anti-drift.md, propose row + Model & effort knobs). Gated by scripts/test-model-policy.sh (#369) so the reusable defaults, self-*/scaffolded caller-stub pins, and budget-governor's opus classification can't silently re-drift from each other the way they already did once: fixer.yml's `model` default flipped opus->sonnet in #373, but budget-governor.yml's OPUS_WF_RE and its test still expected the bare 'Self fixer'/'Fixer' name to classify as opus for two days until #369 caught it.",
+  "default_model": "sonnet",
+  "reusable_model_defaults": [
+    { "workflow": ".github/workflows/fixer.yml", "input": "model", "default": "sonnet" },
+    { "workflow": ".github/workflows/issue-build.yml", "input": "model-hint", "default": "sonnet" }
+  ],
+  "pinned_caller_stubs": [
+    { "glob": ".github/workflows/self-fixer*.yml", "job_input": "model", "value": "sonnet" },
+    { "glob": ".github/workflows/self-issue-build.yml", "job_input": "model-hint", "value": "sonnet" }
+  ],
+  "scaffolded_caller_stubs": [
+    { "emit": "fixer-bugs", "job_input": "model", "value": "sonnet" },
+    { "emit": "fixer-30m", "job_input": "model", "value": "sonnet" },
+    { "emit": "fixer", "job_input": "model", "value": "sonnet" },
+    { "emit": "issue-build", "job_input": "model-hint", "value": "sonnet" }
+  ],
+  "escalation_opt_in_only": {
+    "_comment": "issue-build.yml's sensedOpus escalation only runs the MAIN model as opus when a caller explicitly sets model-hint to escalation_value below; no caller may pin that value by default.",
+    "workflow": ".github/workflows/issue-build.yml",
+    "input": "model-hint",
+    "escalation_value": "auto"
+  },
+  "opus_tier_workflow_names": ["deep audit", "org consistency"],
+  "sonnet_tier_workflow_names": [
+    "fixer",
+    "self fixer",
+    "self fixer (30m, bugs+feats)",
+    "self fixer (15m, bugs only)",
+    "issue build",
+    "self issue build",
+    "fixer — propose work as issues (reusable)"
+  ],
+  "budget_governor": {
+    "workflow": ".github/workflows/budget-governor.yml",
+    "opus_regex_env": "OPUS_WF_RE"
+  }
+}

@@ -111,3 +111,7 @@ jobs:
       - name: Assert pr-drain DIRTY-conflict sweep flags sibling builder-PR hot-file collisions
         run: bash scripts/test-pr-drain-dirty-collision.sh
         shell: bash
+
+      - name: Assert model-policy.json stays in sync with fixer/issue-build defaults, caller-stub pins, and budget-governor's opus classification
+        run: bash scripts/test-model-policy.sh
+        shell: bash

@@ -234,14 +234,59 @@ YAML
 
 # --- Backlog pipeline (propose -> investigate -> build) --------------------
 
-emit fixer <<YAML
-name: Fixer
+# 3-tier propose cadence, standardized org-wide 2026-07-17
+# (docs/design/2026-07-17-automation-structure-and-anti-drift.md, propose row): 15m
+# bugs-only / 30m bugs+feats / 1h deep, each its own stub so a distinct workflow name ->
+# distinct concurrency group (fixer.yml's group key is `fixer-${{ github.workflow }}`) and
+# none blocks on or races the others. Mirrors this repo's own self-fixer-bugs.yml /
+# self-fixer-30m.yml / self-fixer.yml pins (model: sonnet — operator directive
+# 2026-07-17: sonnet pinned org-wide, no Opus escalation). All three wire the SAME
+# fixer.yml reusable under different `scope`/`max-turns`/cron — see
+# check-caller-conformance.sh's CANON_TARGETS derivation for why that multiplexing needs
+# its own handling in check (a) (#368).
+
+emit fixer-bugs <<YAML
+name: Fixer (15m, bugs only)
 on:
-  schedule: [{ cron: "17 8 * * *" }]
+  schedule: [{ cron: "9,24,39,54 * * * *" }]
   workflow_dispatch:
 jobs:
   fixer:
     uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      model: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
+      max-turns: 10
+      scope: bugs
+    secrets: inherit
+YAML
+
+emit fixer-30m <<YAML
+name: Fixer (30m, bugs+feats)
+on:
+  schedule: [{ cron: "14,44 * * * *" }]
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      model: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
+      max-turns: 15
+      scope: bugs-feats
+    secrets: inherit
+YAML
+
+emit fixer <<YAML
+name: Fixer (1h, deep)
+on:
+  schedule: [{ cron: "29 * * * *" }]
+  workflow_dispatch:
+jobs:
+  fixer:
+    uses: $REPO/.github/workflows/fixer.yml@$REF
+    with:
+      model: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
+      max-turns: 40
+      scope: deep
     secrets: inherit
 YAML
 

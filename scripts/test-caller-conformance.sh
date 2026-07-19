@@ -75,6 +75,25 @@ assert_not "job-chained autofix inside ci is not flagged" "$healthy" "dead stub 
 d="$(fresh_copy missing-audit)"; rm -f "$d/audit.yml"
 assert_has "(a) missing canonical stub (audit)" "$d" "no live caller stub wires audit\.yml"
 
+# 1b. (#368) The 3-tier fixer cadence (fixer-bugs.yml/fixer-30m.yml/fixer.yml) all wire the
+#     SAME fixer.yml reusable. Dropping all three must fire (a) exactly once for fixer.yml —
+#     not once per stub name (no stub is ever literally named "fixer-bugs.yml" as a reusable).
+d="$(fresh_copy missing-all-fixer-tiers)"; rm -f "$d/fixer.yml" "$d/fixer-bugs.yml" "$d/fixer-30m.yml"
+out="$(bash "$check" "missing-all-fixer" "$d" 2>&1)"
+fixer_warnings="$(printf '%s\n' "$out" | grep -c 'no live caller stub wires fixer\.yml' || true)"
+if [ "$fixer_warnings" -eq 1 ]; then
+  echo "ok   - (a) missing all 3 fixer tiers warns exactly once"
+else
+  echo "FAIL - (a) missing all 3 fixer tiers (expected exactly 1 warning, got $fixer_warnings)"; printf '%s\n' "$out" | sed 's/^/        /'
+  failures=$((failures + 1))
+fi
+
+# 1c. (#368) Any ONE fixer tier present is enough to count the reusable as adopted — check
+#     (a) tests adoption, not that every tier is individually present (matching the existing
+#     self-fixer-30m.yml/self-fixer-bugs.yml "legitimately multiplex" precedent below).
+d="$(fresh_copy partial-fixer-tiers)"; rm -f "$d/fixer.yml" "$d/fixer-30m.yml"
+assert_not "(a) one fixer tier (fixer-bugs.yml) satisfies reusable adoption" "$d" "no live caller stub wires fixer\.yml"
+
 # 2. (b) DEAD workflow_run stub — the exact R5/#263 class.
 d="$(fresh_copy dead-autofix)"
 cat > "$d/claude-autofix.yml" <<'YAML'
