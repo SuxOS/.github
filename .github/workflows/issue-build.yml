@@ -1077,6 +1077,12 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    # Serialize requeue evaluations so two sibling batches' requeue jobs never read the
+    # same stale inFlight/openBuilderPrs snapshot and jointly overshoot parallel-batches
+    # (#526 — the same race class as #434's hot-file pileup).
+    concurrency:
+      group: issue-build-requeue-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Preflight — need the token
         id: pre

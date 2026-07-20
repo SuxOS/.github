@@ -224,8 +224,11 @@ jobs:
             # startup_failure are the exact transient "network blip, OIDC hiccup" modes this
             # workflow exists to clear (see docstring above), and a plain "failure" filter
             # silently skips them while the cycle/label/marker bookkeeping proceeds anyway.
-            run_ids=$(gh run list --repo "$GH_REPO" --commit "$sha" --limit 100 --json databaseId,conclusion \
-              --jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "startup_failure" or .conclusion == "action_required") | .databaseId] | .[]' 2>/dev/null || true)
+            if ! run_ids=$(gh run list --repo "$GH_REPO" --commit "$sha" --limit 100 --json databaseId,conclusion \
+              --jq '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "startup_failure" or .conclusion == "action_required") | .databaseId] | .[]' 2>/dev/null); then
+              echo "::warning::gh run list failed for PR #$n — skipping this run rather than treating the fetch failure as 'no failed runs' (that would burn an unstick cycle and post a false re-ran marker)"
+              echo "::endgroup::"; continue
+            fi
             for rid in $run_ids; do
               gh run rerun "$rid" --repo "$GH_REPO" --failed 2>/dev/null \
                 || echo "::warning::could not rerun failed jobs for run $rid on PR #$n"

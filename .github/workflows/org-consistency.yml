@@ -1,6 +1,6 @@
 name: Org consistency sweep
 
-# Weekly Opus pass over ALL org repos checked out side by side, hunting what no single-repo
+# Nightly Opus pass over ALL org repos checked out side by side, hunting what no single-repo
 # workflow can see: inter-repo drift and cross-repo refactor opportunities. Findings are
 # filed as ordinary issues in the affected repo and flow into the existing issue-build
 # pipeline. Deterministic checks stay where they are (pin-consistency owns SHA
@@ -124,7 +124,7 @@ jobs:
           # step in the org so a future trigger change doesn't quietly need this rediscovered.
           allowed_bots: suxbot[bot]
           prompt: |
-            You are the weekly org-consistency auditor. The workspace root is the org's
+            You are the nightly org-consistency auditor. The workspace root is the org's
             `.github` hub repo (reusable workflows + scaffold); the product repos are checked
             out under ${{ steps.repos.outputs.product_paths }}. You see what no single-repo
             pass can: drift BETWEEN them.
@@ -183,7 +183,7 @@ jobs:
             if [ "$ok" != "true" ]; then
               echo "::warning::skipping finding for unexpected repo '$repo': $title"; continue
             fi
-            body=$(printf '%s\n\n---\nFiled by the weekly org-consistency sweep (SuxOS/.github).' "$body")
+            body=$(printf '%s\n\n---\nFiled by the nightly org-consistency sweep (SuxOS/.github).' "$body")
             if ! url=$(gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body" \
               --label enhancement \
               || gh issue create --repo "SuxOS/$repo" --title "$title" --body "$body"); then
