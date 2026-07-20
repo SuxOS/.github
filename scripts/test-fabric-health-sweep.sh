@@ -216,4 +216,20 @@ else
 fi
 rm -rf "$d6" "$scratch6"
 
+echo "[7/7] Loki rollup jq filter: dotted .collection_ok in the if-condition, not the bare zero-arg-function form (#559)"
+ship_run=$(yq -r '.jobs.spine.steps[] | select(.name == "Ship snapshot to Grafana Cloud (Prometheus + Loki)") | .run' .github/workflows/fabric-health.yml)
+loki_filter=$(printf '%s\n' "$ship_run" | awk '/\{backlog:/,/pr_stuck: \$stuck_total\}/' | sed -e "s/^ *'//" -e "s/}'.*/}/")
+status_ok='{"collection_ok":1,"backlog_total":5,"backlog_zero":0,"budget_throttle_active":false}'
+status_degraded='{"collection_ok":0,"backlog_total":5,"backlog_zero":0,"budget_throttle_active":false}'
+out_ok=$(jq -c --argjson red_total 0 --argjson stuck_total 0 "$loki_filter" <<< "$status_ok" 2>&1)
+rc_ok=$?
+out_degraded=$(jq -c --argjson red_total 0 --argjson stuck_total 0 "$loki_filter" <<< "$status_degraded" 2>&1)
+rc_degraded=$?
+if [ "$rc_ok" -eq 0 ] && [ "$(jq -r .backlog <<< "$out_ok")" = "5" ] \
+    && [ "$rc_degraded" -eq 0 ] && [ "$(jq -r .backlog <<< "$out_degraded")" = "null" ]; then
+  note "jq filter compiles and gates backlog on .collection_ok (ok=$out_ok degraded=$out_degraded)"
+else
+  bad "Loki jq filter: expected valid output with backlog=5 when collection_ok=1 and backlog=null when collection_ok=0, got rc_ok=$rc_ok out_ok=$out_ok rc_degraded=$rc_degraded out_degraded=$out_degraded"
+fi
+
 [ "$fail" -eq 0 ] && { echo "fabric-health sweep regression guard: PASS"; exit 0; } || { echo "fabric-health sweep regression guard: FAIL"; exit 1; }
