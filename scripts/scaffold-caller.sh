@@ -52,11 +52,21 @@ REPO="SuxOS/.github"
 mkdir -p "$OUT_DIR"
 
 # emit NAME <<'YAML' ... YAML  — writes $OUT_DIR/NAME.yml, honouring --force.
+# Checks both the .yml and .yaml extension before writing (mirroring
+# check-caller-conformance.sh's treatment of them as interchangeable) so a caller's
+# customized NAME.yaml stub is never shadowed by a freshly-scaffolded NAME.yml (#568).
 emit() {
   local dest="$OUT_DIR/$1.yml"
-  if [ -e "$dest" ] && [ "$FORCE" -ne 1 ]; then
-    echo "skip   $dest (exists; --force to overwrite)"
-    return
+  local alt="$OUT_DIR/$1.yaml"
+  if [ "$FORCE" -ne 1 ]; then
+    if [ -e "$dest" ]; then
+      echo "skip   $dest (exists; --force to overwrite)"
+      return
+    fi
+    if [ -e "$alt" ]; then
+      echo "skip   $alt (exists; --force to overwrite)"
+      return
+    fi
   fi
   cat > "$dest"
   echo "wrote  $dest"

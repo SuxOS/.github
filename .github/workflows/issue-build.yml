@@ -209,6 +209,10 @@ jobs:
       spine_collection_ok: ${{ steps.spine.outputs.collection_ok }}
       # This repo's own drain-controller recommendation (#476), consumed by `requeue` below.
       spine_recommended_parallel_batches: ${{ steps.spine.outputs.recommended_parallel_batches }}
+      # Fleet-wide budget-governor headroom (#501/#565), consumed by `requeue`'s headroom
+      # dampener in place of the coarse yellow/green stand-in.
+      spine_budget_opus_avail_min: ${{ steps.spine.outputs.budget_opus_avail_min }}
+      spine_budget_total_avail_min: ${{ steps.spine.outputs.budget_total_avail_min }}
     steps:
       - name: Preflight — need the token
         id: pre
@@ -268,6 +272,8 @@ jobs:
           workflow_red_total=""
           collection_ok=""
           recommended_parallel_batches=""
+          budget_opus_avail_min=""
+          budget_total_avail_min=""
           age_min=""
           reason=""
           repo_name="${GITHUB_REPOSITORY##*/}"
@@ -306,6 +312,15 @@ jobs:
                   recommended_parallel_batches=$( { jq -r --arg r "$repo_name" \
                     '(.repos // [])[] | select(.repo == $r) | select(.collection.integral == 1) | .recommended_parallel_batches // empty' \
                     /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
+                  # Fleet-wide budget-governor headroom (#501, already structural in
+                  # fabric-status.json — see fabric-health.yml's opus_avail_min/total_avail_min
+                  # comment): the drain-controller step below reads these to replace its
+                  # yellow/green stand-in with the real ratio (#565). Same repo-independent
+                  # top-level field as backlog_total, not per-repo like recommended_parallel_batches.
+                  budget_opus_avail_min=$( { jq -r '.budget_opus_avail_min // empty' \
+                    /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
+                  budget_total_avail_min=$( { jq -r '.budget_total_avail_min // empty' \
+                    /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   if [ -z "$backlog_total" ] || [ -z "$collection_ok" ]; then
                     reason="fabric-status.json missing expected fields"
                   else
@@ -328,6 +343,8 @@ jobs:
             echo "workflow_red_total=$workflow_red_total"
             echo "collection_ok=$collection_ok"
             echo "recommended_parallel_batches=$recommended_parallel_batches"
+            echo "budget_opus_avail_min=$budget_opus_avail_min"
+            echo "budget_total_avail_min=$budget_total_avail_min"
           } >> "$GITHUB_OUTPUT"
 
       - name: Non-buildable labels
@@ -952,8 +969,54 @@ jobs:
                 gh issue close "$n" --repo "$GITHUB_REPOSITORY" --reason "not planned" \
                   --comment "🤖 Closed as superseded/redundant (not shipped in this PR): $reason. Run: $RUN_URL" 2>/dev/null || true
               else
-                gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
-                  --body "🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+                # Escalation ladder (#562) — Loop 1's analog to pr-unstick.yml's PR-side
+                # cycle marker (pr-unstick.yml:171-250): an issue that just cycles
+                # claim -> attempt -> drop forever burns a read/judge turn every time with
+                # nothing mechanical flagging the repeat (CLAUDE.md's own #439 precedent —
+                # dropped once already for exactly this before a human noticed and scoped
+                # it by hand). Same marker-comment idiom, applied to the issue instead of
+                # the PR: upsert a `<!-- issue-build:drop cycle=N -->` comment so the count
+                # survives across separate builder runs/sessions.
+                DROP_MARKER='<!-- issue-build:drop'
+                DROP_ESCALATE_THRESHOLD=2
+                comments='[]'
+                if ! comments=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}/comments" --paginate 2>/dev/null); then
+                  echo "::warning::could not fetch comments for issue #$n — treating drop-cycle count as 0 (not escalating) rather than failing the disposition step"
+                  comments='[]'
+                fi
+                marker=$(echo "$comments" | jq -c --arg m "$DROP_MARKER" '[.[] | select(.body | startswith($m))] | last' 2>/dev/null || echo 'null')
+                cycle=0
+                comment_id=""
+                if [ "$marker" != "null" ] && [ -n "$marker" ]; then
+                  comment_id=$(echo "$marker" | jq -r '.id' 2>/dev/null || true)
+                  body=$(echo "$marker" | jq -r '.body' 2>/dev/null || true)
+                  cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
+                  cycle=${cycle:-0}
+                fi
+                next_cycle=$((cycle + 1))
+                marker_line="${DROP_MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
+
+                if [ "$next_cycle" -ge "$DROP_ESCALATE_THRESHOLD" ]; then
+                  # Past the threshold, don't just release the claim back to the same fate —
+                  # pin it out of re-pick (needs-human is already in the shared
+                  # nonbuildable-labels floor, .github/actions/nonbuildable-labels) and point
+                  # at CLAUDE.md's own sanctioned remedy for an issue that keeps needing a
+                  # scoping pass: a docs/design/YYYY-MM-DD-*.md doc is a legitimate,
+                  # gate-passing build in its own right (precedent: #433, #439).
+                  gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
+                  summary_line="🤖 Dropped from this batch for the ${next_cycle}th time (not shipped in this PR): $reason. This has now cycled claim → attempt → drop ${next_cycle} times with nothing landing — applying \`needs-human\` instead of releasing it back to the pool, so it stops being re-selected and re-dropped. This repo's CLAUDE.md sanctions a scoping doc (\`docs/design/YYYY-MM-DD-*.md\`, re-deriving a concrete plan and sizing it into small buildable slices) as a real, gate-passing build for exactly this situation — not a dodge. Run: $RUN_URL"
+                else
+                  summary_line="🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL"
+                fi
+
+                new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
+                if [ -n "$comment_id" ]; then
+                  gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
+                    || echo "::warning::could not update the drop-cycle marker comment on issue #$n"
+                else
+                  gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$new_body" 2>/dev/null \
+                    || echo "::warning::could not post the drop-cycle marker comment on issue #$n"
+                fi
               fi
             done
 
@@ -1164,6 +1227,8 @@ jobs:
           USE_RECOMMENDED: ${{ inputs.use-recommended-parallel-batches }}
           SPINE_AVAILABLE: ${{ needs.select.outputs.spine_available }}
           SPINE_RECOMMENDED_PARALLEL_BATCHES: ${{ needs.select.outputs.spine_recommended_parallel_batches }}
+          SPINE_BUDGET_OPUS_AVAIL_MIN: ${{ needs.select.outputs.spine_budget_opus_avail_min }}
+          SPINE_BUDGET_TOTAL_AVAIL_MIN: ${{ needs.select.outputs.spine_budget_total_avail_min }}
           THROTTLE_LEVEL: ${{ steps.throttle.outputs.level }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           INCLUDE: ${{ inputs.include }}
@@ -1193,11 +1258,34 @@ jobs:
             const rawRecommended = rawRecommendedStr === "" ? NaN : Number(rawRecommendedStr);
             let effectiveCap = cap;
             if (spineAvailable && Number.isFinite(rawRecommended) && rawRecommended >= 0) {
-              // check-throttle only exposes the coarse green/yellow/red level, not
-              // budget-governor's actual opus_avail_min/total_avail_min ratio (that's only
-              // in the tracking-issue body as prose today, #501) — 0.5 on yellow is a
-              // deliberate stand-in until #501 lands a structured fraction to read instead.
-              const headroomFraction = process.env.THROTTLE_LEVEL === "yellow" ? 0.5 : 1;
+              // budget-governor's weekly runner-minute budgets (#501/#565) — the same
+              // OPUS_BUDGET_MIN/TOTAL_BUDGET_MIN constants budget-governor.yml computes
+              // opus_avail_min/total_avail_min against (its own env block, keep these two
+              // numbers in sync with that file if it's ever recalibrated). fabric-status.json
+              // exposes the two *_avail_min numbers structurally (fabric-health.yml, #501) but
+              // not the capacity they're a fraction of, so the denominator has to live here.
+              const OPUS_BUDGET_MIN = 900;
+              const TOTAL_BUDGET_MIN = 12000;
+              // Empty-string-means-NaN, same as rawRecommendedStr above — Number("") is 0, not
+              // NaN, which would otherwise misread "field absent" as "zero minutes available"
+              // and force maximum dampening instead of falling back to the THROTTLE_LEVEL guess.
+              const opusAvailMinStr = process.env.SPINE_BUDGET_OPUS_AVAIL_MIN || "";
+              const opusAvailMin = opusAvailMinStr === "" ? NaN : Number(opusAvailMinStr);
+              const totalAvailMinStr = process.env.SPINE_BUDGET_TOTAL_AVAIL_MIN || "";
+              const totalAvailMin = totalAvailMinStr === "" ? NaN : Number(totalAvailMinStr);
+              // Real headroom ratio in place of the coarse yellow/green stand-in (#565): the
+              // more-constrained tier governs, same "either bucket can force it" logic
+              // budget-governor.yml's own level computation uses. Falls back to the old
+              // THROTTLE_LEVEL-based guess when the structured fields aren't available yet
+              // (governor hasn't run, or a pre-#501 body) — fail-soft, not fail-closed.
+              let headroomFraction;
+              if (Number.isFinite(opusAvailMin) && Number.isFinite(totalAvailMin)) {
+                const opusFraction = Math.max(0, Math.min(1, opusAvailMin / OPUS_BUDGET_MIN));
+                const totalFraction = Math.max(0, Math.min(1, totalAvailMin / TOTAL_BUDGET_MIN));
+                headroomFraction = Math.min(opusFraction, totalFraction);
+              } else {
+                headroomFraction = process.env.THROTTLE_LEVEL === "yellow" ? 0.5 : 1;
+              }
               const dampened = Math.round(rawRecommended * headroomFraction);
               const recommendedCeiling = Math.max(cap, dampened);
               core.info(`drain-controller: raw_output=${rawRecommended} headroom_fraction=${headroomFraction} -> dampened=${dampened} vs static parallel-batches=${cap} -> recommended ceiling=${recommendedCeiling} (${useRecommended ? "USING" : "comparison-only, not applied"})`);

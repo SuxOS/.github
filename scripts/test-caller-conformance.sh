@@ -263,5 +263,31 @@ jobs:
 YAML
 assert_self_has "self mode: stale non-@main ref on self-* stub caught" "$d" "stub wires audit\.yml at @v1\.2\.3"
 
+# 9. (#569) A quoted `uses: "SuxOS/...@main"` line must be recognized the same as the
+#    unquoted form scaffold-caller.sh emits — must NOT falsely report (a) missing.
+d="$(fresh_copy quoted-uses)"
+sed -i 's#uses: SuxOS/\.github/\.github/workflows/audit\.yml@main#uses: "SuxOS/.github/.github/workflows/audit.yml@main"#' "$d/audit.yml"
+assert_not "(#569) quoted uses: line still counts as wiring audit.yml" "$d" "no live caller stub wires audit\.yml"
+
+# 9b. (#569) A dead workflow_run stub with a quoted uses: line is still caught by (b).
+d="$(fresh_copy quoted-dead-autofix)"
+cat > "$d/claude-autofix.yml" <<'YAML'
+name: Claude autofix
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  autofix:
+    uses: "SuxOS/.github/.github/workflows/claude-autofix.yml@main"
+    secrets: inherit
+YAML
+assert_has "(#569) dead workflow_run stub with quoted uses: line still caught" "$d" "dead stub 'claude-autofix\.yml' triggers on workflow_run"
+
+# 9c. (#569) A quoted stale-ref stub is still caught by (d).
+d="$(fresh_copy quoted-stale-ref)"
+sed -i 's#uses: SuxOS/\.github/\.github/workflows/audit\.yml@main#uses: "SuxOS/.github/.github/workflows/audit.yml@v1.2.3"#' "$d/audit.yml"
+assert_has "(#569) quoted stale non-@main ref still caught" "$d" "stub wires audit\.yml at @v1\.2\.3"
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all caller-conformance assertions passed"
