@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Unit-tests pr-drain.yml's DIRTY-CONFLICT sweep for the sibling hot-file-collision
-# diagnostic (SuxOS/.github#437).
+# Unit-tests pr-drain.yml's DIRTY-CONFLICT sweep: the sibling hot-file-collision
+# diagnostic (SuxOS/.github#437), the live-recheck candidate widening against a stale
+# list snapshot (#484/#506), the `keep` opt-out (#528), and the `building`-release
+# regex covering issue-build's "Related to #n" wording (#509).
 #
 # Even with the requeue cap fixed (#434), issue-build.yml's `parallel-batches` default
 # still allows 2 concurrently-open bot/issue-build-* PRs by design. If they happen to
@@ -36,8 +38,14 @@ fi
 pr100='{"number":100,"title":"t100","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-100","files":[{"path":"CLAUDE.md"},{"path":"foo.txt"}]}'
 pr200='{"number":200,"title":"t200","isDraft":false,"labels":[],"mergeStateStatus":"CLEAN","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-200","files":[{"path":"CLAUDE.md"},{"path":"bar.txt"}]}'
 pr300='{"number":300,"title":"t300","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-300","files":[{"path":"onlymine.txt"}]}'
+pr400='{"number":400,"title":"t400","isDraft":false,"labels":[],"mergeStateStatus":"UNKNOWN","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-400","files":[{"path":"onlymine.txt"}]}'
+pr500='{"number":500,"title":"t500","isDraft":false,"labels":[{"name":"keep"}],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-500","files":[{"path":"onlymine.txt"}]}'
 view100='{"number":100,"body":"Closes #1","headRefName":"bot/issue-build-100","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
 view300='{"number":300,"body":"Closes #3","headRefName":"bot/issue-build-300","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
+view400='{"number":400,"body":"Closes #4","headRefName":"bot/issue-build-400","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
+view500='{"number":500,"body":"Closes #5","headRefName":"bot/issue-build-500","isDraft":false,"labels":[{"name":"keep"}],"mergeStateStatus":"DIRTY"}'
+pr600='{"number":600,"title":"t600","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-600","files":[{"path":"onlymine.txt"}]}'
+view600='{"number":600,"body":"Related to #7 (not auto-closed — no disposition record, please verify)\nRelated to #8 (not auto-closed — no disposition record, please verify)","headRefName":"bot/issue-build-600","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
 
 # $1 = scenario name, $2 = PRS_JSON array, $3 = dirty PR number, $4 = its `gh pr view` JSON,
 # $5 = comments-log path (truncated first). Runs the real extracted script.
@@ -54,7 +62,7 @@ run_scenario() {
         ;;
       "pr comment") printf 'COMMENT %s: %s\n' "$3" "$5" >> "$LOG" ;;
       "pr close") return 0 ;;
-      "issue edit") return 0 ;;
+      "issue edit") printf 'ISSUE_EDIT %s\n' "$3" >> "$LOG"; return 0 ;;
       *) return 0 ;;
     esac
   }
@@ -64,7 +72,7 @@ run_scenario() {
     bash -e -c "$drain_run" >/dev/null 2>&1
 }
 
-echo "[1/2] DIRTY PR sharing a file with an open sibling builder PR"
+echo "[1/5] DIRTY PR sharing a file with an open sibling builder PR"
 log1=$(mktemp)
 run_scenario "collision" "[$pr100,$pr200]" "100" "$view100" "$log1"
 if grep -q 'COMMENT 100:.*Hot-file collision with sibling builder PR(s): #200 on CLAUDE.md.*#437' "$log1"; then
@@ -74,7 +82,7 @@ else
 fi
 rm -f "$log1"
 
-echo "[2/2] DIRTY PR with no file overlap against the same open sibling"
+echo "[2/5] DIRTY PR with no file overlap against the same open sibling"
 log2=$(mktemp)
 run_scenario "no-collision" "[$pr300,$pr200]" "300" "$view300" "$log2"
 if grep -q 'COMMENT 300:' "$log2" && ! grep -q 'Hot-file collision' "$log2"; then
@@ -83,6 +91,36 @@ else
   bad "expected a plain close comment with no collision note, got: $(cat "$log2")"
 fi
 rm -f "$log2"
+
+echo "[3/5] list snapshot reads non-DIRTY (UNKNOWN) but live re-check confirms DIRTY (SuxOS/.github#484/#506)"
+log3=$(mktemp)
+run_scenario "stale-snapshot" "[$pr400]" "400" "$view400" "$log3"
+if grep -q 'COMMENT 400:' "$log3"; then
+  note "PR closed on live re-check even though the list snapshot's mergeStateStatus wasn't DIRTY"
+else
+  bad "expected #400 to be closed via live re-check despite a stale list snapshot, got: $(cat "$log3")"
+fi
+rm -f "$log3"
+
+echo "[4/5] DIRTY builder PR labeled \`keep\` is left alone, same as \`hold\` (SuxOS/.github#528)"
+log4=$(mktemp)
+run_scenario "keep-label" "[$pr500]" "500" "$view500" "$log4"
+if [ ! -s "$log4" ]; then
+  note "keep-labeled DIRTY PR was not commented/closed"
+else
+  bad "expected #500 (keep-labeled) to be left alone, got: $(cat "$log4")"
+fi
+rm -f "$log4"
+
+echo "[5/5] DIRTY builder PR linked only via 'Related to #n' still releases \`building\` (SuxOS/.github#509)"
+log5=$(mktemp)
+run_scenario "related-to-wording" "[$pr600]" "600" "$view600" "$log5"
+if grep -q 'ISSUE_EDIT 7' "$log5" && grep -q 'ISSUE_EDIT 8' "$log5"; then
+  note "building stripped from #7 and #8 via 'Related to #n' wording"
+else
+  bad "expected ISSUE_EDIT for #7 and #8, got: $(cat "$log5")"
+fi
+rm -f "$log5"
 
 if [ "$fail" -eq 0 ]; then
   echo "All pr-drain DIRTY-collision tests passed."

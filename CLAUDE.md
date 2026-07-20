@@ -194,3 +194,13 @@ so a caller stub that wants to derive a `with:` input from a file in this repo (
 and exposes an `outputs:`, with the reusable-calling job pulling it via `needs.<job>.outputs.x`
 — it can't just add a step ahead of its own `uses:` line. `pin-consistency.yml`'s
 `managed-repos` job and `self-fabric-health.yml`'s `load-repos` job are the reference shape.
+
+A builder session's own `gh auth status` token (this job's default token — not a workflow's
+minted `mint-app-token` App token) is scoped to the single repo the job runs in (`SuxOS/.github`)
+— `gh repo view SuxOS/sux` / `gh pr view N --repo SuxOS/claude-config` fail with "Could not
+resolve to a Repository," which reads like the repo doesn't exist rather than like a permissions
+error. This has repeatedly blocked diagnosing incidents reported against caller repos purely
+because the session can't read that repo's PR/issue history (#484, #492, #506 — #484 alone was
+dropped 3 times for exactly this). There's no in-repo workaround: escalate to a human with
+broader `gh` access for that one lookup, or reason from evidence already pasted into the issue
+body/comments rather than guessing at a live-only bug in code you can't observe.

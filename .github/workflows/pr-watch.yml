@@ -61,8 +61,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
-            --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt)
+          if ! prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit "$PR_LIMIT" \
+            --json number,title,url,isDraft,labels,mergeStateStatus,autoMergeRequest,statusCheckRollup,updatedAt); then
+            echo "::error::gh pr list failed — aborting scan instead of posting a false-empty tracking issue"
+            exit 1
+          fi
 
           # gh pr list returns created-desc order with no way to narrow further, so hitting
           # the cap silently drops the OLDEST open PRs — exactly the ones most likely to be

@@ -157,27 +157,39 @@ jobs:
           # Builder PRs only (head branch bot/issue-build-*) — a human or other bot PR
           # with a real conflict is left for its author, not closed out from under them.
           # `hold` still opts a PR out, same as CLOSE-STALE.
+          #
+          # Candidate set is every open, non-draft, non-hold builder PR — NOT pre-filtered
+          # on this batch `gh pr list` call's mergeStateStatus (SuxOS/.github#484 / #506).
+          # GitHub computes mergeStateStatus asynchronously and a list-query snapshot can
+          # read UNKNOWN/stale for a PR that a fresh per-PR `gh pr view` correctly reports
+          # DIRTY; pre-filtering here would let that PR's real DIRTY state be invisible for
+          # the sweep's entire lifetime, since it never even reaches the live re-check below
+          # that already asks `gh pr view` for the ground truth. Widening the candidate set
+          # costs one extra `gh pr view` per open builder PR that ISN'T actually DIRTY (small
+          # — bounded by issue-build's parallel-batches cap) and changes nothing about the
+          # close decision itself, which the live re-check still makes.
           dirty=$(printf '%s' "$prs" | jq -r '
             [.[] | select(.isDraft | not)
               | select(.headRefName | startswith("bot/issue-build-"))
-              | select(.mergeStateStatus == "DIRTY")
               | select(([.labels[].name] | index("hold")) | not)
+              | select(([.labels[].name] | index("keep")) | not)
               | .number] | .[]')
 
-          echo "DIRTY-conflict candidate set: $(printf '%s' "$dirty" | tr '\n' ' ')"
+          echo "DIRTY-conflict live-check candidate set: $(printf '%s' "$dirty" | tr '\n' ' ')"
 
           for n in $dirty; do
             echo "::group::DIRTY builder PR #$n"
             # Re-read this PR's live state; skip if it no longer qualifies (a concurrent
-            # bot may have already rebased/closed it, or a human added `hold`).
+            # bot may have already rebased/closed it, or a human added `hold`/`keep`).
             live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeStateStatus 2>/dev/null) \
               || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
             if ! printf '%s' "$live" | jq -e '
                 (.isDraft | not)
                 and (.headRefName | startswith("bot/issue-build-"))
                 and (.mergeStateStatus == "DIRTY")
-                and (([.labels[].name] | index("hold")) | not)' >/dev/null; then
-              echo "#$n no longer DIRTY-eligible (state changed) — skipping"
+                and (([.labels[].name] | index("hold")) | not)
+                and (([.labels[].name] | index("keep")) | not)' >/dev/null; then
+              echo "#$n not DIRTY-eligible on live re-check — skipping"
               echo "::endgroup::"
               continue
             fi
@@ -216,11 +228,15 @@ jobs:
             gh pr comment "$n" --body "🧹 Closing — this builder PR has a real merge conflict with main (not just behind), and no existing loop resolves that short of a human.${note} Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#237 / #239." 2>/dev/null || true
             gh pr close "$n" && echo "closed #$n (DIRTY)" || echo "::warning::could not close #$n (see gh error above)"
 
-            # Strip `building` from every issue this PR claimed via a closing keyword, so
-            # issue-build.yml's selector picks them up on its next run instead of waiting
-            # on the reaper's REAP_STALE_HOURS backstop.
+            # Strip `building` from every issue this PR claimed, via either a real closing
+            # keyword or issue-build.yml's "Related to #n" wording (SuxOS/.github#509) — the
+            # latter is what a multi-issue batch with no valid disposition.json gets instead
+            # of `Closes #n` (issue-build.yml:974), and per its own comment that's a routine
+            # outcome, not rare, so without this those issues' `building` claim would only
+            # ever release via the reaper's REAP_STALE_HOURS backstop this sweep exists to
+            # bypass.
             nums=$(printf '%s' "$live" | jq -r '.body // ""' \
-              | grep -ioE '\b(close[sd]?|fix(es|ed)?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+              | grep -ioE '\b(close[sd]?|fix(es|ed)?|resolve[sd]?|related to)[[:space:]]+#[0-9]+' \
               | grep -oE '[0-9]+' || true)
             for num in $nums; do
               gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \
