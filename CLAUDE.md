@@ -204,3 +204,14 @@ because the session can't read that repo's PR/issue history (#484, #492, #506 �
 dropped 3 times for exactly this). There's no in-repo workaround: escalate to a human with
 broader `gh` access for that one lookup, or reason from evidence already pasted into the issue
 body/comments rather than guessing at a live-only bug in code you can't observe.
+
+`gh issue list --json <fields>` does NOT support `authorAssociation` (or a numeric author id) —
+`gh issue list --json number,authorAssociation` errors "Unknown JSON field," even though
+`gh pr list --json ...,authorAssociation` and the raw REST endpoint both expose it fine. A bash
+collector that needs an issue's trust info (e.g. the isTrusted predicate, #186/#193) can't get it
+from `gh issue list` at all — use `gh api -X GET "repos/OWNER/REPO/issues?state=open&per_page=100"
+--paginate --slurp` instead (exhaustive by construction, no separate cap-hit check needed;
+`--slurp` always wraps pages as an array-of-arrays — even a single empty page comes back `[[]]`,
+not `[]` — so flatten with `jq '(add // [])'`, the `// []` guarding a shim/edge-case bare `[]`
+input under `set -e`), then drop `.pull_request != null` entries since the raw issues endpoint
+also returns PRs. See fabric-health.yml's backlog collector (#521) for the reference shape.
