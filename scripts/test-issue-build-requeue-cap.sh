@@ -200,6 +200,16 @@ const checkDrain = async (name, opts, expectDispatched, expectDrainSubstring) =>
     2, "recommended ceiling=2",
   );
 
+  // 11. Spine available but the recommendation field itself is empty (documented fail-soft
+  //     contract: empty means "no data for this field", distinct from spine unavailability,
+  //     #515) -> must be treated as unavailable, not coerced by Number('') === 0 into a
+  //     bogus "recommend 0" that would otherwise still pass the >=0 check.
+  await checkDrain(
+    "spine available but recommendation field is empty -> treated as unavailable, not Number('')=0",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: "", throttleLevel: "green" },
+    2, null,
+  );
+
   if (failures) { console.error(`\n${failures} assertion(s) failed`); process.exit(1); }
   console.log("\nall requeue-cap assertions passed");
 })();

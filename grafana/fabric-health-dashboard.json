@@ -606,6 +606,45 @@
           "legendFormat": "{{repo}}/{{collector}}"
         }
       ]
+    },
+    {
+      "id": 13,
+      "title": "Drain controller: merged PRs, integral error, recommended batches by repo",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "last_over_time(suxos_merged_prs_in_window[20m])",
+          "legendFormat": "merged {{repo}}"
+        },
+        {
+          "refId": "B",
+          "expr": "last_over_time(suxos_drain_integral_error[20m])",
+          "legendFormat": "integral_error {{repo}}"
+        },
+        {
+          "refId": "C",
+          "expr": "last_over_time(suxos_recommended_parallel_batches[20m])",
+          "legendFormat": "recommended_batches {{repo}}"
+        }
+      ]
     }
   ]
 }

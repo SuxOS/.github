@@ -1138,7 +1138,8 @@ jobs:
             // logged for comparison, only APPLIED when the flag is flipped true.
             const useRecommended = String(process.env.USE_RECOMMENDED) === "true";
             const spineAvailable = process.env.SPINE_AVAILABLE === "true";
-            const rawRecommended = Number(process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES);
+            const rawRecommendedStr = process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES || "";
+            const rawRecommended = rawRecommendedStr === "" ? NaN : Number(rawRecommendedStr);
             let effectiveCap = cap;
             if (spineAvailable && Number.isFinite(rawRecommended) && rawRecommended >= 0) {
               // check-throttle only exposes the coarse green/yellow/red level, not
