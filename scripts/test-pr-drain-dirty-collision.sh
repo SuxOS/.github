@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Unit-tests pr-drain.yml's DIRTY-CONFLICT sweep: the sibling hot-file-collision
 # diagnostic (SuxOS/.github#437), the live-recheck candidate widening against a stale
-# list snapshot (#484/#506), the `keep` opt-out (#528), and the `building`-release
-# regex covering issue-build's "Related to #n" wording (#509).
+# list snapshot (#484/#506), the `keep` opt-out (#528), the `building`-release regex
+# covering issue-build's "Related to #n" wording (#509), and the stable-`mergeable`
+# gate that replaced the flapping `mergeStateStatus == DIRTY` check (#570): only
+# `mergeable == "CONFLICTING"` triggers close+requeue, while `MERGEABLE`
+# (blocked-not-conflicting) and `UNKNOWN` (still computing) are left alone.
 #
 # Even with the requeue cap fixed (#434), issue-build.yml's `parallel-batches` default
 # still allows 2 concurrently-open bot/issue-build-* PRs by design. If they happen to
@@ -40,14 +43,27 @@ pr200='{"number":200,"title":"t200","isDraft":false,"labels":[],"mergeStateStatu
 pr300='{"number":300,"title":"t300","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-300","files":[{"path":"onlymine.txt"}]}'
 pr400='{"number":400,"title":"t400","isDraft":false,"labels":[],"mergeStateStatus":"UNKNOWN","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-400","files":[{"path":"onlymine.txt"}]}'
 pr500='{"number":500,"title":"t500","isDraft":false,"labels":[{"name":"keep"}],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-500","files":[{"path":"onlymine.txt"}]}'
-view100='{"number":100,"body":"Closes #1","headRefName":"bot/issue-build-100","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
-view300='{"number":300,"body":"Closes #3","headRefName":"bot/issue-build-300","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
-view400='{"number":400,"body":"Closes #4","headRefName":"bot/issue-build-400","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
-view500='{"number":500,"body":"Closes #5","headRefName":"bot/issue-build-500","isDraft":false,"labels":[{"name":"keep"}],"mergeStateStatus":"DIRTY"}'
+# Live-recheck fixtures gate on the stable `mergeable` enum (SuxOS/.github#570), not the
+# flapping `mergeStateStatus`. `mergeStateStatus` is retained in these fixtures only to
+# prove the gate no longer keys off it (see scenario [7], where it reads DIRTY yet the PR
+# is left alone because `mergeable != CONFLICTING`).
+view100='{"number":100,"body":"Closes #1","headRefName":"bot/issue-build-100","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}'
+view300='{"number":300,"body":"Closes #3","headRefName":"bot/issue-build-300","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}'
+view400='{"number":400,"body":"Closes #4","headRefName":"bot/issue-build-400","isDraft":false,"labels":[],"mergeStateStatus":"BLOCKED","mergeable":"CONFLICTING"}'
+view500='{"number":500,"body":"Closes #5","headRefName":"bot/issue-build-500","isDraft":false,"labels":[{"name":"keep"}],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}'
 pr600='{"number":600,"title":"t600","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-600","files":[{"path":"onlymine.txt"}]}'
-view600='{"number":600,"body":"Related to #7 (not auto-closed — no disposition record, please verify)\nRelated to #8 (not auto-closed — no disposition record, please verify)","headRefName":"bot/issue-build-600","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
+view600='{"number":600,"body":"Related to #7 (not auto-closed — no disposition record, please verify)\nRelated to #8 (not auto-closed — no disposition record, please verify)","headRefName":"bot/issue-build-600","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}'
 pr700='{"number":700,"title":"t700","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-700","files":[{"path":"onlymine.txt"}]}'
-view700='{"number":700,"body":"This change is not related to #9. Related to #10 (not auto-closed — no disposition record, please verify)","headRefName":"bot/issue-build-700","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY"}'
+view700='{"number":700,"body":"This change is not related to #9. Related to #10 (not auto-closed — no disposition record, please verify)","headRefName":"bot/issue-build-700","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"CONFLICTING"}'
+# #570 regression: a builder PR whose flapping `mergeStateStatus` reads DIRTY but whose
+# stable `mergeable` is MERGEABLE (mergeable-but-BLOCKED on checks/auto-merge, NOT a real
+# conflict) must be LEFT ALONE — the old gate would have wrongly closed it.
+pr800='{"number":800,"title":"t800","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-800","files":[{"path":"onlymine.txt"}]}'
+view800='{"number":800,"body":"Closes #11","headRefName":"bot/issue-build-800","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"MERGEABLE"}'
+# #570: `mergeable == UNKNOWN` (GitHub still computing) must also be left alone — only a
+# confirmed CONFLICTING read triggers close+requeue.
+pr900='{"number":900,"title":"t900","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","autoMergeRequest":null,"updatedAt":"2026-07-18T00:00:00Z","headRefName":"bot/issue-build-900","files":[{"path":"onlymine.txt"}]}'
+view900='{"number":900,"body":"Closes #12","headRefName":"bot/issue-build-900","isDraft":false,"labels":[],"mergeStateStatus":"DIRTY","mergeable":"UNKNOWN"}'
 
 # $1 = scenario name, $2 = PRS_JSON array, $3 = dirty PR number, $4 = its `gh pr view` JSON,
 # $5 = comments-log path (truncated first). Runs the real extracted script.
@@ -74,7 +90,7 @@ run_scenario() {
     bash -e -c "$drain_run" >/dev/null 2>&1
 }
 
-echo "[1/6] DIRTY PR sharing a file with an open sibling builder PR"
+echo "[1/8] CONFLICTING PR sharing a file with an open sibling builder PR"
 log1=$(mktemp)
 run_scenario "collision" "[$pr100,$pr200]" "100" "$view100" "$log1"
 if grep -q 'COMMENT 100:.*Hot-file collision with sibling builder PR(s): #200 on CLAUDE.md.*#437' "$log1"; then
@@ -84,7 +100,7 @@ else
 fi
 rm -f "$log1"
 
-echo "[2/6] DIRTY PR with no file overlap against the same open sibling"
+echo "[2/8] CONFLICTING PR with no file overlap against the same open sibling"
 log2=$(mktemp)
 run_scenario "no-collision" "[$pr300,$pr200]" "300" "$view300" "$log2"
 if grep -q 'COMMENT 300:' "$log2" && ! grep -q 'Hot-file collision' "$log2"; then
@@ -94,17 +110,17 @@ else
 fi
 rm -f "$log2"
 
-echo "[3/6] list snapshot reads non-DIRTY (UNKNOWN) but live re-check confirms DIRTY (SuxOS/.github#484/#506)"
+echo "[3/8] list snapshot's stale/flapping mergeStateStatus is ignored; live re-check confirms mergeable==CONFLICTING (SuxOS/.github#484/#506/#570)"
 log3=$(mktemp)
 run_scenario "stale-snapshot" "[$pr400]" "400" "$view400" "$log3"
 if grep -q 'COMMENT 400:' "$log3"; then
-  note "PR closed on live re-check even though the list snapshot's mergeStateStatus wasn't DIRTY"
+  note "PR closed on live re-check (mergeable==CONFLICTING) even though its mergeStateStatus read BLOCKED"
 else
-  bad "expected #400 to be closed via live re-check despite a stale list snapshot, got: $(cat "$log3")"
+  bad "expected #400 to be closed via live re-check despite a stale/flapping mergeStateStatus, got: $(cat "$log3")"
 fi
 rm -f "$log3"
 
-echo "[4/6] DIRTY builder PR labeled \`keep\` is left alone, same as \`hold\` (SuxOS/.github#528)"
+echo "[4/8] CONFLICTING builder PR labeled \`keep\` is left alone, same as \`hold\` (SuxOS/.github#528)"
 log4=$(mktemp)
 run_scenario "keep-label" "[$pr500]" "500" "$view500" "$log4"
 if [ ! -s "$log4" ]; then
@@ -114,7 +130,7 @@ else
 fi
 rm -f "$log4"
 
-echo "[5/6] DIRTY builder PR linked only via 'Related to #n' still releases \`building\` (SuxOS/.github#509)"
+echo "[5/8] CONFLICTING builder PR linked only via 'Related to #n' still releases \`building\` (SuxOS/.github#509)"
 log5=$(mktemp)
 run_scenario "related-to-wording" "[$pr600]" "600" "$view600" "$log5"
 if grep -q 'ISSUE_EDIT 7' "$log5" && grep -q 'ISSUE_EDIT 8' "$log5"; then
@@ -124,7 +140,7 @@ else
 fi
 rm -f "$log5"
 
-echo "[6/6] a negated 'not related to #n' does NOT release that issue's building claim (SuxOS/.github#538)"
+echo "[6/8] a negated 'not related to #n' does NOT release that issue's building claim (SuxOS/.github#538)"
 log6=$(mktemp)
 run_scenario "negated-related-to" "[$pr700]" "700" "$view700" "$log6"
 if grep -q 'ISSUE_EDIT 10' "$log6" && ! grep -q 'ISSUE_EDIT 9' "$log6"; then
@@ -133,6 +149,26 @@ else
   bad "expected ISSUE_EDIT for #10 only (not #9), got: $(cat "$log6")"
 fi
 rm -f "$log6"
+
+echo "[7/8] flapping mergeStateStatus==DIRTY but stable mergeable==MERGEABLE (blocked, not conflicting) is LEFT ALONE (SuxOS/.github#570)"
+log7=$(mktemp)
+run_scenario "mergeable-but-blocked" "[$pr800]" "800" "$view800" "$log7"
+if [ ! -s "$log7" ]; then
+  note "mergeable-but-blocked PR (mergeStateStatus DIRTY, mergeable MERGEABLE) was not commented/closed/requeued"
+else
+  bad "expected #800 (mergeable==MERGEABLE) to be left alone, got: $(cat "$log7")"
+fi
+rm -f "$log7"
+
+echo "[8/8] mergeable==UNKNOWN (still computing) is LEFT ALONE — only CONFLICTING triggers close+requeue (SuxOS/.github#570)"
+log8=$(mktemp)
+run_scenario "mergeable-unknown" "[$pr900]" "900" "$view900" "$log8"
+if [ ! -s "$log8" ]; then
+  note "mergeable==UNKNOWN PR was not commented/closed/requeued"
+else
+  bad "expected #900 (mergeable==UNKNOWN) to be left alone, got: $(cat "$log8")"
+fi
+rm -f "$log8"
 
 if [ "$fail" -eq 0 ]; then
   echo "All pr-drain DIRTY-collision tests passed."

@@ -4,8 +4,8 @@ name: PR drain — close-stale + reconcile (reusable)
 #   CLOSE-STALE — bot PRs (`self-improve`) and human-punted ones (`needs-human`) idle
 #     past STALE_DAYS get a heads-up comment and are closed. Opt out with `hold`/`keep`.
 #   DIRTY-CONFLICT — a builder PR (issue-build.yml, head branch `bot/issue-build-*`)
-#     with a REAL merge conflict (`mergeStateStatus == DIRTY`) has no rebase loop that
-#     resolves it: pr-auto-update.yml only fast-forwards a clean-but-behind branch,
+#     with a REAL merge conflict (GraphQL `mergeable == CONFLICTING`) has no rebase loop
+#     that resolves it: pr-auto-update.yml only fast-forwards a clean-but-behind branch,
 #     claude-autofix.yml targets failing CI (a conflict isn't a check-run failure so
 #     it's skipped), and pr-unstick.yml only watches `needs-human`-labelled PRs. Left
 #     alone it sits until CLOSE-STALE's stale-days threshold (days), orphaning
@@ -259,15 +259,15 @@ jobs:
           # `hold` still opts a PR out, same as CLOSE-STALE.
           #
           # Candidate set is every open, non-draft, non-hold builder PR — NOT pre-filtered
-          # on this batch `gh pr list` call's mergeStateStatus (SuxOS/.github#484 / #506).
-          # GitHub computes mergeStateStatus asynchronously and a list-query snapshot can
-          # read UNKNOWN/stale for a PR that a fresh per-PR `gh pr view` correctly reports
-          # DIRTY; pre-filtering here would let that PR's real DIRTY state be invisible for
-          # the sweep's entire lifetime, since it never even reaches the live re-check below
-          # that already asks `gh pr view` for the ground truth. Widening the candidate set
-          # costs one extra `gh pr view` per open builder PR that ISN'T actually DIRTY (small
-          # — bounded by issue-build's parallel-batches cap) and changes nothing about the
-          # close decision itself, which the live re-check still makes.
+          # on any batch merge-state field (SuxOS/.github#484 / #506 / #570). A list-query
+          # snapshot of a mergeability field can read stale for a PR that a fresh per-PR
+          # `gh pr view` reports correctly; pre-filtering here would let that PR's real
+          # conflict be invisible for the sweep's entire lifetime, since it never even
+          # reaches the live re-check below that asks `gh pr view` for the ground truth.
+          # Widening the candidate set costs one extra `gh pr view` per open builder PR
+          # that ISN'T actually conflicting (small — bounded by issue-build's parallel-
+          # batches cap) and changes nothing about the close decision itself, which the
+          # live re-check makes off the stable `mergeable == CONFLICTING` signal.
           dirty=$(printf '%s' "$prs" | jq -r '
             [.[] | select(.isDraft | not)
               | select(.headRefName | startswith("bot/issue-build-"))
@@ -281,15 +281,27 @@ jobs:
             echo "::group::DIRTY builder PR #$n"
             # Re-read this PR's live state; skip if it no longer qualifies (a concurrent
             # bot may have already rebased/closed it, or a human added `hold`/`keep`).
-            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeStateStatus 2>/dev/null) \
+            #
+            # Gate on the GraphQL `mergeable` enum (MERGEABLE | CONFLICTING | UNKNOWN),
+            # NOT `mergeStateStatus` (SuxOS/.github#570). GitHub recomputes mergeability
+            # asynchronously and `mergeStateStatus` flaps DIRTY ↔ BLOCKED ↔ UNKNOWN across
+            # queries seconds apart, so a live re-check that required `== "DIRTY"` almost
+            # never coincided with a DIRTY read and closed nothing — 17 zombie builder PRs
+            # persisted fleet-wide, each suppressing its `building`-claimed issues from
+            # rebuilding. `mergeable == "CONFLICTING"` is the stable signal for a genuine
+            # merge conflict, so only that value triggers close+requeue. `MERGEABLE`
+            # (mergeable-but-BLOCKED on checks/auto-merge — not a conflict) and `UNKNOWN`
+            # (GitHub still computing) both fall through to skip, leaving those PRs to the
+            # automerge / auto-update (BEHIND-rebase) loops and re-evaluating next tick.
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeable 2>/dev/null) \
               || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
             if ! printf '%s' "$live" | jq -e '
                 (.isDraft | not)
                 and (.headRefName | startswith("bot/issue-build-"))
-                and (.mergeStateStatus == "DIRTY")
+                and (.mergeable == "CONFLICTING")
                 and (([.labels[].name] | index("hold")) | not)
                 and (([.labels[].name] | index("keep")) | not)' >/dev/null; then
-              echo "#$n not DIRTY-eligible on live re-check — skipping"
+              echo "#$n not CONFLICTING-eligible on live re-check — skipping"
               echo "::endgroup::"
               continue
             fi
