@@ -32,6 +32,15 @@ if ! printf '%s' "$script" | grep -q 'const openBuilderPrs'; then
   exit 1
 fi
 
+# Mirrors the real workflow's "Checkout SuxOS/.github (shared trust predicate)" step
+# (#551), which lands scripts/lib/is-trusted-author.js at $GITHUB_WORKSPACE/.suxos-ci —
+# the extracted script's require() needs it at that same relative location here.
+tmpws=$(mktemp -d)
+trap 'rm -rf "$tmpws"' EXIT
+mkdir -p "$tmpws/.suxos-ci/scripts/lib"
+cp "$here/scripts/lib/is-trusted-author.js" "$tmpws/.suxos-ci/scripts/lib/"
+export GITHUB_WORKSPACE="$tmpws"
+
 SCRIPT="$script" node <<'NODE'
 const scriptBody = process.env.SCRIPT;
 

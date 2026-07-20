@@ -58,6 +58,15 @@ on:
           Empty (default) skips edge checks entirely — inert, never fails the run.
         type: string
         default: ""
+      history-days:
+        description: >-
+          Trailing days to sample (one successful run per day, not every 15-min run) for
+          the backlog-zero streak / naive growth-rate history read
+          (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.2, #554) — mechanizes
+          the §4 gate's "7 consecutive days" precondition, previously only readable via a
+          Grafana-only PromQL query this org has no read-back capability for.
+        type: string
+        default: "7"
       workflow-disabled-exempt:
         description: >-
           Comma-separated workflow file basenames that are exempt from
@@ -87,6 +96,17 @@ jobs:
       - name: Non-buildable labels
         id: nonbuildable
         uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
+
+      # scripts/lib/is-trusted-author.jq is the single source of truth for the isTrusted
+      # predicate (#551). fabric-health.yml is only ever invoked by self-fabric-health.yml
+      # in THIS repo (see below), so this is a same-repo checkout — the default GITHUB_TOKEN
+      # (contents: read, granted above) is enough, no app token needed.
+      - name: Checkout SuxOS/.github (shared trust predicate)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
 
       # Self cross-run artifact fetch (docs/design/2026-07-18-drain-controller-design.md
       # §2.2, #475): the drain-controller's integral_error is a running sum, so each run
@@ -219,18 +239,16 @@ jobs:
             # (OWNER/MEMBER/COLLABORATOR, or the suxbot bot identity, or the ORG_OWNER_IDS
             # numeric-id stopgap for #186) — issue-build structurally never builds an
             # untrusted-author issue, so counting one here inflates backlog_zero/the
-            # drain-controller setpoint forever (#521). This is a third copy of the same
-            # predicate (issue-build.yml defines it twice already); a shared composite
-            # action would be better but is out of scope for this fix.
-            backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" --arg nb "$NONBUILDABLE_LABELS" '
+            # drain-controller setpoint forever (#521). Sourced from the shared
+            # scripts/lib/is-trusted-author.jq (#551) so this can't drift from
+            # scripts/lib/is-trusted-author.js, which issue-build.yml's two copies use.
+            backlog=$(printf '%s' "$issues" | jq -L "$GITHUB_WORKSPACE/.suxos-ci/scripts/lib" \
+              --arg ex "$EXCLUDE_LABELS" --arg nb "$NONBUILDABLE_LABELS" '
+              include "is-trusted-author";
               ((($ex | split(",")) + ($nb | split(","))) | map(select(length>0))) as $excl
               | [ .[]
                   | select((.labels | map(.name)) as $l | any($excl[]; . as $e | $l | index($e)) | not)
-                  | select(
-                      (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
-                      or .user.login == "suxbot[bot]"
-                      or .user.id == 18266472
-                    )
+                  | select(is_trusted_author)
                 ]
               | length')
 
@@ -468,6 +486,126 @@ jobs:
 
           echo "backlog_total=$backlog_total backlog_zero=$backlog_zero throttle=$throttle_active collection_ok=$collection_all_ok"
           echo "status-file=fabric-status.json" >> "$GITHUB_OUTPUT"
+
+      # Bounded multi-day backlog history (docs/design/2026-07-19-next-arc-decision-rule-
+      # design.md §3.2, #554): extends the #475 self cross-run fetch above from "one prior
+      # run" to "one sampled run per trailing day", mechanizing the §4 gate's "7
+      # consecutive days" precondition and a naive inflow growth rate — both previously
+      # only computable via a Grafana-only PromQL query this org has no read-back
+      # capability for. Same-repo run history (self-fabric-health.yml lives only in THIS
+      # repo, see the #475 step above), so secrets.GITHUB_TOKEN is enough. A day with no
+      # successful run (workflow didn't exist yet, was disabled, every run that day failed)
+      # is a legitimate gap and correctly breaks the streak below — same "a gap resets,
+      # it doesn't fabricate continuity" contract as the #475 step's stale/unavailable
+      # states. `days_available` in the emitted `history` object makes a degraded read
+      # (fewer sampled days than requested) visible to a consumer instead of silently
+      # reading as a shorter-but-still-confident streak.
+      - name: Multi-day backlog history (streak + growth rate, #554)
+        id: history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HISTORY_DAYS: ${{ inputs.history-days }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -uo pipefail
+
+          days="${HISTORY_DAYS:-7}"
+          if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -lt 1 ]; then
+            echo "::error::history-days ('$days') must be a positive integer"
+            exit 1
+          fi
+
+          # Day 0 = this run's own live snapshot (fabric-status.json, already on disk from
+          # the "collect" step above) — the streak/growth math wants an unbroken sequence
+          # INCLUDING today, not just the trailing history.
+          today_entry=$(jq -c '{backlog_total, backlog_zero, repos: (.repos // [])}' fabric-status.json)
+          calendar="[$today_entry]"   # newest-first; offsets 1..N appended below
+
+          for offset in $(seq 1 "$days"); do
+            day=$(date -u -d "-${offset} days" +%Y-%m-%d 2>/dev/null \
+              || date -u -v-"${offset}"d +%Y-%m-%d)
+
+            # One sample per day (the LATEST successful run that day), not every 15-min
+            # run — keeps this to ~N gh calls, not ~96*N.
+            run_id=$( { gh run list --repo "${GITHUB_REPOSITORY}" --workflow self-fabric-health.yml \
+              --status success --created "$day" --limit 1 --json databaseId 2>/dev/null \
+              | jq -r '.[0].databaseId // empty'; } || true)
+
+            entry=null
+            if [ -n "$run_id" ]; then
+              rm -rf /tmp/hist-fabric-status && mkdir -p /tmp/hist-fabric-status
+              if gh run download "$run_id" --repo "${GITHUB_REPOSITORY}" --name fabric-status \
+                  --dir /tmp/hist-fabric-status 2>/dev/null \
+                  && [ -f /tmp/hist-fabric-status/fabric-status.json ] \
+                  && jq -e . /tmp/hist-fabric-status/fabric-status.json >/dev/null 2>&1; then
+                entry=$(jq -c '{backlog_total, backlog_zero, repos: (.repos // [])}' \
+                  /tmp/hist-fabric-status/fabric-status.json)
+              fi
+            fi
+            calendar=$(printf '%s' "$calendar" | jq --argjson e "$entry" '. + [$e]')
+          done
+
+          days_available=$(printf '%s' "$calendar" | jq '[.[1:][] | select(. != null)] | length')
+
+          # Per-repo and org-wide: a "day is zero" for a repo means that repo's own
+          # backlog was 0 AND its issue collector succeeded that day (mirrors the org-wide
+          # backlog_zero gate above — an unobserved backlog must not read as zero). Both
+          # streak_zero/growth_rate walk newest-first and stop at the first null/non-zero
+          # element, so a day missing from the calendar (org-level gap) or a repo missing
+          # from that day's `repos[]` (added to $REPOS after that day) both correctly break
+          # continuity instead of silently skipping over the gap.
+          history_json=$(printf '%s' "$calendar" | jq -c --arg repos_str "$REPOS" '
+            def streak_zero(arr):
+              arr as $arr
+              | reduce range(0; $arr|length) as $i
+                  ({streak: 0, stopped: false};
+                   if .stopped then .
+                   elif ($arr[$i] == null) or ($arr[$i].backlog_zero != 1) then . + {stopped: true}
+                   else .streak += 1 end
+                  ) | .streak;
+
+            def growth_rate(arr; field):
+              arr as $arr
+              | ([range(0; $arr|length) | select($arr[.] != null)]) as $idxs
+              | if ($idxs | length) < 2 then null
+                else
+                  ($arr[$idxs[0]]) as $newest
+                  | ($arr[$idxs[-1]]) as $oldest
+                  | ($idxs[-1] - $idxs[0]) as $span
+                  | if $span == 0 then null else (($newest[field] - $oldest[field]) / $span) end
+                end;
+
+            . as $calendar
+            | ($repos_str | split(" ") | map(select(length > 0))) as $repo_list
+            | {
+                backlog_zero_streak_days: streak_zero($calendar),
+                backlog_growth_per_day: growth_rate($calendar; "backlog_total"),
+                repos: ($repo_list | map({
+                    key: .,
+                    value: (
+                      . as $r
+                      | ($calendar | map(
+                          if . == null then null
+                          else (((.repos[] | select(.repo == $r)) // null)) as $ro
+                            | if $ro == null then null
+                              else { backlog_total: $ro.backlog,
+                                     backlog_zero: (if $ro.backlog == 0 and $ro.collection.issues != 0 then 1 else 0 end) }
+                              end
+                          end
+                        )) as $repo_calendar
+                      | { backlog_zero_streak_days: streak_zero($repo_calendar),
+                          backlog_growth_per_day: growth_rate($repo_calendar; "backlog_total") }
+                    )
+                  }) | from_entries)
+              }
+          ')
+
+          jq --argjson h "$history_json" --argjson days "$days" --argjson avail "$days_available" \
+            '. + {history: ($h + {days_requested: $days, days_available: $avail})}' \
+            fabric-status.json > fabric-status.json.tmp
+          mv fabric-status.json.tmp fabric-status.json
+
+          echo "backlog history: streak=$(printf '%s' "$history_json" | jq -r .backlog_zero_streak_days)d growth=$(printf '%s' "$history_json" | jq -r .backlog_growth_per_day)/day (days_available=$days_available/$days)"
 
       - name: Edge deploy smoke checks (optional)
         id: edge
