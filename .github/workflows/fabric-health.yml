@@ -609,7 +609,7 @@ jobs:
               level=info
             fi
             line=$(jq -c --argjson red_total "$red_total" --argjson stuck_total "$stuck_total" \
-              '{backlog: (if collection_ok == 1 then .backlog_total else null end), backlog_zero,
+              '{backlog: (if .collection_ok == 1 then .backlog_total else null end), backlog_zero,
               throttle: .budget_throttle_active,
               collection_ok,
               workflow_red: $red_total,
