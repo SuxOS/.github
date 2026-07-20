@@ -127,12 +127,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "last_over_time(suxos_pr_stuck_total[20m])",
+          "expr": "last_over_time(suxos_pr_stuck_total[20m]) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"prs\"}[20m])) == 1)",
           "legendFormat": "stuck {{repo}}"
         },
         {
           "refId": "B",
-          "expr": "last_over_time(suxos_pr_red_total[20m])",
+          "expr": "last_over_time(suxos_pr_red_total[20m]) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"prs\"}[20m])) == 1)",
           "legendFormat": "red {{repo}}"
         }
       ]

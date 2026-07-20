@@ -574,8 +574,11 @@ jobs:
 
           # --- Ship one rollup event to the Loki stream {service="suxos-fabric"} ---
           if [ -n "${GRAFANA_LOKI_URL:-}" ] && [ -n "${GRAFANA_LOKI_USER:-}" ] && [ -n "${GRAFANA_LOKI_TOKEN:-}" ]; then
-            red_total=$(jq '[.repos[].workflow_red] | add // 0' <<< "$status")
-            stuck_total=$(jq '[.repos[].prs.stuck] | add // 0' <<< "$status")
+            # Gated the same way the Prometheus emission above is (#529): a repo whose
+            # runs/prs collector failed contributes a fabricated 0 to these sums otherwise,
+            # silently understating the true total instead of surfacing the outage.
+            red_total=$(jq '[.repos[] | select(.collection.runs == 1) | .workflow_red] | add // 0' <<< "$status")
+            stuck_total=$(jq '[.repos[] | select(.collection.prs == 1) | .prs.stuck] | add // 0' <<< "$status")
             collection_ok=$(jq '.collection_ok' <<< "$status")
             # A degraded collection is error-level too (#305): "couldn't measure" is not "info".
             if [ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] || [ "$collection_ok" -eq 0 ]; then
@@ -583,10 +586,12 @@ jobs:
             else
               level=info
             fi
-            line=$(jq -c '{backlog: .backlog_total, backlog_zero, throttle: .budget_throttle_active,
+            line=$(jq -c --argjson red_total "$red_total" --argjson stuck_total "$stuck_total" \
+              '{backlog: (if collection_ok == 1 then .backlog_total else null end), backlog_zero,
+              throttle: .budget_throttle_active,
               collection_ok,
-              workflow_red: ([.repos[].workflow_red] | add // 0),
-              pr_stuck: ([.repos[].prs.stuck] | add // 0)}' <<< "$status")
+              workflow_red: $red_total,
+              pr_stuck: $stuck_total}' <<< "$status")
             body=$(jq -n --arg ts "$ts" --arg line "$line" --arg level "$level" \
               '{streams: [{stream: {service: "suxos-fabric", level: $level}, values: [[$ts, $line]]}]}')
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
