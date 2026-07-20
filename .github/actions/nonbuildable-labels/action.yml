@@ -7,7 +7,7 @@ description: >-
   cannot drift out of sync the way they did in #310 (same antipattern class
   as the managed-repo-list dedup, #233). A caller may still exclude
   ADDITIONAL labels of its own that aren't about buildability (e.g.
-  fabric-health's blocked/throttle/epic) — only this shared floor is
+  fabric-health's blocked/throttle) — only this shared floor is
   centralized here.
 
 outputs:
@@ -20,4 +20,4 @@ runs:
   steps:
     - id: emit
       shell: bash
-      run: echo "labels=building,hold,needs-human,tracking" >> "$GITHUB_OUTPUT"
+      run: echo "labels=building,hold,needs-human,tracking,epic" >> "$GITHUB_OUTPUT"

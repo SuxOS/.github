@@ -67,6 +67,7 @@ found_any=0
 # out here: that has its own remedy (re-enable the workflow), not a push.
 declare -a generic_prs=()
 workflows_json=""
+workflows_fetch_failed=0
 
 for row in $(echo "$prs" | jq -c '.[]'); do
   n=$(echo "$row" | jq -r '.number')
@@ -145,27 +146,43 @@ for row in $(echo "$prs" | jq -c '.[]'); do
   fi
 
   found_any=1
-  if [ -z "${workflows_json}" ]; then
-    workflows_json=$(gh api "repos/${GH_REPO}/actions/workflows" --paginate 2>/dev/null || echo '{}')
+  # Only (re-)fetch while we haven't already gotten a real answer this run — but unlike
+  # caching `{}` as ground truth, a failed fetch does NOT get cached: it retries on the
+  # next PR that needs it (a transient blip on PR #1 must not silently disable
+  # disabled-workflow detection for every other PR flagged this run, #518) and this PR's
+  # own classification falls back to "unknown" rather than assuming zero disabled workflows.
+  if [ -z "${workflows_json}" ] && [ "$workflows_fetch_failed" -ne 1 ]; then
+    if workflows_json=$(gh api "repos/${GH_REPO}/actions/workflows" --paginate 2>/dev/null); then
+      :
+    else
+      workflows_json=""
+      workflows_fetch_failed=1
+    fi
   fi
   pr_has_disabled=0
   pr_has_generic=0
-  while IFS= read -r gate; do
-    [ -z "$gate" ] && continue
-    disabled_wf=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
-      '[.workflows[]? | select(.state == "disabled_manually") | .name as $n | select($n == $g or ($g | startswith($n + " / ")))] | .[0].name // empty' 2>/dev/null || true)
-    if [ -n "$disabled_wf" ]; then
-      pr_has_disabled=1
-      echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
-    else
-      pr_has_generic=1
-      echo "::warning::required context '${gate}' has not reported on PR #$n head ${sha} after ${grace_minutes}m. Remedy: if it's a path-filtered required workflow that doesn't match this PR's diff, drop it from required or add a no-op reporting job; if this PR predates the context (onboarding window), push an empty commit to re-fire 'synchronize' (close/reopen does NOT work)."
-    fi
-  done <<< "$never_reporting"
+  if [ "$workflows_fetch_failed" -eq 1 ]; then
+    echo "::warning::could not READ workflow list for ${GH_REPO} — cannot determine whether PR #$n's never-reporting context(s) are caused by a disabled workflow, skipping disabled-workflow classification for this PR (API blip must not be reported as zero disabled workflows)"
+  else
+    while IFS= read -r gate; do
+      [ -z "$gate" ] && continue
+      disabled_wf=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
+        '[.workflows[]? | select(.state == "disabled_manually") | .name as $n | select($n == $g or ($g | startswith($n + " / ")))] | .[0].name // empty' 2>/dev/null || true)
+      if [ -n "$disabled_wf" ]; then
+        pr_has_disabled=1
+        echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
+      else
+        pr_has_generic=1
+        echo "::warning::required context '${gate}' has not reported on PR #$n head ${sha} after ${grace_minutes}m. Remedy: if it's a path-filtered required workflow that doesn't match this PR's diff, drop it from required or add a no-op reporting job; if this PR predates the context (onboarding window), push an empty commit to re-fire 'synchronize' (close/reopen does NOT work)."
+      fi
+    done <<< "$never_reporting"
+  fi
   # Only queue for the empty-commit retry when EVERY never-reporting gate on this PR is
   # the generic cause — a PR with a disabled-workflow gate mixed in needs the operator
-  # to re-enable that workflow, and an empty commit wouldn't fix it anyway.
-  if [ "$pr_has_generic" -eq 1 ] && [ "$pr_has_disabled" -eq 0 ]; then
+  # to re-enable that workflow, and an empty commit wouldn't fix it anyway. A PR whose
+  # disabled-workflow status is unknown (fetch failed) is excluded here too, not just
+  # from the disabled branch, since we can't confirm it's purely generic.
+  if [ "$workflows_fetch_failed" -ne 1 ] && [ "$pr_has_generic" -eq 1 ] && [ "$pr_has_disabled" -eq 0 ]; then
     generic_prs+=("$n")
   fi
   n_missing=$(printf '%s\n' "$never_reporting" | grep -c .)

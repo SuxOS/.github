@@ -35,6 +35,7 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | `suxos_workflow_red_total` | `repo` | Workflows whose last completed run failed |
 | `suxos_merged_prs_in_window` | `repo` | PRs merged in the trailing `merged-window-hours` window (drain-controller signal, #473) |
 | `suxos_drain_integral_error` | `repo` | Drain-controller PI integral term, persisted across runs (#475) |
+| `suxos_recommended_parallel_batches` | `repo` | Drain-controller's recommended `parallel-batches` value, comparison-only until `use-recommended-parallel-batches` is flipped on (#475) |
 | `suxos_workflow_disabled` | `repo`, `workflow` | `1` per disabled_manually/disabled_inactivity workflow (non-exempt) |
 | `suxos_edge_deploy_ok` | `service` | Edge smoke check passed (opt-in via input) |
 | `suxos_collector_ok` | — | Heartbeat / freshness (`1` each run) |

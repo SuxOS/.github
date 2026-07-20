@@ -158,6 +158,11 @@ d="$(fresh_copy no-secrets)"
 sed -i '/secrets: inherit/d' "$d/health.yml"
 assert_has "(c) stub missing secrets: inherit" "$d" "caller stub 'health' is missing 'secrets: inherit'"
 
+# 4b. (c) `secrets: inherit` with a trailing comment must NOT false-positive (#512).
+d="$(fresh_copy secrets-inherit-trailing-comment)"
+sed -i 's/secrets: inherit/secrets: inherit  # org secrets/' "$d/health.yml"
+assert_not "(c) secrets: inherit with trailing comment is not flagged" "$d" "missing 'secrets: inherit'"
+
 # 5. (c) security-review missing ready_for_review.
 d="$(fresh_copy no-rfr)"
 sed -i 's/, ready_for_review//' "$d/security-review.yml"

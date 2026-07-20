@@ -210,7 +210,7 @@ if [ "$MODE" = "full" ]; then
   while IFS= read -r c; do
     [ -z "$c" ] && continue
     f="$WFDIR/$c.yml"; [ -f "$f" ] || f="$WFDIR/$c.yaml"; [ -f "$f" ] || continue
-    grep -qE '^[[:space:]]*secrets:[[:space:]]*inherit[[:space:]]*$' "$f" || \
+    grep -vE '^[[:space:]]*#' "$f" | grep -qE '^[[:space:]]*secrets:[[:space:]]*inherit[[:space:]]*(#.*)?$' || \
       warn "caller stub '$c' is missing 'secrets: inherit'"
   done <<< "$CANON_STUBS"
 
