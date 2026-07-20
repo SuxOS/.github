@@ -392,7 +392,13 @@ jobs:
             const openPrs = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", per_page: 100,
             });
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            // Also matches the "Related to #n" wording issue-build.yml's own multi-issue-batch
+            // fail-closed path uses when disposition.json is missing/malformed (line ~980) — a
+            // PR opened that way otherwise falls through this guard entirely, letting the reaper
+            // strip `building` from its linked issues while the PR is still open (#544). Negative
+            // lookbehind excludes "not related to #n" (same negated-form gap pr-drain.yml's
+            // sibling regex was fixed for, #538).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
               if (!isTrusted(pr.user, pr.author_association)) continue;
@@ -460,15 +466,15 @@ jobs:
             // cherry-pick and all), so the heuristic can only reorder, never deadlock the backlog.
             //
             // A "blocker" is any OPEN issue OR PR that will plausibly close on merge — i.e. NOT
-            // a long-lived tracking/needs-human/hold issue (blocking on those would starve the
-            // dependent forever). Open PRs count directly (not just issues): issues and PRs share
+            // a long-lived tracking/needs-human/hold/epic issue (blocking on those would starve
+            // the dependent forever). Open PRs count directly (not just issues): issues and PRs share
             // one number space, and the detection regex/comment explicitly targets PR references
             // ("built by PR #341") — excluding PRs here left that reference silently un-gated
             // (#370). An issue covered by an open (unmerged) PR still counts: its change isn't on
             // main yet, which is exactly the #339 situation. Detection is two narrow signals over
             // the candidate's title+body, kept tight to limit false positives; the non-starving
             // fallback caps any rare false positive at one selection cycle.
-            const NON_CLOSEABLE = ["tracking", "needs-human", "hold"];
+            const NON_CLOSEABLE = ["tracking", "needs-human", "hold", "epic"];
             const blockerNumbers = new Set(
               all.filter((i) => !i.labels.map((l) => l.name).some((l) => NON_CLOSEABLE.includes(l)))
                  .map((i) => i.number),
@@ -1181,7 +1187,10 @@ jobs:
               github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
               github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
             ]);
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            // Also matches "Related to #n" (issue-build.yml's own no-disposition fail-closed
+            // wording, line ~980), excluding the negated "not related to #n" form — see the
+            // matching comment on this same regex above (#544).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
               // Only a trusted-author PR's closing keywords count — an untrusted PR body

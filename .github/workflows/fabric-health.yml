@@ -558,9 +558,12 @@ jobs:
             # misleading-zero contract as the other derived per-repo series above.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.merged == 1) |
               "suxos_merged_prs_in_window,repo=\(.repo) value=\(.merged_prs_in_window) \($ts)"' <<< "$status"
-            # Gated on collection.integral (#475/#305) — same absent-sample-not-a-
-            # misleading-zero contract as the other derived per-repo series above.
-            jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1) |
+            # Gated on collection.integral (#475/#305) AND collection.issues (#543): the
+            # formula's setpoint is backlog/48, so a failed issues query this tick must
+            # also suppress emission, not just a failed prior-run artifact fetch — same
+            # absent-sample-not-a-misleading-zero contract as the other derived per-repo
+            # series above. (collection.merged has the same gap, tracked separately in #508.)
+            jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1 and .collection.issues == 1) |
               "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)\n" +
               "suxos_recommended_parallel_batches,repo=\(.repo) value=\(.recommended_parallel_batches) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt
