@@ -127,15 +127,16 @@ regardless of this doc, and the headroom number is already usable with zero new 
 ## 5. Suggested follow-up issues (small enough to build individually)
 
 - Persist per-service edge-check verdicts into `fabric-status.json` (§3.1) — small,
-  independent of everything else here.
+  independent of everything else here. DONE (#532).
 - Extend fabric-health's self cross-run fetch to a bounded multi-day (daily-sampled)
   history read, deriving the backlog-zero streak length and a naive backlog growth rate
-  (§3.2) — medium, the largest single piece; independent of #3.1.
+  (§3.2) — medium, the largest single piece; independent of #3.1. Filed as #554.
 - Spec the inflow-bound (backlog-refills-faster-than-drain) comparison formula as its own
-  doc before any code (§3.3) — small, should land before the reconciler consumes it.
+  doc before any code (§3.3) — small, should land before the reconciler consumes it. Filed
+  as #555.
 - Build the §4 reconciler: evaluate the first-match row from the streak/headroom/inflow/
   edge signals and upsert one tracking issue with the current verdict and evidence (§3.4)
-  — medium, depends on the three above landing first.
+  — medium, depends on the three above landing first. Filed as #556.
 - Wire the reconciler on a daily (not 15-minute) cadence, separate from
   `fabric-health.yml`'s existing cron (§3.5) — small, config-only once the reconciler
-  exists.
+  exists. Filed as #557.

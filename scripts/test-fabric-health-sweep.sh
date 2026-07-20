@@ -95,7 +95,7 @@ run_collect() {
 
 field() { printf '%s' "$2" | jq -r ".repos[0]$1"; }
 
-echo "[1/4] every workflow's latest run is inside the batch window -> counted from the batch, no fallback call"
+echo "[1/6] every workflow's latest run is inside the batch window -> counted from the batch, no fallback call"
 d1=$(mktemp -d)
 make_fakegh "$d1" \
   '[{"id":1,"name":"CI","path":".github/workflows/ci.yml","state":"active"},{"id":2,"name":"Sec","path":".github/workflows/security-review.yml","state":"active"}]' \
@@ -113,7 +113,7 @@ else
 fi
 rm -rf "$d1" "$scratch"
 
-echo "[2/4] a workflow absent from the batch window -> per-workflow fallback is queried and counted"
+echo "[2/6] a workflow absent from the batch window -> per-workflow fallback is queried and counted"
 d2=$(mktemp -d)
 make_fakegh "$d2" \
   '[{"id":1,"name":"CI","path":".github/workflows/ci.yml","state":"active"},{"id":3,"name":"Nightly","path":".github/workflows/nightly.yml","state":"active"}]' \
@@ -131,7 +131,7 @@ else
 fi
 rm -rf "$d2" "$scratch"
 
-echo "[3/4] the per-workflow fallback call itself errors -> collection.runs degrades to 0 (not a silent healthy zero)"
+echo "[3/6] the per-workflow fallback call itself errors -> collection.runs degrades to 0 (not a silent healthy zero)"
 d3=$(mktemp -d)
 make_fakegh "$d3" \
   '[{"id":9,"name":"Flaky","path":".github/workflows/flaky.yml","state":"active"}]' \
@@ -147,7 +147,7 @@ else
 fi
 rm -rf "$d3" "$scratch"
 
-echo "[4/4] workflow list hits the 101-row cap -> whole workflow collector degrades, no undercounted workflow_red"
+echo "[4/6] workflow list hits the 101-row cap -> whole workflow collector degrades, no undercounted workflow_red"
 d4=$(mktemp -d)
 workflows_capped=$(jq -nc '[range(101) | {id: ., name: "wf\(.)", path: ".github/workflows/wf\(.).yml", state: "active"}]')
 make_fakegh "$d4" "$workflows_capped" '[]' 'ok:[]'
@@ -161,5 +161,53 @@ else
   bad "cap-hit case: expected workflow_red=0/collection.workflows=0/collection.runs=0 (rc=$rc, status=$status_json)"
 fi
 rm -rf "$d4" "$scratch"
+
+echo "[5/6] edge smoke checks configured -> per-service verdicts folded into fabric-status.json's edge_checks (SuxOS/.github#532 design doc §3.1)"
+edge_run=$(yq -r '.jobs.spine.steps[] | select(.id == "edge") | .run' "$WF")
+fold_run=$(yq -r '.jobs.spine.steps[] | select(.id == "fold-edge") | .run' "$WF")
+d5=$(mktemp -d)
+cat > "$d5/curl" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    *good*) echo -n 200; exit 0 ;;
+    *bad*) echo -n 500; exit 0 ;;
+  esac
+done
+echo -n 000
+EOF
+chmod +x "$d5/curl"
+scratch5=$(mktemp -d)
+echo '{"backlog_total":0}' > "$scratch5/fabric-status.json"
+(
+  cd "$scratch5" && PATH="$d5:$PATH" \
+    EDGE_SMOKE_CHECKS=$'sux=https://good.example/mcp=200\nrouter=https://bad.example/mcp=200' \
+    bash -e -c "$edge_run" && bash -e -c "$fold_run"
+) > "$scratch5/log" 2>&1
+rc5=$?
+edge_checks5=$(jq -c '.edge_checks' "$scratch5/fabric-status.json" 2>/dev/null)
+if [ "$rc5" -eq 0 ] && [ "$edge_checks5" = '[{"service":"sux","ok":true},{"service":"router","ok":false}]' ]; then
+  note "edge_checks carries both services' verdicts (sux ok, router not ok)"
+else
+  bad "expected edge_checks with sux=true/router=false, got rc=$rc5 edge_checks=$edge_checks5 log=$(cat "$scratch5/log")"
+fi
+rm -rf "$d5" "$scratch5"
+
+echo "[6/6] no edge smoke checks configured -> edge_checks folded in as an empty array, not omitted"
+d6=$(mktemp -d)
+scratch6=$(mktemp -d)
+echo '{"backlog_total":0}' > "$scratch6/fabric-status.json"
+(
+  cd "$scratch6" && PATH="$d6:$PATH" EDGE_SMOKE_CHECKS="" \
+    bash -e -c "$edge_run" && bash -e -c "$fold_run"
+) > "$scratch6/log" 2>&1
+rc6=$?
+edge_checks6=$(jq -c '.edge_checks' "$scratch6/fabric-status.json" 2>/dev/null)
+if [ "$rc6" -eq 0 ] && [ "$edge_checks6" = '[]' ]; then
+  note "edge_checks is an explicit empty array when no edge smoke checks are configured"
+else
+  bad "expected edge_checks=[] with no edge checks configured, got rc=$rc6 edge_checks=$edge_checks6 log=$(cat "$scratch6/log")"
+fi
+rm -rf "$d6" "$scratch6"
 
 [ "$fail" -eq 0 ] && { echo "fabric-health sweep regression guard: PASS"; exit 0; } || { echo "fabric-health sweep regression guard: FAIL"; exit 1; }

@@ -476,6 +476,11 @@ jobs:
         run: |
           set -euo pipefail
           : > edge-metrics.txt
+          # Also fed into fabric-status.json's `edge_checks` array (next step,
+          # docs/design/2026-07-19-next-arc-decision-rule-design.md §3.1, #532) — the
+          # §4 next-arc reconciler's "edge panels burn error budget" row needs this
+          # readable from the artifact, not only pushed to Grafana.
+          : > edge-results.jsonl
           if [ -z "${EDGE_SMOKE_CHECKS//[[:space:]]/}" ]; then
             echo "no edge smoke checks configured — skipping"
             exit 0
@@ -489,7 +494,21 @@ jobs:
             ok=$([ "$got" = "$want" ] && echo 1 || echo 0)
             echo "edge $service $url want=$want got=$got ok=$ok"
             printf 'suxos_edge_deploy_ok,service=%s value=%s %s\n' "$service" "$ok" "$ts" >> edge-metrics.txt
+            jq -n -c --arg service "$service" --argjson ok "$([ "$ok" = 1 ] && echo true || echo false)" \
+              '{service: $service, ok: $ok}' >> edge-results.jsonl
           done <<< "$EDGE_SMOKE_CHECKS"
+
+      - name: Fold edge-check verdicts into fabric-status.json
+        id: fold-edge
+        run: |
+          set -euo pipefail
+          edge_checks="[]"
+          if [ -s edge-results.jsonl ]; then
+            edge_checks=$(jq -s -c '.' edge-results.jsonl)
+          fi
+          jq --argjson edge_checks "$edge_checks" '. + {edge_checks: $edge_checks}' \
+            fabric-status.json > fabric-status.json.tmp
+          mv fabric-status.json.tmp fabric-status.json
 
       - name: Ship snapshot to Grafana Cloud (Prometheus + Loki)
         env:

@@ -18,16 +18,17 @@ bad()  { echo "  FAIL: $*" >&2; fail=1; }
 OLD_DATE=$(date -u -d "-1 hour" +%Y-%m-%dT%H:%M:%SZ)
 FRESH_DATE=$(date -u -d "-1 minute" +%Y-%m-%dT%H:%M:%SZ)
 
-# $1 = case name, $2 = gh mock body. Populates $out/$code/$gh_output (the
-# GITHUB_OUTPUT file's contents, for the generic-unreachable-prs handoff).
+# $1 = case name, $2 = gh mock body, $3 = optional PR_LIMIT override (default 50).
+# Populates $out/$code/$gh_output (the GITHUB_OUTPUT file's contents, for the
+# generic-unreachable-prs handoff).
 run_case() {
-  local name="$1" gh_body="$2" out_file
+  local name="$1" gh_body="$2" limit="${3:-50}" out_file
   # shellcheck disable=SC2317  # invoked indirectly via exported function
   gh() { eval "$gh_body"; }
   export -f gh
   export gh_body
   out_file=$(mktemp)
-  out=$(GH_REPO=SuxOS/example GRACE_MINUTES=30 PR_LIMIT=50 GITHUB_OUTPUT="$out_file" bash "$CHECK_SH" 2>&1)
+  out=$(GH_REPO=SuxOS/example GRACE_MINUTES=30 PR_LIMIT="$limit" GITHUB_OUTPUT="$out_file" bash "$CHECK_SH" 2>&1)
   code=$?
   gh_output=$(cat "$out_file" 2>/dev/null || true)
   rm -f "$out_file"
@@ -36,7 +37,7 @@ run_case() {
   echo "  [$name] exit=$code"
 }
 
-echo "[1/14] gh pr list fails -> fail OPEN (no findings, exit 0)"
+echo "[1/15] gh pr list fails -> fail OPEN (no findings, exit 0)"
 run_case "pr-list-fails" '
   case "$1" in
     pr) return 1 ;;
@@ -47,7 +48,7 @@ else
   bad "expected exit 0 + warning, got exit=$code out=$out"
 fi
 
-echo "[2/14] no open PRs -> exit 0, nothing to report"
+echo "[2/15] no open PRs -> exit 0, nothing to report"
 run_case "no-prs" '
   case "$1" in
     pr) echo "[]" ;;
@@ -58,7 +59,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[3/14] rulesets unreadable for base -> skip PR, fail OPEN"
+echo "[3/15] rulesets unreadable for base -> skip PR, fail OPEN"
 run_case "rules-unreadable" '
   case "$1" in
     pr) echo "[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]" ;;
@@ -72,7 +73,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[4/14] no required contexts on base -> skip PR, exit 0"
+echo "[4/15] no required contexts on base -> skip PR, exit 0"
 run_case "no-required" '
   case "$1" in
     pr) echo "[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]" ;;
@@ -86,7 +87,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[5/14] head commit is inside the grace window -> settle-gate skips it (never reports a fresh PR as jammed)"
+echo "[5/15] head commit is inside the grace window -> settle-gate skips it (never reports a fresh PR as jammed)"
 run_case "fresh-commit" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -103,7 +104,7 @@ else
   bad "expected exit 0 + settling message, got exit=$code out=$out"
 fi
 
-echo "[6/14] checks still in flight on head -> not settled, skip"
+echo "[6/15] checks still in flight on head -> not settled, skip"
 run_case "checks-pending" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -120,7 +121,7 @@ else
   bad "expected exit 0 + not-settled message, got exit=$code out=$out"
 fi
 
-echo "[7/14] all required contexts reported (exact + prefix-drift) -> reachable, exit 0"
+echo "[7/15] all required contexts reported (exact + prefix-drift) -> reachable, exit 0"
 run_case "reachable" "
   case \"\$1\" in
     pr) echo '[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -137,7 +138,7 @@ else
   bad "expected exit 0 with no ::error::, got exit=$code out=$out"
 fi
 
-echo "[8/14] required context never reported, no disabled workflow found -> real jam (exit 1, generic remedy)"
+echo "[8/15] required context never reported, no disabled workflow found -> real jam (exit 1, generic remedy)"
 run_case "never-reporting-generic" "
   case \"\$1\" in
     pr) echo '[{\"number\":7,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -164,7 +165,7 @@ else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=7', got: $gh_output"
 fi
 
-echo "[9/14] required context's workflow is disabled_manually -> real jam (exit 1, disabled-workflow remedy)"
+echo "[9/15] required context's workflow is disabled_manually -> real jam (exit 1, disabled-workflow remedy)"
 run_case "never-reporting-disabled" "
   case \"\$1\" in
     pr) echo '[{\"number\":9,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -187,7 +188,7 @@ else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=' (empty), got: $gh_output"
 fi
 
-echo "[10/14] one gate disabled + one gate generic on the SAME PR -> excluded from generic-unreachable-prs (mixed cause)"
+echo "[10/15] one gate disabled + one gate generic on the SAME PR -> excluded from generic-unreachable-prs (mixed cause)"
 run_case "never-reporting-mixed" "
   case \"\$1\" in
     pr) echo '[{\"number\":11,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -205,7 +206,7 @@ else
   bad "expected exit 1 + empty generic-unreachable-prs, got exit=$code gh_output=$gh_output"
 fi
 
-echo "[11/14] two PRs, only one pure-generic -> only that one is handed off"
+echo "[11/15] two PRs, only one pure-generic -> only that one is handed off"
 run_case "never-reporting-two-prs" "
   case \"\$1\" in
     pr) echo '[{\"number\":7,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"},{\"number\":9,\"baseRefName\":\"main\",\"headRefOid\":\"def456\"}]' ;;
@@ -224,7 +225,7 @@ else
   bad "expected exit 1 + generic-unreachable-prs=7, got exit=$code gh_output=$gh_output"
 fi
 
-echo "[12/14] two flagged PRs in one run -> actions/workflows fetched once, not re-fetched per PR (#386)"
+echo "[12/15] two flagged PRs in one run -> actions/workflows fetched once, not re-fetched per PR (#386)"
 WF_CALLS_FILE=$(mktemp)
 echo 0 > "$WF_CALLS_FILE"
 run_case "workflows-json-cached-across-prs" "
@@ -248,7 +249,7 @@ else
   bad "expected exactly 1 actions/workflows call for 2 flagged PRs, got $wf_calls (exit=$code)"
 fi
 
-echo "[13/14] required context is a longer '<workflow> / <job>' string, disabled workflow name is the shorter prefix -> classified as disabled (#380)"
+echo "[13/15] required context is a longer '<workflow> / <job>' string, disabled workflow name is the shorter prefix -> classified as disabled (#380)"
 run_case "never-reporting-disabled-prefix-name" "
   case \"\$1\" in
     pr) echo '[{\"number\":13,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -271,7 +272,7 @@ else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=' (empty), got: $gh_output"
 fi
 
-echo "[14/14] actions/workflows fetch fails on a flagged PR -> unknown, not cached as zero disabled workflows (#518)"
+echo "[14/15] actions/workflows fetch fails on a flagged PR -> unknown, not cached as zero disabled workflows (#518)"
 run_case "workflows-fetch-fails" "
   case \"\$1\" in
     pr) echo '[{\"number\":21,\"baseRefName\":\"main\",\"headRefOid\":\"abc123\"}]' ;;
@@ -297,6 +298,25 @@ if [ "$gh_output" = "generic-unreachable-prs=" ]; then
   note "a PR with unknown disabled-workflow status is excluded from generic-unreachable-prs, not assumed pure-generic"
 else
   bad "expected GITHUB_OUTPUT 'generic-unreachable-prs=' (empty) for unknown status, got: $gh_output"
+fi
+
+echo "[15/15] cap-hit warning compares against the RAW pre-draft-filter count, not the post-filter count (#539)"
+run_case "cap-hit-pre-draft-filter" '
+  case "$1" in
+    pr) echo "[{\"number\":1,\"baseRefName\":\"main\",\"headRefOid\":\"abc\",\"isDraft\":false},{\"number\":2,\"baseRefName\":\"main\",\"headRefOid\":\"def\",\"isDraft\":true},{\"number\":3,\"baseRefName\":\"main\",\"headRefOid\":\"ghi\",\"isDraft\":false}]" ;;
+    api) case "$2" in
+           repos/*/rules/branches/*) return 1 ;;
+         esac ;;
+  esac' 3
+if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -q '::warning::open PR count hit pr-limit (3)'; then
+  note "the pr-limit warning still fires on a truncated raw page even though one of the 3 raw PRs is a draft"
+else
+  bad "expected the pr-limit warning to fire on the raw count despite draft filtering, got exit=$code out=$out"
+fi
+if printf '%s' "$out" | grep -q 'open non-draft PRs to check: 2'; then
+  note "the 'to check' count is still the post-filter count (draft stripped out before the per-PR loop)"
+else
+  bad "expected post-filter count of 2 (one of 3 stripped as draft), got out=$out"
 fi
 
 [ "$fail" -eq 0 ] && { echo "detect-unreachable-checks: PASS"; exit 0; } || { echo "detect-unreachable-checks: FAIL"; exit 1; }

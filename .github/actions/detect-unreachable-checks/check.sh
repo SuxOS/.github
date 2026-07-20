@@ -40,19 +40,25 @@ context_reachable() {
   return 1
 }
 
-if ! prs=$(gh pr list --state open --limit "$pr_limit" \
-  --json number,isDraft,baseRefName,headRefOid \
-  --jq '[.[] | select(.isDraft | not)]' 2>/dev/null); then
+if ! raw_prs=$(gh pr list --state open --limit "$pr_limit" \
+  --json number,isDraft,baseRefName,headRefOid 2>/dev/null); then
   echo "::warning::gh pr list failed — cannot enumerate open PRs, skipping reachability check this run (an API blip must not be reported as a jam)"
   exit 0
 fi
+# Draft filtering is applied locally (not via `gh ... --jq`) so the truncation check below
+# can compare against the RAW page size the API actually returned, not the count left after
+# drafts are stripped out of it.
+raw_count=$(echo "$raw_prs" | jq 'length')
+prs=$(echo "$raw_prs" | jq -c '[.[] | select(.isDraft | not)]')
 count=$(echo "$prs" | jq 'length')
 echo "open non-draft PRs to check: $count"
 # gh pr list returns created-desc with no label to narrow by here (every open PR is in
 # scope), so hitting the cap means the OLDEST open PRs — exactly the ones most likely to
-# be stuck — silently fell off this run (SuxOS/.github#366). Surface it instead of staying
-# quiet the way a plain truncation would.
-if [ "$count" -eq "$pr_limit" ]; then
+# be stuck — silently fell off this run (SuxOS/.github#366). Compare against the RAW
+# pre-draft-filter count (SuxOS/.github#539): comparing the post-filter $count instead would
+# silently under-fire whenever the capped raw page happened to contain at least one draft,
+# even though the fetch was genuinely truncated.
+if [ "$raw_count" -eq "$pr_limit" ]; then
   echo "::warning::open PR count hit pr-limit ($pr_limit) — oldest open PRs beyond the cap were not checked this run"
 fi
 if [ "$count" -eq 0 ]; then exit 0; fi
