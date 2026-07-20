@@ -61,7 +61,7 @@ const pullsList = Symbol("pulls.list");
 // it dispatched plus the `inFlight=` summary line for direct assertions on the cap math.
 const run = async ({
   issues = [], prs = [], inProgressRuns = [], queuedRuns = [], cap = 2, maxIssues = 3,
-  useRecommended, spineAvailable, spineRecommended, throttleLevel,
+  useRecommended, spineAvailable, spineRecommended, throttleLevel, opusAvailMin, totalAvailMin,
 }) => {
   const dispatched = [];
   const infoLines = [];
@@ -98,6 +98,10 @@ const run = async ({
   if (spineAvailable !== undefined) process.env.SPINE_AVAILABLE = String(spineAvailable); else delete process.env.SPINE_AVAILABLE;
   if (spineRecommended !== undefined) process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES = String(spineRecommended); else delete process.env.SPINE_RECOMMENDED_PARALLEL_BATCHES;
   if (throttleLevel !== undefined) process.env.THROTTLE_LEVEL = String(throttleLevel); else delete process.env.THROTTLE_LEVEL;
+  // #565: structured budget-governor headroom fields — undefined unless a test passes them,
+  // so every case above (pre-#565) still exercises the THROTTLE_LEVEL fallback path unchanged.
+  if (opusAvailMin !== undefined) process.env.SPINE_BUDGET_OPUS_AVAIL_MIN = String(opusAvailMin); else delete process.env.SPINE_BUDGET_OPUS_AVAIL_MIN;
+  if (totalAvailMin !== undefined) process.env.SPINE_BUDGET_TOTAL_AVAIL_MIN = String(totalAvailMin); else delete process.env.SPINE_BUDGET_TOTAL_AVAIL_MIN;
 
   const fn = new Function("github", "context", "core", `return (async () => { ${scriptBody} })();`);
   await fn(github, context, core);
@@ -217,6 +221,48 @@ const checkDrain = async (name, opts, expectDispatched, expectDrainSubstring) =>
     "spine available but recommendation field is empty -> treated as unavailable, not Number('')=0",
     { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: "", throttleLevel: "green" },
     2, null,
+  );
+
+  // 12-15: (#565) structured budget-governor headroom (SPINE_BUDGET_OPUS_AVAIL_MIN/
+  // SPINE_BUDGET_TOTAL_AVAIL_MIN) supersedes the coarse THROTTLE_LEVEL guess whenever both
+  // fields are present — throttleLevel is deliberately set to "green" (i.e. would give
+  // headroom_fraction=1 under the old stand-in) in each case below to prove the structured
+  // path, not the fallback, is what actually governs the result.
+
+  // 12. Opus tier is the more-constrained bucket (450/900=0.5 vs total 12000/12000=1) -> the
+  //     min of the two fractions governs, same "either bucket can force it" logic
+  //     budget-governor.yml's own level computation uses.
+  await checkDrain(
+    "structured fields: opus-constrained fraction (0.5) governs over green throttleLevel",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4,
+      throttleLevel: "green", opusAvailMin: 450, totalAvailMin: 12000 },
+    2, "headroom_fraction=0.5",
+  );
+
+  // 13. Total tier is the more-constrained bucket (900/900=1 vs total 3000/12000=0.25).
+  await checkDrain(
+    "structured fields: total-constrained fraction (0.25) governs over green throttleLevel",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4,
+      throttleLevel: "green", opusAvailMin: 900, totalAvailMin: 3000 },
+    2, "headroom_fraction=0.25",
+  );
+
+  // 14. Full headroom in both tiers -> fraction 1, recommendation raises the ceiling exactly
+  //     like the pre-#565 "green" fallback case (8 above), now via the real ratio.
+  await checkDrain(
+    "structured fields: full headroom in both tiers -> recommendation raises the ceiling",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4,
+      throttleLevel: "green", opusAvailMin: 900, totalAvailMin: 12000 },
+    4, "USING",
+  );
+
+  // 15. Fraction is clamped to [0,1] — a negative avail (shouldn't happen, but budget-governor
+  //     is an independent workflow) must not produce a negative dampened value or throw.
+  await checkDrain(
+    "structured fields: negative avail clamps to 0, never produces a negative dampened value",
+    { issues: backlog10, cap: 2, useRecommended: true, spineAvailable: true, spineRecommended: 4,
+      throttleLevel: "green", opusAvailMin: -50, totalAvailMin: 12000 },
+    2, "dampened=0",
   );
 
   if (failures) { console.error(`\n${failures} assertion(s) failed`); process.exit(1); }

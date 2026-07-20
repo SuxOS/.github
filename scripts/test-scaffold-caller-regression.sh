@@ -15,7 +15,7 @@ extract_run() {
   yq -r ".runs.steps[] | select(.id == \"$2\") | .run" "$1"
 }
 
-echo "[1/4] scaffold-caller.sh's security-review template includes ready_for_review"
+echo "[1/5] scaffold-caller.sh's security-review template includes ready_for_review"
 # (The HIGH_BLAST_RE high-blast/trusted-author no-verdict classification this
 # check used to test was removed from security-review.yml: a missing verdict
 # is now an unconditional advisory pass, never a fail-closed `hold`, regardless
@@ -28,7 +28,7 @@ else
   bad "scaffold-caller.sh's security-review template omits ready_for_review — a newly-scaffolded repo's required security gate will silently never re-run when a draft PR goes ready (GitHub counts a skipped required check as passing)"
 fi
 
-echo "[2/4] pr-eligibility's auto-merge safety regex fixture matrix (#229)"
+echo "[2/5] pr-eligibility's auto-merge safety regex fixture matrix (#229)"
 pr_eligibility_run=$(extract_run .github/actions/pr-eligibility/action.yml evaluate)
 check_pr_eligibility() {
   local desc="$1" prs_json="$2" expect="$3" out
@@ -54,7 +54,7 @@ check_pr_eligibility "non-matching title, no label" '[{"number":5,"title":"wip: 
 # than aborting the step (#411).
 check_pr_eligibility "empty PR list (no-match/empty-result)" '[]' ""
 
-echo "[3/4] upsert-tracking-issue list/match fixtures (#228)"
+echo "[3/5] upsert-tracking-issue list/match fixtures (#228)"
 upsert_run=$(extract_run .github/actions/upsert-tracking-issue/action.yml upsert)
 run_upsert() {
   local fakegh_dir="$1" list_limit="$2" out_file="$3"
@@ -138,7 +138,7 @@ else
 fi
 rm -rf "$d3" "$out3"
 
-echo "[4/4] flood-guard / check-throttle fail-open behavior (#230)"
+echo "[4/5] flood-guard / check-throttle fail-open behavior (#230)"
 flood_guard_run=$(extract_run .github/actions/flood-guard/action.yml check)
 check_throttle_run=$(extract_run .github/actions/check-throttle/action.yml check)
 
@@ -205,5 +205,16 @@ check_fail_open "gh issue list error" '""' fail
 check_fail_open "tracking issue body missing a level line" '"no level info here"'
 check_fail_open "garbage suffix after level" '"level: red-ish\nmore text"'
 check_fail_open "wrong-case level line" '"Level: RED"'
+
+echo "[5/5] scaffold-caller.sh's emit() skips an existing .yaml stub, not just .yml (#568)"
+tmpwf=$(mktemp -d)
+printf 'name: Custom audit\non:\n  pull_request:\njobs:\n  audit:\n    runs-on: ubuntu-latest\n    steps: [{ run: "echo custom" }]\n' > "$tmpwf/audit.yaml"
+bash scripts/scaffold-caller.sh --out-dir "$tmpwf" -w "" >/dev/null
+if [ -f "$tmpwf/audit.yaml" ] && ! [ -e "$tmpwf/audit.yml" ] && grep -q 'Custom audit' "$tmpwf/audit.yaml"; then
+  note "emit() skips writing audit.yml alongside an existing customized audit.yaml"
+else
+  bad "emit() did not skip an existing .yaml stub — a customized audit.yaml was shadowed/duplicated by a freshly-scaffolded audit.yml"
+fi
+rm -rf "$tmpwf"
 
 [ "$fail" -eq 0 ] && { echo "scaffold-caller regression guard: PASS"; exit 0; } || { echo "scaffold-caller regression guard: FAIL"; exit 1; }

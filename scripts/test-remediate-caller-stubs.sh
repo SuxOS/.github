@@ -172,5 +172,45 @@ else
   bad "(e) missing fixer tier stub (fixer-30m) re-added via (a) handling" "fixer-30m.yml not restored"
 fi
 
+# 12. (#569) A quoted stale @ref (`uses: "SuxOS/...@ref"`) is rewritten to @main same as the
+#     unquoted form, and the surrounding quotes are preserved verbatim.
+d="$(fresh_copy quoted-stale-ref)"
+cat > "$d/health.yml" <<'YAML'
+name: Health
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+jobs:
+  health:
+    uses: "SuxOS/.github/.github/workflows/health.yml@abc1234"
+    secrets: inherit
+YAML
+bash "$remediate" "$d" >/dev/null
+if grep -q 'uses: "SuxOS/.github/.github/workflows/health.yml@main"' "$d/health.yml" && ! grep -q '@abc1234' "$d/health.yml"; then
+  ok "(#569) quoted stale @ref pin rewritten to @main, quotes preserved"
+else
+  bad "(#569) quoted stale @ref pin rewritten to @main, quotes preserved" "$(cat "$d/health.yml")"
+fi
+
+# 13. (#569) A dead workflow_run stub with a quoted uses: line is still removed by (b).
+d="$(fresh_copy quoted-dead-autofix)"
+cat > "$d/claude-autofix.yml" <<'YAML'
+name: Claude autofix
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+jobs:
+  autofix:
+    uses: "SuxOS/.github/.github/workflows/claude-autofix.yml@main"
+    secrets: inherit
+YAML
+bash "$remediate" "$d" >/dev/null
+if [ ! -f "$d/claude-autofix.yml" ]; then
+  ok "(#569) dead workflow_run stub with quoted uses: line removed"
+else
+  bad "(#569) dead workflow_run stub with quoted uses: line removed" "claude-autofix.yml still present"
+fi
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all remediate-caller-stubs assertions passed"

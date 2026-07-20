@@ -98,7 +98,10 @@ jobs:
         run: |
           set -euo pipefail
           for repo in $PRODUCT_REPOS; do
-            gh repo clone "SuxOS/$repo" "repos/$repo" -- --depth=1
+            if ! gh repo clone "SuxOS/$repo" "repos/$repo" -- --depth=1; then
+              echo "::warning::could not clone SuxOS/$repo — skipping it this run"
+              continue
+            fi
           done
 
       - name: Claude — cross-repo consistency and refactor sweep

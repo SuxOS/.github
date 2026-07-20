@@ -107,12 +107,18 @@ fi
 # no such comments — but this keeps the check robust if that ever changes, #363). In `self`
 # mode, scope this to self-*.yml only — WFDIR is the same .github/workflows this repo also
 # uses for its own reusable *definitions*, and those aren't caller stubs.
+# tr -d "\"'" strips YAML quoting before the uses: match so a `uses: "SuxOS/...@ref"` or
+# `uses: 'SuxOS/...@ref'` line is recognized the same as the unquoted form scaffold-caller.sh
+# emits (#569) — plain char deletion, safe here since this output only feeds regex matching
+# below, never gets written back to a file.
 if [ "$MODE" = "self" ]; then
   wired="$(for f in "$WFDIR"/self-*.yml "$WFDIR"/self-*.yaml; do [ -e "$f" ] || continue; grep -vE '^[[:space:]]*#' "$f"; done \
+    | tr -d "\"'" \
     | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
     | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
 else
   wired="$(find "$WFDIR" -type f \( -name '*.yml' -o -name '*.yaml' \) -exec grep -vE '^[[:space:]]*#' {} + 2>/dev/null \
+    | tr -d "\"'" \
     | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" \
     | sed -E 's#^uses:[[:space:]]*##' | sort -u || true)"
 fi
@@ -189,7 +195,7 @@ for f in "$@"; do
   # carries an example `#   uses: SuxOS/.github/.github/workflows/X.yml@main` line, which
   # would otherwise be mistaken for a live stub if this scan is ever widened beyond
   # self-*.yml/consumer stubs to include reusable definitions themselves (#363).
-  uncommented="$(grep -vE '^[[:space:]]*#' "$f")"
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f" | tr -d "\"'")"
   printf '%s\n' "$uncommented" | grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" || continue
   reuses="$(printf '%s\n' "$uncommented" | grep -oE "SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml" | sed -E 's#.*/##' | sort -u | tr '\n' ' ' | sed 's/ $//' || true)"
   if grep -qE '^[[:space:]]*workflow_run:' "$f"; then

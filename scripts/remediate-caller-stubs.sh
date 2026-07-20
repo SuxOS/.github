@@ -71,7 +71,10 @@ fi
 echo "-- removing dead workflow_run stubs (R5/#263 class) --"
 for f in "$WFDIR"/*.yml "$WFDIR"/*.yaml; do
   [ -e "$f" ] || continue
-  uncommented="$(grep -vE '^[[:space:]]*#' "$f" || true)"
+  # tr -d "\"'" strips YAML quoting before the uses: match so a quoted `uses: "SuxOS/...@ref"`
+  # stub is recognized the same as the unquoted form scaffold-caller.sh emits (#569) — this
+  # copy only feeds regex detection below, never gets written back.
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f" | tr -d "\"'" || true)"
   printf '%s\n' "$uncommented" | grep -qE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/" || continue
   grep -qE '^[[:space:]]*workflow_run:' "$f" || continue
   echo "removing dead stub: $f"
@@ -81,10 +84,14 @@ done
 echo "-- fixing stale first-party @ref pins (canonical ref is @main, #432) --"
 for f in "$WFDIR"/*.yml "$WFDIR"/*.yaml; do
   [ -e "$f" ] || continue
-  uncommented="$(grep -vE '^[[:space:]]*#' "$f" || true)"
+  uncommented="$(grep -vE '^[[:space:]]*#' "$f" | tr -d "\"'" || true)"
   wired="$(printf '%s\n' "$uncommented" | grep -oE "uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml@[A-Za-z0-9._/-]+" || true)"
   [ -z "$wired" ] && continue
   printf '%s\n' "$wired" | grep -qvE '@main$' || continue
   echo "rewriting stale @ref pin(s) to @main: $f"
-  sed -i -E 's#(uses:[[:space:]]*SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml)@[A-Za-z0-9._/-]+#\1@main#' "$f"
+  # Tolerate an optional quote immediately before SuxOS/... (captured, so it's preserved
+  # verbatim on the replaced side) — the detection above is quote-insensitive via the
+  # stripped $uncommented copy, so the rewrite must match the SAME quoted lines in the
+  # real file it edits in place, or "rewriting..." above would be a silent no-op (#569).
+  sed -i -E "s#(uses:[[:space:]]*[\"']?SuxOS/\.github/\.github/workflows/[A-Za-z0-9._-]+\.yml)@[A-Za-z0-9._/-]+#\1@main#" "$f"
 done
