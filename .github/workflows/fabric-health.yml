@@ -270,20 +270,33 @@ jobs:
             prior_integral=$(printf '%s' "$prior_json" | jq -r --arg r "$repo" \
               '(.repos // [])[] | select(.repo == $r) | .integral_error // empty' 2>/dev/null || true)
             prior_integral="${prior_integral:-0}"
-            read -r integral_error raw_output <<<"$(awk -v prior="$prior_integral" -v backlog="$backlog" \
-              -v merged="$merged_count" -v window="$merged_window_hours" 'BEGIN {
-                merged_rate = (window > 0) ? merged / window : 0
-                setpoint = backlog / 48
-                err = setpoint - merged_rate
-                integral = prior + err
-                if (integral < 0) integral = 0
-                if (integral > 20) integral = 20
-                raw = 1 * err + 0.2 * integral
-                out = (raw >= 0) ? int(raw + 0.5) : -int(-raw + 0.5)
-                if (out < 0) out = 0
-                if (out > 4) out = 4
-                printf "%.6f %d", integral, out
-              }')"
+            if [ "$merged_ok" -eq 1 ]; then
+              read -r integral_error raw_output <<<"$(awk -v prior="$prior_integral" -v backlog="$backlog" \
+                -v merged="$merged_count" -v window="$merged_window_hours" 'BEGIN {
+                  merged_rate = (window > 0) ? merged / window : 0
+                  setpoint = backlog / 48
+                  err = setpoint - merged_rate
+                  integral = prior + err
+                  if (integral < 0) integral = 0
+                  if (integral > 20) integral = 20
+                  raw = 1 * err + 0.2 * integral
+                  out = (raw >= 0) ? int(raw + 0.5) : -int(-raw + 0.5)
+                  if (out < 0) out = 0
+                  if (out > 4) out = 4
+                  printf "%.6f %d", integral, out
+                }')"
+            else
+              # merged-PR query failed this tick (merged_ok=0, merged_count is the
+              # by-design fabricated 0, not a real measurement, #508). Hold the running
+              # integral unchanged instead of feeding a fabricated zero merged-rate into
+              # it -- integral_error becomes next run's prior_integral (lines above), so
+              # recomputing here would let one transient query failure permanently
+              # inflate the integral going forward. raw_output degrades to 0; the Grafana
+              # emission gate below and issue-build.yml's spine-fetch consumer both also
+              # require collection.merged==1 before trusting either value this tick.
+              integral_error="$prior_integral"
+              raw_output=0
+            fi
 
             # --- Workflows: disabled_manually or disabled_inactivity, excluding known-by-design reusable defs ---
             # Same cap-hit detection as the issues/prs collectors above (#345, #381):
@@ -508,9 +521,13 @@ jobs:
             # misleading-zero contract as the other derived per-repo series above.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.merged == 1) |
               "suxos_merged_prs_in_window,repo=\(.repo) value=\(.merged_prs_in_window) \($ts)"' <<< "$status"
-            # Gated on collection.integral (#475/#305) — same absent-sample-not-a-
-            # misleading-zero contract as the other derived per-repo series above.
-            jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1) |
+            # Gated on collection.integral (#475/#305) AND collection.merged (#508) —
+            # the integral read alone only proves the PRIOR-run artifact fetch worked;
+            # it says nothing about whether THIS run's merged-PR query (which feeds
+            # integral_error/recommended_parallel_batches above) actually succeeded.
+            # Same absent-sample-not-a-misleading-zero contract as the other derived
+            # per-repo series above.
+            jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1 and .collection.merged == 1) |
               "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)\n" +
               "suxos_recommended_parallel_batches,repo=\(.repo) value=\(.recommended_parallel_batches) \($ts)"' <<< "$status"
             # One suxos_workflow_disabled{repo,workflow} series per non-exempt

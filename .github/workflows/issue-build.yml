@@ -294,11 +294,14 @@ jobs:
                   workflow_red_total=$( { jq -r '[.repos[].workflow_red] | add // 0' /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   collection_ok=$( { jq -r '.collection_ok // empty' /tmp/fabric-status/fabric-status.json; } || true)
                   # This repo's own drain-controller recommendation (#476). Only trusted when
-                  # that repo's own integral collector succeeded (same collection-integrity gate
-                  # fabric-health.yml applies before emitting it) — empty on any miss, same
-                  # fail-soft contract as every other spine field here.
+                  # both that repo's integral collector AND this run's merged-PR collector
+                  # succeeded (same two-gate collection-integrity contract fabric-health.yml
+                  # applies before emitting it, #508 — collection.integral alone only proves
+                  # the prior-run artifact fetch worked, not that this tick's merged-count
+                  # query did) — empty on any miss, same fail-soft contract as every other
+                  # spine field here.
                   recommended_parallel_batches=$( { jq -r --arg r "$repo_name" \
-                    '(.repos // [])[] | select(.repo == $r) | select(.collection.integral == 1) | .recommended_parallel_batches // empty' \
+                    '(.repos // [])[] | select(.repo == $r) | select(.collection.integral == 1 and .collection.merged == 1) | .recommended_parallel_batches // empty' \
                     /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   if [ -z "$backlog_total" ] || [ -z "$collection_ok" ]; then
                     reason="fabric-status.json missing expected fields"
@@ -895,9 +898,6 @@ jobs:
 
           git push -f origin "$BRANCH"
 
-          original_nums="$nums"
-          batch_size=$(echo "$original_nums" | wc -w | tr -d ' ')
-
           # The builder's disposition.json (§4 of the prompt) is the source of truth for which
           # issues actually shipped in this push. `disposition_valid` tracks whether it's
           # present and well-formed (a `.built` array) — used below to decide whether the
@@ -958,17 +958,22 @@ jobs:
             fi
           fi
 
-          # Fail closed, not open: a multi-issue batch with no valid disposition record is
-          # exactly the ambiguous case (#446) — the commit might address only some of the
-          # original issues, or none of the harder ones. Don't auto-close any of them; flag
-          # each instead so it's visible, and leave the `building` claim in place (the reaper
-          # frees it after REAP_STALE_HOURS if this PR doesn't merge, so it can be retried). A
-          # single-issue batch has no such ambiguity — a real commit can only be about that one
-          # issue — so it keeps auto-closing even without a disposition file. #453: a
+          # Fail closed, not open: a batch with no valid disposition record is exactly the
+          # ambiguous case (#446) — the commit might address only some of the original issues,
+          # or none of them, or (since EXPAND is permitted even on a 1-issue batch, #510) an
+          # entirely different issue the builder pulled in mid-session. Don't auto-close any of
+          # them; flag each instead so it's visible, and leave the `building` claim in place
+          # (the reaper frees it after REAP_STALE_HOURS if this PR doesn't merge, so it can be
+          # retried). This used to exempt batch_size==1 on the theory that "a real commit can
+          # only be about that one issue" — but disposition.json (step 4 of the build prompt)
+          # is the ONLY mechanism that surfaces an EXPAND claim or a REDUCE-drop, so a
+          # single-issue batch that EXPANDed and then crashed before writing it looked
+          # identical to one that simply built the original issue, and got auto-closed either
+          # way (#510). Require disposition_valid universally instead. #453: a
           # well-formed-but-empty `built: []` (e.g. every original issue got REDUCE-dropped but
           # an incidental commit still landed) must NOT fall through to auto-close either — gate
           # on `built` actually having entries, not just on the file being valid JSON.
-          if [ -n "$built" ] || { [ "$disposition_valid" = false ] && [ "$batch_size" -eq 1 ]; }; then
+          if [ -n "$built" ]; then
             closes=$(for n in $nums; do echo "Closes #$n"; done)
           else
             closes=$(for n in $nums; do echo "Related to #$n (not auto-closed — no disposition record, please verify)"; done)

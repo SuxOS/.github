@@ -62,7 +62,7 @@ run_scenario() {
   rm -f "$dfile"
 }
 
-echo "[1/3] plain dropped (superseded absent/false) -> release claim + 'dropped from batch' comment, no close"
+echo "[1/4] plain dropped (superseded absent/false) -> release claim + 'dropped from batch' comment, no close"
 log1="$(mktemp)"
 run_scenario "plain-dropped" '[1,2]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"too risky this session","superseded":false}]}' "$log1"
@@ -75,7 +75,7 @@ else
 fi
 rm -f "$log1"
 
-echo "[2/3] superseded dropped (superseded=true) -> release claim + close --reason 'not planned', no plain comment"
+echo "[2/4] superseded dropped (superseded=true) -> release claim + close --reason 'not planned', no plain comment"
 log2="$(mktemp)"
 run_scenario "superseded-dropped" '[1,3]' \
   '{"built":[1],"dropped":[{"number":3,"reason":"already fixed by #999","superseded":true}]}' "$log2"
@@ -88,7 +88,7 @@ else
 fi
 rm -f "$log2"
 
-echo "[3/3] mixed batch: one plain-dropped + one superseded-dropped + one built -> each takes its own path, built one only gets Closes"
+echo "[3/4] mixed batch: one plain-dropped + one superseded-dropped + one built -> each takes its own path, built one only gets Closes"
 log3="$(mktemp)"
 run_scenario "mixed" '[1,2,3]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"deferred","superseded":false},{"number":3,"reason":"stale, fixed elsewhere","superseded":true}]}' "$log3"
@@ -103,6 +103,18 @@ else
   bad "mixed batch: expected #2 comment / #3 close / Closes only #1 — got: $(cat "$log3")"
 fi
 rm -f "$log3"
+
+echo "[4/4] single-issue batch, NO disposition file -> 'Related to' wording, no Closes (#510)"
+log4="$(mktemp)"
+run_scenario "single-issue-no-disposition" '[42]' '' "$log4"
+if grep -q 'Related to #42' "$log4" \
+  && ! grep -q 'Closes #42' "$log4" \
+  && grep -q "disposition record doesn't confirm this issue shipped" "$log4"; then
+  note "single-issue no-disposition: Related-to, not auto-closed"
+else
+  bad "single-issue no-disposition: expected Related-to without Closes — got: $(cat "$log4")"
+fi
+rm -f "$log4"
 
 if [ "$fail" -eq 0 ]; then
   echo "All issue-build disposition dropped/superseded close-path tests passed."

@@ -87,13 +87,26 @@ jobs:
           # Only a FAILING check in this set is
           # "required"; a failing optional/advisory check must not be labelled required.
           required=""
+          prot_ok=false
+          rules_ok=false
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+            prot_ok=true
             required="$required
           $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
           fi
           if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+            rules_ok=true
             required="$required
           $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
+          fi
+          # #511: with no else/warning branch here, a token lacking admin perms (classic
+          # protection is admin-only) plus a transient blip on rulesets used to degrade
+          # $failing to permanently false for the whole run with zero visibility. Warn
+          # loudly — same "degraded detection must not stay silent" pattern this file's own
+          # pr-limit-truncation warning above and the sibling assert-branch-protection/
+          # check.sh both already follow — whenever NEITHER surface was readable.
+          if [ "$prot_ok" != true ] && [ "$rules_ok" != true ]; then
+            echo "::warning::could not read main's branch protection OR rulesets (token perms / API blip) — required-check detection is degraded this run; PRs with a genuinely failing required check may go unflagged"
           fi
           required_json=$(printf '%s\n' "$required" | sed 's/^ *//' | { grep -v '^$' || true; } | sort -u | jq -R . | jq -sc .)
 

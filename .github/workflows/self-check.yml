@@ -123,3 +123,11 @@ jobs:
       - name: Assert model-policy.json stays in sync with fixer/issue-build defaults, caller-stub pins, and budget-governor's opus classification
         run: bash scripts/test-model-policy.sh
         shell: bash
+
+      - name: Assert pr-watch warns when branch-protection/rules reads both fail (degraded required-check detection)
+        run: bash scripts/test-pr-watch-required-check-detection.sh
+        shell: bash
+
+      - name: Assert Safe-Outputs-envelope assertion logic (scope/secret-token/label-mutation checks)
+        run: bash scripts/test-check-safe-outputs-envelope.sh
+        shell: bash
