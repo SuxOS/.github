@@ -234,9 +234,13 @@ jobs:
             # of `Closes #n` (issue-build.yml:974), and per its own comment that's a routine
             # outcome, not rare, so without this those issues' `building` claim would only
             # ever release via the reaper's REAP_STALE_HOURS backstop this sweep exists to
-            # bypass.
+            # bypass. `related to` (unlike the fix/close/resolve keywords) has a plausible
+            # negated form a hand-edited PR body could introduce (SuxOS/.github#538) — "not
+            # related to #n" must not release #n's claim — so it alone gets a negative
+            # lookbehind; -P (not -E) is required for that, same PCRE usage as
+            # test-dashboard-queries.sh.
             nums=$(printf '%s' "$live" | jq -r '.body // ""' \
-              | grep -ioE '\b(close[sd]?|fix(es|ed)?|resolve[sd]?|related to)[[:space:]]+#[0-9]+' \
+              | grep -ioP '\b(close[sd]?|fix(es|ed)?|resolve[sd]?|(?<!not )related to)[[:space:]]+#[0-9]+' \
               | grep -oE '[0-9]+' || true)
             for num in $nums; do
               gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \

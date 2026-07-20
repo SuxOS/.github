@@ -161,5 +161,16 @@ else
   bad "stub already pinned to @main left untouched" "content changed"
 fi
 
+# 11. (e) STALE MULTIPLEX SHAPE — a caller stuck on the pre-multiplex fixer shape (missing
+#     one of the fixer-bugs/fixer-30m/fixer sibling tier stubs, #368) gets the missing tier
+#     added back for free by the (a) handling above (#534) — no separate remediation code.
+d="$(fresh_copy missing-fixer-tier)"; rm -f "$d/fixer-30m.yml"
+bash "$remediate" "$d" >/dev/null
+if [ -f "$d/fixer-30m.yml" ] && grep -q 'workflows/fixer.yml@main' "$d/fixer-30m.yml"; then
+  ok "(e) missing fixer tier stub (fixer-30m) re-added via (a) handling"
+else
+  bad "(e) missing fixer tier stub (fixer-30m) re-added via (a) handling" "fixer-30m.yml not restored"
+fi
+
 if [ "$failures" -gt 0 ]; then echo; echo "$failures assertion(s) failed"; exit 1; fi
 echo; echo "all remediate-caller-stubs assertions passed"

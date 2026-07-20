@@ -114,6 +114,25 @@ number and read the log directly — every stage in this pipeline supports manua
 exactly this reason. If the run succeeds by hand but never fires on schedule, the cron/
 trigger wiring itself (caller stub, not the reusable) is the next thing to check.
 
+## 7. Verify the actual actor before citing a PR/issue's final state as proof automation worked
+
+When diagnosing "did automation X actually do Y" (e.g. "did pr-drain's DIRTY-CONFLICT sweep
+close this PR"), don't infer cause from final state (closedAt, a label gone) — a human can
+reach the exact same terminal state (a manual close, a hand `gh issue edit`) inside the same
+window an automated sweep ran in, and the two are easy to conflate, especially skimming a
+long-running tracking issue. Check who/what actually did it:
+
+```bash
+gh api repos/{owner}/{repo}/issues/<n>/timeline --paginate | jq -r '.[] | select(.event=="closed") | .actor.login'
+```
+
+SuxOS/.github#484 was dropped by three separate builder sessions that each cited this repo's
+own PR #474 being closed as proof the sweep works — the timeline showed #474 was actually
+closed by its human author (`colinxs`, a manual "production-driver requeue" per their own
+comment), and pr-drain's only run in that window logged an empty DIRTY-conflict candidate
+set (SuxOS/.github#537). Trust the timeline's `actor.login` on the specific event, never
+state-plus-timing alone.
+
 ## Keeping this current
 
 This runbook is deliberately generic over "which specific incident" — the pipeline changes

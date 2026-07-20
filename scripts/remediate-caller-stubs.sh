@@ -17,6 +17,14 @@
 #       (claude-autofix is job-chained into ci.yml, not its own caller stub — see
 #       scaffold-caller.sh's `ci` header). Removed outright.
 #
+# check-caller-conformance.sh's (e) STALE MULTIPLEX SHAPE (a caller that adopted a
+# multiplexed reusable, e.g. the 3-tier fixer cadence #368, via only some sibling stub
+# files) is ALSO already fixed here, for free, as a side effect of the (a) handling above:
+# `bash "$SCAFFOLD" --out-dir "$WFDIR"` runs unconditionally and scaffold-caller.sh's own
+# emit() only skips files that already exist, so any missing sibling tier stub gets added
+# back the same way a wholly-missing canonical stub would (SuxOS/.github#534). No separate
+# remediation code needed or wanted for (e).
+#
 # Deliberately NOT handled here (left advisory-only, needs a human):
 #   - The generic non-canonical-stub case of (b) — could be an intentional repo-specific
 #     workflow that happens to wire a SuxOS reusable; check-caller-conformance.sh's own
