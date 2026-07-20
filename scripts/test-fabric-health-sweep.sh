@@ -82,10 +82,16 @@ EOF
 run_collect() {
   local fakegh_dir="$1" scratch status_json rc
   scratch=$(mktemp -d)
+  # Mirrors the real workflow's "Checkout SuxOS/.github (shared trust predicate)" step
+  # (#551), which lands scripts/lib/is-trusted-author.jq at $GITHUB_WORKSPACE/.suxos-ci —
+  # the collect step's jq `include` needs it at that same relative location here.
+  mkdir -p "$scratch/.suxos-ci/scripts/lib"
+  cp scripts/lib/is-trusted-author.jq "$scratch/.suxos-ci/scripts/lib/"
   ( cd "$scratch" && PATH="$fakegh_dir:$PATH" GH_TOKEN=x ORG=testorg REPOS=repo1 \
       EXCLUDE_LABELS="hold,blocked,throttle,epic" \
       NONBUILDABLE_LABELS="building,hold,needs-human,tracking" \
       STUCK_IDLE_DAYS=2 DISABLED_EXEMPT="" GITHUB_OUTPUT=/dev/null \
+      GITHUB_WORKSPACE="$scratch" \
       bash -e -c "$collect_run" ) > "$scratch/log" 2>&1
   rc=$?
   status_json=""

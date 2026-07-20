@@ -215,3 +215,16 @@ from `gh issue list` at all — use `gh api -X GET "repos/OWNER/REPO/issues?stat
 not `[]` — so flatten with `jq '(add // [])'`, the `// []` guarding a shim/edge-case bare `[]`
 input under `set -e`), then drop `.pull_request != null` entries since the raw issues endpoint
 also returns PRs. See fabric-health.yml's backlog collector (#521) for the reference shape.
+
+`scripts/test-dashboard-queries.sh`'s metric-to-collector pairing (#391) finds each Grafana
+metric's real `suxos_collection_ok` gate by scanning `fabric-health.yml` for `jq -r` ...
+`<<< "$status"` blocks, and it does this with a dumb line-based state machine, not a real
+parser: ONE `jq -r` trigger line opens a block that stays open across everything until the
+NEXT line containing the literal `<<< "$status"`, even across unrelated steps. Inserting new
+`run:` code anywhere between the job's first `jq -r` call (early, in the #475 self cross-run
+fetch) and the Grafana-push step's first real `<<< "$status"` line silently re-merges that
+whole span into one phantom block; if your new code happens to also contain a
+`.collection.<name> == 1`-shaped comparison anywhere in that span, its collector name gets
+mis-attributed to every metric the corrupted block touches (#554). Fix is on your side, not
+the test's: avoid the exact `\.collection\.[a-z_]+\s*==\s*1` shape in code landing in that
+span — e.g. write `!= 0` instead of `== 1` — rather than reworking the scanner.

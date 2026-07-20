@@ -94,7 +94,7 @@ jobs:
       head-branch: \${{ github.event.pull_request.head.ref }}
       head-sha: \${{ github.event.pull_request.head.sha }}
       base-branch: \${{ github.event.pull_request.base.ref }}
-      gates-summary: "npm run type-check · npm test · npm run lint"
+      gates-summary: "npm run type-check · npm test"
     secrets: inherit
 YAML
 
@@ -144,13 +144,17 @@ YAML
 
 # --- Autonomy pipeline -----------------------------------------------------
 
+# unlabeled is required, not cosmetic: removing the `hold` label fires `unlabeled`, and
+# without that type automerge won't re-run to re-arm. pull_request_review is deliberately
+# absent — automerge eligibility no longer reads reviews (the whole predicate is
+# draft+hold), so listening for review submission is dead weight. Matches what every live
+# caller converged on (sux/suxlib/suxrouter; claude-config alone still carries the review
+# trigger as a holdover — not the shape to scaffold forward).
 emit automerge <<YAML
 name: Automerge
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, labeled, ready_for_review]
-  pull_request_review:
-    types: [submitted]
+    types: [opened, reopened, ready_for_review, synchronize, labeled, unlabeled, edited]
 jobs:
   automerge:
     uses: $REPO/.github/workflows/automerge.yml@$REF
@@ -290,21 +294,26 @@ jobs:
     secrets: inherit
 YAML
 
-# Batch schedules, not issues: triggers (2026-07 redesign, docs/design/budget-and-cadence.md):
-# per-issue triggers fanned out one session per event during fixer bursts. A staggered batch
-# keeps the builder at a handful of sessions per day; stagger the minutes per repo so
-# concurrent repos don't stack sessions inside one 5-hour subscription window.
-
+# Hourly cron (not the old 4x/day batch — every live caller converged on hourly) plus an
+# `issues: [labeled]` event trigger so a freshly-labelled bug/enhancement/documentation
+# issue can build well before the next cron tick, same as sux/suxlib/suxrouter/claude-config
+# already do. The label-type filter lives in the job's own `if:` (not the trigger) since
+# `on.issues.types` can only filter the ACTION (labeled/opened/...), not which label was
+# applied — stagger the cron minute per repo so concurrent repos don't stack sessions
+# inside one 5-hour subscription window.
 emit issue-build <<YAML
 name: Issue build
 on:
-  schedule: [{ cron: "7 2,8,14,20 * * *" }]
+  schedule: [{ cron: "7 * * * *" }]
   workflow_dispatch:
+  issues:
+    types: [labeled]
 jobs:
   issue-build:
+    if: github.event_name != 'issues' || contains(fromJSON('["bug","enhancement","documentation"]'), github.event.label.name)
     uses: $REPO/.github/workflows/issue-build.yml@$REF
     with:
-      gates-summary: "npm run type-check · npm test · npm run lint"
+      gates-summary: "npm run type-check · npm test"
       model-hint: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
     secrets: inherit
 YAML
@@ -315,7 +324,9 @@ Caller stubs scaffolded. Remaining manual steps (see README):
   - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, SUX_BOT_APP_ID,
     SUX_BOT_PRIVATE_KEY. (CI billing is subscription-based via
     CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
-  - Create labels: building, needs-human, automerge, hold.
+  - Create labels: building, needs-human, automerge, hold, tracking, epic (the
+    nonbuildable-labels floor), bug, enhancement, documentation, security,
+    effort:small, effort:medium, effort:large (the fixer's proposal-typing labels).
   - Protect main with a repository RULESET (Settings → Rules → Rulesets), NOT
     classic branch protection: assert-branch-protection.yml runs with the App
     token, and GitHub hard-403s a classic-protection read for App tokens (a

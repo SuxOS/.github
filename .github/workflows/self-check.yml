@@ -112,6 +112,10 @@ jobs:
         run: bash scripts/test-fabric-health-sweep.sh
         shell: bash
 
+      - name: Assert fabric-health multi-day history streak/growth-rate math (#554)
+        run: bash scripts/test-fabric-health-history.sh
+        shell: bash
+
       - name: Assert no new bespoke 'gh ... list --limit' call sites outside the tracked allowlist
         run: bash scripts/test-no-new-gh-list-limit.sh
         shell: bash

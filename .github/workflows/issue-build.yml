@@ -334,6 +334,19 @@ jobs:
         id: nonbuildable
         uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
 
+      # scripts/lib/is-trusted-author.js is the single source of truth for the isTrusted
+      # predicate (#551) — a plain checkout, not a bespoke script fetch, since github-script's
+      # `require()` needs a real file on disk. Reuses spine-token (already minted above,
+      # scoped to SuxOS/.github) rather than minting a third token.
+      - name: Checkout SuxOS/.github (shared trust predicate)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
+          token: ${{ steps.spine-token.outputs.token }}
+
       # Real JS via the org's already-pinned actions/github-script (matches audit.yml /
       # sux/deploy.yml / sux/health.yml), not jq-in-bash. This was the most complex shell in
       # the pipeline (a jq reduce doing greedy bin-packing) — bash/jq quoting and word-splitting
@@ -367,11 +380,10 @@ jobs:
             const exclude = (process.env.EXCLUDE || "").split(",").filter(Boolean);
             const nonBuildableLabels = process.env.NONBUILDABLE_LABELS.split(",");
 
-            // Keyed on the IMMUTABLE numeric user.id, not the mutable login — a login is
-            // renameable and a freed handle is reclaimable (security-review finding, #186).
-            const ORG_OWNER_IDS = [18266472]; // colinxs
-            const isTrusted = (u, assoc) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(assoc)
-              || u.login === "suxbot[bot]" || ORG_OWNER_IDS.includes(u.id);
+            // Shared trust predicate (#551) — see scripts/lib/is-trusted-author.js for the
+            // security-review reasoning (#186/#193) on why it's keyed on the immutable
+            // numeric user.id, not the mutable login.
+            const { isTrusted } = require(`${process.env.GITHUB_WORKSPACE}/.suxos-ci/scripts/lib/is-trusted-author.js`);
 
             // 0. Issues already covered by an OPEN pull request. The `building` label is only
             //    the in-run claim (it covers select → PR-open); once a PR exists, IT is the
@@ -1116,6 +1128,27 @@ jobs:
         id: nonbuildable
         uses: SuxOS/.github/.github/actions/nonbuildable-labels@main
 
+      - name: Mint app token for shared trust predicate checkout (SuxOS/.github)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: shared-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
+
+      # scripts/lib/is-trusted-author.js is the single source of truth for the isTrusted
+      # predicate (#551) — see the matching checkout in the select job above.
+      - name: Checkout SuxOS/.github (shared trust predicate)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
+          token: ${{ steps.shared-token.outputs.token }}
+
       # A plain GITHUB_TOKEN cannot dispatch new workflow runs — GitHub blocks that
       # specifically to prevent runaway self-triggering loops — hence the app token above,
       # same as select/build already use to mutate issues/PRs across a run boundary.
@@ -1180,9 +1213,8 @@ jobs:
             // already `building`-claimed, or that an open PR already covers, is NOT more work to
             // dispatch for — counting it would spawn batches that find nothing to do. Re-read
             // fresh (not select's stale output): build/other concurrent runs just changed state.
-            const ORG_OWNER_IDS = [18266472]; // colinxs
-            const isTrusted = (u, assoc) => ["OWNER", "MEMBER", "COLLABORATOR"].includes(assoc)
-              || u.login === "suxbot[bot]" || ORG_OWNER_IDS.includes(u.id);
+            // Shared trust predicate (#551) — see scripts/lib/is-trusted-author.js.
+            const { isTrusted } = require(`${process.env.GITHUB_WORKSPACE}/.suxos-ci/scripts/lib/is-trusted-author.js`);
             const [all, openPrs] = await Promise.all([
               github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
               github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
