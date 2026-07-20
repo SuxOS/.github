@@ -59,8 +59,12 @@ on:
         # small failure blast radius) rather than one big batch's internal subagent fan-out
         # (shared checkout, trusted-not-verified disjointness). Dynamic expand (§3.1.5) still
         # lets a builder push higher when the work in its own batch is light.
-        # 3 -> 5 (2026-07-19, operator: open the throttle at ~5% usage) — more work per batch
-        # without more concurrent open PRs, since parallel-batches stays at 2 (collision cap).
+        # 3 -> 5 (2026-07-19, operator: open the throttle at ~5% usage) — more work per batch.
+        # The same commit also raised parallel-batches 2->3 (see below), so this is NOT "more
+        # work per batch, same concurrency" — both went up together. Collision math still holds
+        # (#525): the requeue cap counts outstanding open builder PRs via max(), not just
+        # in-flight runs, so 3 remains a true ceiling on concurrent open PRs regardless of how
+        # much work each batch carries.
         default: 5
       effort-budget:
         description: >-
@@ -76,7 +80,9 @@ on:
         # max-issues so a typical backlog splits into more concurrent small batches instead of
         # one big serial one — see max-issues above and `parallel-batches` below.
         # 6 -> 10 (2026-07-19, operator: open the throttle at ~5% usage) — bumped alongside
-        # max-issues 3->5 so a batch can carry the wider issue count; parallel-batches held at 2.
+        # max-issues 3->5 so a batch can carry the wider issue count. The same commit also
+        # raised parallel-batches 2->3 (see below), not held at 2 (#525) — see the max-issues
+        # comment above for why the collision math still holds at the new numbers.
         default: 10
       parallel-batches:
         description: >-

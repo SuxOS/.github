@@ -88,7 +88,10 @@ jobs:
         id: range
         run: |
           set -euo pipefail
-          base=$(git rev-list -n1 --first-parent --before="${LOOKBACK_HOURS} hours ago" HEAD || true)
+          if ! base=$(git rev-list -n1 --first-parent --before="${LOOKBACK_HOURS} hours ago" HEAD); then
+            echo "::error::git rev-list failed while computing the audit base — treating as a hard failure, not 'nothing merged'"
+            exit 1
+          fi
           head=$(git rev-parse HEAD)
           if [ -z "$base" ] || [ "$base" = "$head" ]; then
             echo "nothing merged in the last ${LOOKBACK_HOURS}h → cheap exit"

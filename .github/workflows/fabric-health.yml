@@ -191,6 +191,8 @@ jobs:
           backlog_total=0
           issues_all_ok=1      # every repo's issue query observed → backlog_zero is assertable
           collection_all_ok=1  # every collector on every repo succeeded → spine not degraded
+          throttle_any_active=0  # OR across every repo's own throttle level (#522)
+          github_throttle_body=""  # captured from the loop below when repo == ".github"
 
           for repo in $REPOS; do
             slug="${ORG}/${repo}"
@@ -201,23 +203,35 @@ jobs:
             # "unknown" (suxos_collection_ok=0) instead of a healthy-looking zero. Without
             # this a failed issue query reads backlog 0 and can falsely satisfy the
             # backlog-zero Definition-of-Done streak on data that was never observed.
-            # --limit 201 (one past the real 200 cap, #345): if exactly 201 rows come
-            # back the true count is >200 and this page can't be trusted as complete —
-            # treat it as a collection failure (issues_ok=0) rather than a silent
-            # undercount that would read backlog_zero green on real backlog.
-            if issues=$(gh issue list --repo "$slug" --state open --limit 201 \
-                --json number,labels 2>/dev/null); then
-              if [ "$(printf '%s' "$issues" | jq 'length')" -gt 200 ]; then
-                issues="[]"; issues_ok=0
-              else
-                issues_ok=1
-              fi
+            # Uses `gh api` (not `gh issue list --json`, which doesn't expose
+            # authorAssociation at all) with --paginate --slurp so the fetch is
+            # exhaustive rather than a client-set --limit — no separate "did we hit the
+            # cap" check needed (#345's concern doesn't apply to a paginated fetch). The
+            # raw issues endpoint also returns PRs, so pull_request entries are dropped.
+            if raw=$(gh api -X GET "repos/${slug}/issues?state=open&per_page=100" \
+                --paginate --slurp 2>/dev/null); then
+              issues=$(printf '%s' "$raw" | jq -c '(add // []) | map(select(.pull_request == null))')
+              issues_ok=1
             else
               issues="[]"; issues_ok=0
             fi
+            # Build-eligibility trust predicate: MUST mirror issue-build.yml's isTrusted
+            # (OWNER/MEMBER/COLLABORATOR, or the suxbot bot identity, or the ORG_OWNER_IDS
+            # numeric-id stopgap for #186) — issue-build structurally never builds an
+            # untrusted-author issue, so counting one here inflates backlog_zero/the
+            # drain-controller setpoint forever (#521). This is a third copy of the same
+            # predicate (issue-build.yml defines it twice already); a shared composite
+            # action would be better but is out of scope for this fix.
             backlog=$(printf '%s' "$issues" | jq --arg ex "$EXCLUDE_LABELS" --arg nb "$NONBUILDABLE_LABELS" '
               ((($ex | split(",")) + ($nb | split(","))) | map(select(length>0))) as $excl
-              | [ .[] | select((.labels | map(.name)) as $l | any($excl[]; . as $e | $l | index($e)) | not) ]
+              | [ .[]
+                  | select((.labels | map(.name)) as $l | any($excl[]; . as $e | $l | index($e)) | not)
+                  | select(
+                      (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
+                      or .user.login == "suxbot[bot]"
+                      or .user.id == 18266472
+                    )
+                ]
               | length')
 
             # --- PRs: open / red (failing checks) / stuck ---
@@ -358,12 +372,29 @@ jobs:
                            else true end)
                   | {file: (.path | split("/") | last), name: .name, state: .state} ]')
 
+            # --- Budget throttle: this repo's own "Autonomy throttle" tracking issue
+            # (#522) — budget-governor.yml writes one per managed repo, and a per-repo
+            # `throttle-manual` pin or a stale write can leave one repo's level diverged
+            # from the rest, so this must be read per repo like every other collector
+            # here, not sampled once off .github. Same body-match (never a label) and
+            # fail-open-to-green-on-lookup-error semantics as the fleet-wide read below.
+            repo_throttle_body=$(gh issue list --repo "$slug" --state open \
+                --search "\"Autonomy throttle\" in:title" --limit 100 \
+                --json title,body 2>/dev/null \
+              | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""') || true
+            repo_throttle_level=$(grep -m1 -oE '^level: (green|yellow|red)$' <<<"$repo_throttle_body" | awk '{print $2}') || true
+            repo_throttle_level=${repo_throttle_level:-green}
+            repo_throttle_active=$([ "$repo_throttle_level" != "green" ] && echo 1 || echo 0)
+            [ "$repo_throttle_active" -eq 1 ] && throttle_any_active=1
+            [ "$repo" = ".github" ] && github_throttle_body="$repo_throttle_body"
+
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
               --argjson disabled "$disabled_json" \
               --argjson merged "$merged_count" \
               --argjson integral "$integral_error" --argjson checked_at "$now_epoch" \
               --argjson recommended "$raw_output" \
+              --argjson throttle_active "$repo_throttle_active" \
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
               --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
               --argjson gok "$integral_ok" \
@@ -372,6 +403,7 @@ jobs:
                 merged_prs_in_window: $merged,
                 integral_error: $integral,
                 recommended_parallel_batches: $recommended,
+                budget_throttle_active: $throttle_active,
                 checked_at: $checked_at,
                 collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
@@ -387,31 +419,26 @@ jobs:
             fi
           done
 
-          # --- Budget governor: throttle active when the .github "Autonomy throttle"
-          # tracking issue's `level:` line is not green (#319). budget-governor.yml writes
-          # the level into the issue BODY and labels it `tracking` — nothing applies a bare
-          # `throttle` label — so match the same body line check-throttle/action.yml reads,
-          # never a label. Fail-open to green on any lookup error, mirroring check-throttle:
-          # a governor outage must not falsely report the org as throttled.
-          throttle_body=$(gh issue list --repo "${ORG}/.github" --state open \
-              --search "\"Autonomy throttle\" in:title" --limit 100 \
-              --json title,body 2>/dev/null \
-            | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""') || true
-          throttle_level=$(grep -m1 -oE '^level: (green|yellow|red)$' <<<"$throttle_body" | awk '{print $2}') || true
-          throttle_level=${throttle_level:-green}
-          throttle_active=$([ "$throttle_level" != "green" ] && echo 1 || echo 0)
+          # --- Budget governor: fleet-wide throttle_active is now the OR of every repo's
+          # own "Autonomy throttle" tracking issue level, computed in the loop above
+          # (#522) — a single repo pinned via `throttle-manual` or left stale by a failed
+          # write no longer hides behind a healthy-looking .github-only read. Per-repo
+          # detail lives in each repos[].budget_throttle_active.
+          throttle_active="$throttle_any_active"
 
-          # budget-governor's token-bucket headroom (#501), read structurally off the same
-          # tracking-issue body instead of the throttle-level line alone — the drain-
-          # controller's headroom dampener (docs/design/2026-07-18-drain-controller-design.md
-          # §2.4/#476) needs this as a number, not tracking-issue prose. Absent/unparseable
-          # (governor hasn't run yet, or a pre-#501 body with no such line) degrades to
+          # budget-governor's token-bucket headroom (#501), read structurally off the
+          # .github tracking-issue body (the fleet-wide numbers budget-governor computes
+          # once and writes identically to every repo, .github included) instead of the
+          # throttle-level line alone — the drain-controller's headroom dampener
+          # (docs/design/2026-07-18-drain-controller-design.md §2.4/#476) needs this as a
+          # number, not tracking-issue prose. Absent/unparseable (governor hasn't run yet,
+          # a pre-#501 body with no such line, or .github isn't in $REPOS) degrades to
           # `null` in fabric-status.json below, NOT a fabricated 0 — a bare 0 would read as
           # "budget fully exhausted" and wrongly force maximum dampening, whereas null lets a
           # consumer fail-soft to "no dampening", the same missing-data contract every other
           # spine signal here already uses.
-          opus_avail_min=$(grep -m1 -oE '^opus_avail_min: [0-9]+$' <<<"$throttle_body" | awk '{print $2}') || true
-          total_avail_min=$(grep -m1 -oE '^total_avail_min: [0-9]+$' <<<"$throttle_body" | awk '{print $2}') || true
+          opus_avail_min=$(grep -m1 -oE '^opus_avail_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
+          total_avail_min=$(grep -m1 -oE '^total_avail_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
 
           # Gate backlog_zero on issue-collection success (#305): only assert org backlog
           # is zero when every repo's issue query was actually observed. An unobserved
@@ -488,6 +515,10 @@ jobs:
             fi
             printf 'suxos_backlog_zero value=%s %s\n' "$(jq '.backlog_zero' <<< "$status")" "$ts"
             printf 'suxos_budget_throttle_active value=%s %s\n' "$(jq '.budget_throttle_active' <<< "$status")" "$ts"
+            # Per-repo detail behind the fleet-wide OR above (#522) — lets the dashboard
+            # show WHICH repo is throttled instead of only that at least one is.
+            jq -r --arg ts "$ts" '.repos[] |
+              "suxos_budget_throttle_active,repo=\(.repo) value=\(.budget_throttle_active) \($ts)"' <<< "$status"
             printf 'suxos_collector_ok value=1 %s\n' "$ts"
             # Per-repo/per-collector collection-integrity gauge (#305): 1 when that repo's
             # query succeeded, 0 when it errored. The dashboard alerts on any <1 so an
