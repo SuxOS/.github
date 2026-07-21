@@ -109,7 +109,7 @@ jobs:
         # step fail visibly in the log but keep going so Gate's existing logic decides the
         # outcome from the (here, empty) verdict, same as any other no-verdict case.
         continue-on-error: true
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
           # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
@@ -154,7 +154,7 @@ jobs:
         # never runs when the review was intentionally inert (missing key).
         if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
         continue-on-error: true
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
           # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
@@ -202,7 +202,7 @@ jobs:
         id: claude_apikey
         if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == '' && steps.claude_retry.outputs.structured_output == '' && steps.pre.outputs.apikey == 'true'
         continue-on-error: true
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
           CLAUDE_CODE_RETRY_WATCHDOG: "1"

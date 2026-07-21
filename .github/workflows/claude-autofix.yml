@@ -291,7 +291,7 @@ jobs:
 
       - name: Claude — fix the CI failure
         if: steps.gate.outputs.go == 'true' && steps.cap.outputs.go == 'true'
-        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
           # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
