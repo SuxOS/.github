@@ -16,7 +16,11 @@ name: Fabric health spine (reusable)
 # Prometheus from series history (min_over_time(suxos_backlog_zero[7d]) == 1),
 # NOT tracked in the workflow. No state to persist, nothing to corrupt.
 #
-# Read-only against every repo (no mutation). Caller (self-fabric-health.yml)
+# Read-only against every surveyed repo (no mutation) — with one exception: the §4
+# next-arc reconciler (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.4,
+# #556) upserts a single tracking issue in THIS repo (.github) stating the current
+# decision-table verdict, same dedup-by-title pattern as budget-governor.yml's org-wide
+# report. Caller (self-fabric-health.yml)
 # owns the schedule and passes the repo list + optional edge smoke checks:
 #   uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
 #   with: { repos: "sux suxlib suxrouter claude-config .github" }
@@ -67,6 +71,17 @@ on:
           Grafana-only PromQL query this org has no read-back capability for.
         type: string
         default: "7"
+      opus-budget-min:
+        description: >-
+          Opus-tier token-bucket capacity in runner-minutes — must match
+          budget-governor.yml's own OPUS_BUDGET_MIN input so the §4 next-arc
+          reconciler's headroom_fraction (budget_opus_avail_min / this) reads the
+          same "≥50% idle headroom" the governor itself computes against
+          (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.4, #556). Not
+          read back from the governor directly — there is no cross-workflow input
+          read, only the "Autonomy throttle" issue body's absolute-minutes numbers.
+        type: string
+        default: "900"
       workflow-disabled-exempt:
         description: >-
           Comma-separated workflow file basenames that are exempt from
@@ -78,7 +93,7 @@ on:
 
 permissions:
   contents: read
-  issues: read
+  issues: write
   pull-requests: read
   actions: read
   checks: read
@@ -302,11 +317,20 @@ jobs:
             prior_integral=$(printf '%s' "$prior_json" | jq -r --arg r "$repo" \
               '(.repos // [])[] | select(.repo == $r) | .integral_error // empty' 2>/dev/null || true)
             prior_integral="${prior_integral:-0}"
+            # merged_ok=0 means merged_count is a fabricated 0 (#508), not a real
+            # observation — feeding it into `err` would permanently inflate
+            # integral_error (it becomes next run's prior_integral). Hold the integral
+            # unchanged and derive raw_output from the held integral alone (err=0) so a
+            # transient query failure doesn't corrupt the running PI state.
             read -r integral_error raw_output <<<"$(awk -v prior="$prior_integral" -v backlog="$backlog" \
-              -v merged="$merged_count" -v window="$merged_window_hours" 'BEGIN {
-                merged_rate = (window > 0) ? merged / window : 0
-                setpoint = backlog / 48
-                err = setpoint - merged_rate
+              -v merged="$merged_count" -v window="$merged_window_hours" -v merged_ok="$merged_ok" 'BEGIN {
+                if (merged_ok == 1) {
+                  merged_rate = (window > 0) ? merged / window : 0
+                  setpoint = backlog / 48
+                  err = setpoint - merged_rate
+                } else {
+                  err = 0
+                }
                 integral = prior + err
                 if (integral < 0) integral = 0
                 if (integral > 20) integral = 20
@@ -648,6 +672,97 @@ jobs:
             fabric-status.json > fabric-status.json.tmp
           mv fabric-status.json.tmp fabric-status.json
 
+      # §4 next-arc reconciler (docs/design/2026-07-19-next-arc-decision-rule-design.md
+      # §3.4, #556) — evaluates docs/design/2026-07-16-suxos-vx-next-arc.md §4's
+      # first-match decision table off the streak/headroom/inflow/edge signals this same
+      # job already collected (the design doc's own scoping deliberately leaves the
+      # gate's "fixer inflow re-enabled" precondition out of this reconciler — no signal
+      # for it exists yet, tracked separately). Inflow-bound comparison per
+      # docs/design/2026-07-19-inflow-bound-comparison-spec.md (#555): MIN_SIGNAL_PER_DAY
+      # floor on backlog_growth_per_day is the near-zero tie-break, and a null growth
+      # rate (insufficient history) falls through rather than fabricating a match.
+      - name: Evaluate §4 next-arc decision table
+        id: next-arc
+        env:
+          OPUS_BUDGET_MIN: ${{ inputs.opus-budget-min }}
+          WINDOW_HOURS: ${{ inputs.merged-window-hours }}
+        run: |
+          set -euo pipefail
+          verdict=$(jq -c --argjson opus_budget "$OPUS_BUDGET_MIN" --argjson window "$WINDOW_HOURS" '
+            (.history.backlog_zero_streak_days // 0) as $streak
+            | (.history.backlog_growth_per_day) as $growth
+            | (.budget_opus_avail_min) as $avail
+            | (if $avail != null then ($avail / $opus_budget) else null end) as $headroom
+            | ([.repos[] | select(.collection.merged != 0) | .merged_prs_in_window] | add // 0) as $merged_sum
+            | (if $window > 0 then ($merged_sum * (24 / $window)) else 0 end) as $drain_rate
+            | (($growth != null) and ($growth > 1) and ($growth > $drain_rate)) as $inflow_bound
+            | ((.edge_checks // []) | any(.ok == false)) as $edge_red
+            | (($streak >= 7) and (.collection_ok == 1)) as $drain_green
+            | {
+                row: (
+                  if $drain_green and $headroom != null and $headroom >= 0.5 then "scale-unit-of-work"
+                  elif $drain_green and $headroom != null and $headroom < 0.5 then "budget-cadence-tuning"
+                  elif $drain_green and $headroom == null then "insufficient-data-headroom"
+                  elif $inflow_bound then "self-direction"
+                  elif $edge_red then "edge-reliability"
+                  else "more-stability"
+                  end),
+                streak_days: $streak,
+                days_available: (.history.days_available // 0),
+                days_requested: (.history.days_requested // 0),
+                growth_per_day: $growth,
+                drain_rate_per_day: $drain_rate,
+                headroom_fraction: $headroom,
+                drain_green: $drain_green,
+                inflow_bound: $inflow_bound,
+                edge_red: $edge_red
+              }' fabric-status.json)
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "next-arc verdict: $(printf '%s' "$verdict" | jq -r .row)"
+
+      - name: Build §4 next-arc tracking-issue body
+        id: next-arc-body
+        env:
+          VERDICT: ${{ steps.next-arc.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          row=$(printf '%s' "$VERDICT" | jq -r '
+            {"scale-unit-of-work": "Scale the unit of autonomous work",
+             "budget-cadence-tuning": "Budget/cadence tuning",
+             "insufficient-data-headroom": "Insufficient data (headroom unknown)",
+             "self-direction": "Self-direction",
+             "edge-reliability": "Edge reliability arc",
+             "more-stability": "More stability"}[.row]')
+          body=$(printf '%s\n' \
+            "Auto-maintained by fabric-health.yml (#556). Last updated $(date -u '+%Y-%m-%d %H:%M UTC')." \
+            "Evaluates docs/design/2026-07-16-suxos-vx-next-arc.md §4's first-match decision table." \
+            "" \
+            "**Current verdict: ${row}**" \
+            "" \
+            "Evidence:" \
+            "$(printf '%s' "$VERDICT" | jq -r '
+              "- backlog-zero streak: \(.streak_days)d (history sampled \(.days_available)/\(.days_requested) days) — drain_green=\(.drain_green)\n" +
+              "- opus headroom fraction: \(.headroom_fraction // "unknown")\n" +
+              "- backlog growth/day: \(.growth_per_day // "unknown (insufficient history)") vs drain rate/day: \(.drain_rate_per_day) — inflow_bound=\(.inflow_bound)\n" +
+              "- edge panels red: \(.edge_red)"')" \
+            "" \
+            "Gate note: this verdict does NOT include the §4 gate's \"fixer inflow re-enabled for the last 3 days\" precondition — no signal for that exists yet (docs/design/2026-07-19-next-arc-decision-rule-design.md §2). Treat \`scale-unit-of-work\`/\`budget-cadence-tuning\` as provisional until that's checked by hand.")
+          {
+            echo "body<<EOF_NEXT_ARC_BODY"
+            printf '%s\n' "$body"
+            echo "EOF_NEXT_ARC_BODY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refresh §4 next-arc tracking issue
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: open
+          update-mode: replace
+          title: "Next-arc decision (§4)"
+          body: ${{ steps.next-arc-body.outputs.body }}
+          labels: "tracking"
+
       - name: Ship snapshot to Grafana Cloud (Prometheus + Loki)
         env:
           GRAFANA_PROM_URL: ${{ secrets.GRAFANA_PROM_URL }}
@@ -700,7 +815,10 @@ jobs:
             # formula's setpoint is backlog/48, so a failed issues query this tick must
             # also suppress emission, not just a failed prior-run artifact fetch — same
             # absent-sample-not-a-misleading-zero contract as the other derived per-repo
-            # series above. (collection.merged has the same gap, tracked separately in #508.)
+            # series above. collection.merged doesn't need to gate this series too: a
+            # failed merged-PR query now holds integral_error at its prior (valid) value
+            # instead of corrupting it (#508's awk fix above), so the value emitted here
+            # is always a real observation, just possibly stale.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.integral == 1 and .collection.issues == 1) |
               "suxos_drain_integral_error,repo=\(.repo) value=\(.integral_error) \($ts)\n" +
               "suxos_recommended_parallel_batches,repo=\(.repo) value=\(.recommended_parallel_batches) \($ts)"' <<< "$status"
