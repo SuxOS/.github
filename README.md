@@ -25,14 +25,22 @@ for the `sux` ↔ `suxrouter` residential-egress contract (schema at
 ## The two groups
 
 **Gates** (required checks that block merge):
-`ci.yml` · `security-review.yml` · `audit.yml` — secret scanning is
+`ci.yml` · `security-review.yml` · `audit.yml` · `pin-consistency.yml` (supply-chain
+pin hygiene: SHA-pin drift + unpinned-tag checks, HARD-FAIL required gate on this repo;
+also runs an ADVISORY-only consumer sweep of the same rules across every repo in
+`managed-repos.json`, never fails a merge there) — secret scanning is
 GitHub's native secret-scanning + push-protection (repo Settings → Security), not
 a workflow here; the standalone `secret-scan.yml`/`gitleaks` gate was retired.
 
 **Scheduled monitoring** (runs on the caller's schedule/dispatch, opens/refreshes a tracking issue — does not block merge):
 `health.yml` (app health) — autonomy-pipeline run volume/duration is covered by
 `budget-governor.yml` below, not a separate workflow (the former `pipeline-utilization.yml`
-was dead code with no caller and was removed, #240)
+was dead code with no caller and was removed, #240) · `fabric-health.yml` (the
+fabric-stability-v2 spine, reusable: drain-controller PI-formula, collection-integrity
+contract, Grafana Cloud push, produces the `fabric-status.json` ground-truth artifact
+that `issue-build.yml`'s select/requeue jobs consume) · `self-fabric-health.yml` (its
+org-wide caller stub, run from `.github` every 15 min against every repo in
+`managed-repos.json` plus `.github` itself)
 
 **Autonomy pipeline** (keeps PRs moving hands-off — native GitHub auto-merge, not a merge
 queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)):
@@ -103,8 +111,11 @@ resolves to here (consumed by the `dispatch`/`orient` tools):
 | `red-rebase` | `pr-auto-update.yml` + `claude-autofix.yml` + `pr-unstick.yml` |
 
 Everything else (`security-review`, `deep-audit`, `org-consistency`, `budget-governor`,
-`pr-watch`, `pr-drain`, `health`, `ci`, `audit`) is a required check or a safety net, not
-one of the three loops.
+`pr-watch`, `pr-drain`, `health`, `ci`, `audit`, `pin-consistency`, `fabric-health`/
+`self-fabric-health`) is a required check or a safety net, not one of the three loops —
+`fabric-health.yml` in particular feeds `issue-build.yml`'s `select`/`requeue` jobs
+(the `collate-build` row above) via `fabric-status.json`, but it is a read-only
+producer for that loop, not itself one of the three.
 
 ## Auth: unified on the subscription token
 
