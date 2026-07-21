@@ -70,6 +70,16 @@ on:
           has no equivalent as of 2026-07.
         type: string
         default: "copilot-swe-agent[bot]"
+      epic-filing:
+        description: >-
+          Consume a proposal's optional `epic: {id, repos}` field
+          (docs/design/2026-07-18-epic-decomposition-design.md §2.2): instead of filing the
+          proposal as an ordinary single-repo issue, file one child issue per named repo
+          (labeled `epic:<id>`) plus one tracking issue in .github. Disabled by default per
+          the design doc's §2.5/§5 gating note — arm only once the vX-arc DoD (7-day drain
+          streak + >=50% opus headroom) is confirmed live.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -109,6 +119,23 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # Org-wide (owner-only, no `repositories:` override — see mint-app-token's own input
+      # comment) token for epic filing: a proposal's `epic.repos` can name repos other than
+      # this caller's own, plus the tracking issue always goes in .github regardless of which
+      # repo fixer.yml is running against (docs/design/2026-07-18-epic-decomposition-design.md
+      # §2.2) — the default app-token above is scoped to only the calling repo, which can't
+      # write either of those. Minted even when a run's proposals end up carrying no epic, to
+      # keep the "File proposed issues" step's token selection a plain fallback (below) rather
+      # than a runtime branch on proposal content.
+      - name: Mint app token for epic filing (org-wide)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true
+        id: epic-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
@@ -330,12 +357,17 @@ jobs:
       # model-authored JSON, no shell-quoting surface.
       - name: File proposed issues
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: file
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Read from whichever attempt produced output (retry only ran if the first was empty).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+          EPIC_FILING: ${{ inputs.epic-filing }}
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
+          # Falls back to the calling-repo-scoped app-token when epic-filing is off (the
+          # epic-token step above didn't run, so its output is empty) — same token, same
+          # behavior as before this input existed.
+          github-token: ${{ steps.epic-token.outputs.token || steps.app-token.outputs.token }}
           script: |
             const { owner, repo } = context.repo;
             const raw = process.env.VERDICT;
@@ -346,9 +378,20 @@ jobs:
             const proposals = Array.isArray(verdict.proposals) ? verdict.proposals : [];
             core.info(`proposals: ${proposals.length} (discarded as duplicate/baseless: ${verdict.discarded_count ?? 0})`);
 
+            const epicFiling = process.env.EPIC_FILING === "true";
+            // docs/design/2026-07-18-epic-decomposition-design.md §2.2. id -> { children }.
+            // Only the FIRST distinct epic id proposed this run gets its tracking issue
+            // upserted below (see the note on the tracking-issue step in this same job) —
+            // `upsert-tracking-issue` is a `uses:` composite-action step, which (like every
+            // `uses:` step) can't be invoked from inside a loop over a dynamic,
+            // model-proposed list of epic ids. In practice this isn't a real limit: fixer's
+            // own prompt already asks for at most one ambitious idea per `deep` pass, and an
+            // epic proposal IS that ambitious idea.
+            const epics = new Map();
+
             const filed = [];
             for (const p of proposals) {
-              const { title, body, type, security, effort } = p || {};
+              const { title, body, type, security, effort, epic } = p || {};
               if (!["bug", "enhancement", "documentation"].includes(type)) { core.warning(`skipping proposal with unexpected type '${type}': ${title}`); continue; }
 
               const labels = [type];
@@ -356,6 +399,29 @@ jobs:
               // An invalid/missing effort is not fatal to filing — issue-build's select step
               // defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
               if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
+
+              const epicId = epic && typeof epic.id === "string" && epic.id ? epic.id : null;
+              const epicRepos = epic && Array.isArray(epic.repos) ? epic.repos.filter((r) => typeof r === "string" && r) : [];
+
+              if (epicFiling && epicId && epicRepos.length > 0) {
+                // Cross-repo epic: one child issue per named repo, each tagged `epic:<id>`,
+                // instead of one ordinary issue in this proposal's own (calling) repo.
+                const entry = epics.get(epicId) || { children: [] };
+                for (const targetRepo of epicRepos) {
+                  try {
+                    const { data } = await github.rest.issues.create({
+                      owner, repo: targetRepo, title, body, labels: [...labels, `epic:${epicId}`],
+                    });
+                    core.info(`filed epic child: ${data.html_url}`);
+                    filed.push(data.html_url);
+                    entry.children.push({ repo: targetRepo, number: data.number, url: data.html_url, title });
+                  } catch (e) {
+                    core.warning(`failed to file epic child '${title}' in ${owner}/${targetRepo}: ${e.message}`);
+                  }
+                }
+                epics.set(epicId, entry);
+                continue;
+              }
 
               try {
                 const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
@@ -369,6 +435,35 @@ jobs:
             if (filed.length > 0) {
               await core.summary.addHeading("fixer: proposals filed", 3).addList(filed).write();
             }
+
+            const [firstEpicId, firstEpic] = epics.size > 0 ? [...epics.entries()][0] : [];
+            if (firstEpicId) {
+              if (epics.size > 1) core.warning(`${epics.size} distinct epic ids proposed this run — only the tracking issue for '${firstEpicId}' is upserted now; the rest pick up on a future run`);
+              const checklist = firstEpic.children.map((c) => `- [ ] ${owner}/${c.repo}#${c.number} ${c.title}`).join("\n");
+              const body = [
+                "Auto-maintained by fixer.yml (docs/design/2026-07-18-epic-decomposition-design.md §2.2).",
+                `Tracks the child issues filed for epic \`${firstEpicId}\`.`,
+                "",
+                checklist,
+              ].join("\n");
+              core.setOutput("epic_id", firstEpicId);
+              core.setOutput("epic_tracking_title", `Epic: ${firstEpicId}`);
+              core.setOutput("epic_tracking_body", body);
+            }
+
+      # Separate step because upsert-tracking-issue is a composite `uses:` step (see the
+      # comment on the epic-id map above for why it can't run inside the filing loop itself).
+      - name: Refresh epic tracking issue
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true && steps.file.outputs.epic_id != ''
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ steps.epic-token.outputs.token }}
+          repo: SuxOS/.github
+          mode: open
+          update-mode: replace
+          title: ${{ steps.file.outputs.epic_tracking_title }}
+          body: ${{ steps.file.outputs.epic_tracking_body }}
+          labels: "tracking"
 
       # Deterministic on purpose (cardinal rule: script over model call whenever exact) —
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped

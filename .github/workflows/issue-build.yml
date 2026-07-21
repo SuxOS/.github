@@ -133,6 +133,16 @@ on:
         description: "Comma-list of labels; issues carrying any are dropped (e.g. `enhancement,wontfix`)."
         type: string
         default: ""
+      value-ranking:
+        description: >-
+          Replace the tier-then-issue-number pack (`select`'s default) with a single pass
+          over all selectable issues sorted by the value-ranking `final_score`
+          (docs/design/2026-07-18-value-ranking-score-spec.md, #469) — tier + effort-fit +
+          backlog-pressure, anti-starvation age-blended. Default false: the tier pack stays
+          the default pack until this is compared against it live, mirroring how #452's
+          spine fetch landed unconsumed first.
+        type: boolean
+        default: false
       model-hint:
         description: "`auto` = tier-sensed model (opus on HIGH/large-effort, else sonnet); or force `opus`/`sonnet`/`haiku` for this run. Default is `sonnet` (operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation) — `auto` is opt-in per caller/run."
         type: string
@@ -201,8 +211,9 @@ jobs:
       turns: ${{ steps.pick.outputs.turns }}
       # Spine signal outputs (docs/design/2026-07-18-value-ranking-selection-design.md §2.1,
       # #452): raw fabric-status.json fields, fail-soft (spine_available=false on any miss).
-      # Not consumed by `pick` yet — that's the score-sort slice
-      # (docs/design/2026-07-18-value-ranking-score-spec.md §5), a separate follow-up issue.
+      # backlog_total feeds `pick`'s value-ranking pressure_term (#469, behind the
+      # `value-ranking` input — see the score-sort formula's own fail-soft comment in `pick`);
+      # the rest are exposed here for other job-output consumers but not read by `pick`.
       spine_available: ${{ steps.spine.outputs.available }}
       spine_backlog_total: ${{ steps.spine.outputs.backlog_total }}
       spine_workflow_red_total: ${{ steps.spine.outputs.workflow_red_total }}
@@ -386,6 +397,8 @@ jobs:
           SIMPLE_MODEL: ${{ inputs.simple-model }}
           BASE_TURNS: ${{ inputs.base-max-turns }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
+          VALUE_RANKING: ${{ inputs.value-ranking }}
+          SPINE_BACKLOG_TOTAL: ${{ steps.spine.outputs.backlog_total }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -483,7 +496,7 @@ jobs:
               if (exclude.length > 0 && exclude.some((l) => labels.includes(l))) return false;
               return true;
             });
-            const buildable = buildableRaw.map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name) }));
+            const buildable = buildableRaw.map((i) => ({ number: i.number, labels: i.labels.map((l) => l.name), created_at: i.created_at }));
 
             // Prerequisite gating (#348): don't batch an issue ahead of a STILL-OPEN issue it
             // names as a hard prerequisite. When #342/#343 ("Extend the dashboard-query gate…")
@@ -555,32 +568,74 @@ jobs:
             // observation-capture) filed the issue; no model call happens here.
             const pointsFor = (labels) => (labels.includes("effort:large") ? 4 : labels.includes("effort:small") ? 1 : 2);
 
-            const high = selectable.filter((i) => i.labels.includes("priority:high") || i.labels.includes("security"));
-            const med = selectable.filter((i) => !high.includes(i) && i.labels.includes("priority:med"));
-            const low = selectable.filter((i) => !high.includes(i) && !med.includes(i));
+            const tierOf = (i) => (i.labels.includes("priority:high") || i.labels.includes("security")) ? "high"
+              : i.labels.includes("priority:med") ? "med" : "low";
 
-            // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding while
-            // under BOTH caps (count, points), spilling into the next tier once the current one
-            // is exhausted instead of stopping cold at tier boundaries. A thin HIGH tier (e.g.
-            // one security issue trickling in) used to starve the whole batch down to count=1
-            // even with a full MED/LOW backlog waiting (operator-observed 2026-07-15) — spillover
-            // fixes that while still always draining HIGH first. `tier` reports the highest tier
-            // actually represented in the picked set (drives the opus-escalation signal below).
-            // Always take at least one issue even if its own points exceed the budget alone —
-            // "always build at least one thing" (three-loop-pipeline.md) is never overridden
-            // by the effort budget (verified: a lone effort:large issue still gets picked
-            // even when its 4pts alone exceed a 2pt budget).
             const picked = [];
             let points = 0;
             let tier = "low";
-            for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
-              if (picked.length >= maxIssues) break;
-              const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
-              for (const it of sorted) {
+
+            // value-ranking (docs/design/2026-07-18-value-ranking-score-spec.md, #469): a
+            // single pass over all selectable issues sorted by final_score descending,
+            // replacing the tier-then-number pack below. Landed behind this flag — the
+            // tier pack stays the DEFAULT (input unset -> false) until this is compared
+            // against it live, mirroring how #452's spine fetch landed unconsumed first.
+            if (process.env.VALUE_RANKING === "true") {
+              const PRESSURE_CAP = 50; // repo-open-issue count past which more pressure stops mattering (spec §2)
+              const AGE_CAP_DAYS = 21; // spec §3: backlog-rot cap, not claim-staleness (hours)
+              const TIER_SCORE = { high: 1.0, med: 0.5, low: 0.0 };
+              // Fail-soft (spec §6): a missing/stale spine fetch degrades to a neutral
+              // pressure_term, never blocks selection — same contract as #452's own fetch.
+              const rawBacklog = Number(process.env.SPINE_BACKLOG_TOTAL);
+              const backlogPressure = Number.isFinite(rawBacklog) ? rawBacklog : 0;
+              const pressureTerm = Math.min(Math.max(backlogPressure / PRESSURE_CAP, 0), 1);
+              const nowMs = Date.now();
+
+              const scored = selectable
+                .map((i) => ({ ...i, pts: pointsFor(i.labels), tierName: tierOf(i) }))
+                .map((i) => {
+                  const effortFit = 1 / i.pts;
+                  const ageDays = (nowMs - new Date(i.created_at).getTime()) / 86_400_000;
+                  const baseScore = 0.45 * TIER_SCORE[i.tierName] + 0.25 * effortFit + 0.30 * pressureTerm;
+                  const ageFactor = Math.min(Math.max(ageDays / AGE_CAP_DAYS, 0), 1);
+                  const finalScore = baseScore * (1 - ageFactor) + 1.0 * ageFactor;
+                  return { ...i, finalScore };
+                })
+                .sort((a, b) => b.finalScore - a.finalScore);
+
+              for (const it of scored) {
                 if (picked.length >= maxIssues) break;
-                if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
+                if (picked.length === 0) { picked.push(it); points += it.pts; continue; }
                 if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
-                continue;
+              }
+              tier = picked.length > 0 ? picked[0].tierName : "low";
+              core.info(`value-ranking top scores: ${scored.slice(0, 10).map((i) => `#${i.number}=${i.finalScore.toFixed(3)}`).join(", ")}`);
+            } else {
+              const high = selectable.filter((i) => tierOf(i) === "high");
+              const med = selectable.filter((i) => tierOf(i) === "med");
+              const low = selectable.filter((i) => tierOf(i) === "low");
+
+              // Greedy pack, oldest-first within each tier, HIGH -> MED -> LOW: keep adding
+              // while under BOTH caps (count, points), spilling into the next tier once the
+              // current one is exhausted instead of stopping cold at tier boundaries. A thin
+              // HIGH tier (e.g. one security issue trickling in) used to starve the whole
+              // batch down to count=1 even with a full MED/LOW backlog waiting
+              // (operator-observed 2026-07-15) — spillover fixes that while still always
+              // draining HIGH first. `tier` reports the highest tier actually represented in
+              // the picked set (drives the opus-escalation signal below).
+              // Always take at least one issue even if its own points exceed the budget
+              // alone — "always build at least one thing" (three-loop-pipeline.md) is never
+              // overridden by the effort budget (verified: a lone effort:large issue still
+              // gets picked even when its 4pts alone exceed a 2pt budget).
+              for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
+                if (picked.length >= maxIssues) break;
+                const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
+                for (const it of sorted) {
+                  if (picked.length >= maxIssues) break;
+                  if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
+                  if (points + it.pts <= effortBudget) { picked.push(it); points += it.pts; continue; }
+                  continue;
+                }
               }
             }
             // sensedOpus flags the whole HIGH tier (security or priority:high) or any

@@ -127,3 +127,7 @@ jobs:
       - name: Assert model-policy.json stays in sync with fixer/issue-build defaults, caller-stub pins, and budget-governor's opus classification
         run: bash scripts/test-model-policy.sh
         shell: bash
+
+      - name: Assert Safe-Outputs-envelope harness flags path/secret/label violations without false-positiving on mentions (#541)
+        run: bash scripts/test-check-safe-outputs-envelope.sh
+        shell: bash
