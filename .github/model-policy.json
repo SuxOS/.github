@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for the 2026-07-17 'sonnet pinned org-wide, no Opus escalation' operator directive (docs/design/2026-07-17-automation-structure-and-anti-drift.md, propose row + Model & effort knobs). Gated by scripts/test-model-policy.sh (#369) so the reusable defaults, self-*/scaffolded caller-stub pins, and budget-governor's opus classification can't silently re-drift from each other the way they already did once: fixer.yml's `model` default flipped opus->sonnet in #373, but budget-governor.yml's OPUS_WF_RE and its test still expected the bare 'Self fixer'/'Fixer' name to classify as opus for two days until #369 caught it.",
+  "_comment": "Single source of truth for the org model/effort policy (docs/design/2026-07-17-automation-structure-and-anti-drift.md, propose row + Model & effort knobs). Setpoint updated 2026-07-21 from 'sonnet pinned org-wide, no Opus escalation' to SONNET-FIRST + effort-gating: sonnet+medium default for the auto-lane, effort:large GATED to human (see effort_gating below), one Opus+high retry on turn-cap failure (see turncap_retry — RATIFIED, impl pending F2b). Gated by scripts/test-model-policy.sh (#369) so the reusable defaults, self-*/scaffolded caller-stub pins, budget-governor's opus classification, and the effort-gate floor can't silently re-drift from each other the way they already did once: fixer.yml's `model` default flipped opus->sonnet in #373, but budget-governor.yml's OPUS_WF_RE and its test still expected the bare 'Self fixer'/'Fixer' name to classify as opus for two days until #369 caught it.",
   "default_model": "sonnet",
   "reusable_model_defaults": [
     { "workflow": ".github/workflows/fixer.yml", "input": "model", "default": "sonnet" },
@@ -34,5 +34,18 @@
   "budget_governor": {
     "workflow": ".github/workflows/budget-governor.yml",
     "opus_regex_env": "OPUS_WF_RE"
+  },
+  "effort_gating": {
+    "_comment": "2026-07-21 setpoint: effort:large is GATED to human approval — added to the shared nonbuildable-labels floor so large work of ANY type (incl. bugs) is NOT auto-built; it stays open for a human go-ahead. Rationale: a large issue just exhausts the Sonnet turn cap and lands needs-human anyway, so gating is cheaper than escalating. Asserted against the action's emitted floor so the policy and the gate can't drift.",
+    "gated_label": "effort:large",
+    "nonbuildable_action": ".github/actions/nonbuildable-labels/action.yml"
+  },
+  "turncap_retry": {
+    "_comment": "2026-07-21 setpoint: opus-on-fail. RATIFIED; implementation PENDING (F2b). One bounded Opus+high retry when an auto-lane build fails specifically on turn-cap exhaustion (stream-json result subtype 'error_max_turns', matched STRUCTURALLY — never a text grep, cf. classify-security-noverdict.sh — so an issue/tool-output string can't spoof a costly retry). NOT a blanket escalation and NOT a retry on real test/security rejections. status=pending until the retry step lands in issue-build.yml, so scripts/test-model-policy.sh does not yet assert it against code.",
+    "status": "pending",
+    "signal": "error_max_turns",
+    "retry_model": "opus",
+    "retry_effort": "high",
+    "max_retries": 1
   }
 }

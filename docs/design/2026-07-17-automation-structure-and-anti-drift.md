@@ -21,12 +21,34 @@ drift-free by construction. Loops:
 | red-rebase | `pr-auto-update.yml` / `pr-unstick.yml` | push:main + cron backstop | Auto-rebases behind/conflicting PRs |
 | propose (3-tier) | `fixer.yml` | 15m bugs / 30m bugs+feats / 1h deep (standardized org-wide 2026-07-17) | Files new bugs/features as issues |
 
-**Model & effort knobs:** `model-hint` (sonnet pinned org-wide, no Opus escalation —
-operator directive); effort auto-scales from tier, bumped one notch org-wide 2026-07-15.
-`max-turns`/`scope` per fixer tier. `budget-governor.yml` writes a `level:` line into each
-repo's "Autonomy throttle" issue; `check-throttle` stands workloads down under budget
-pressure (defer-at: yellow). Headroom target and cadence math live in
-[`budget-and-cadence.md`](budget-and-cadence.md).
+**Model & effort knobs (setpoint updated 2026-07-21 — SONNET-FIRST + effort-gating):** the
+operator moved the setpoint from the 2026-07-17 "sonnet pinned org-wide, no Opus escalation"
+to **sonnet-first, opus-on-fail** with **minor/easy ungated, everything else human approval**.
+Concretely:
+- **Default:** the auto-lane builds small/medium issues on **Sonnet + medium** reasoning
+  effort. `model-hint` default stays `sonnet`.
+- **`effort:large` is GATED to human approval** — added to the shared `nonbuildable-labels`
+  floor, so large work of ANY type (incl. bugs) is NOT auto-attempted; it stays open for a
+  human go-ahead. Rationale: a large issue just exhausts the Sonnet turn cap and ends up
+  `needs-human` anyway, so gating it open is strictly cheaper than escalating. (Ordering
+  within the auto-lane is unchanged — still bugs-first.) Visibility of *why* a gated issue
+  isn't building is the separate #628 "why isn't this building" explainer.
+- **Opus-on-fail (RATIFIED; implementation pending — F2b):** a build that fails specifically
+  on **turn-cap exhaustion** (`error_max_turns`) gets a bounded **ONE Opus + high** retry.
+  NOT a blanket escalation and NOT a retry on other failures — a real test/security rejection
+  is a correct outcome and must not be retried. Deferred out of the F2a/setpoint PR because a
+  correct retry must re-use the full build prompt/contract (safety rules + disposition schema)
+  whose clean reuse needs a prompt refactor off the hot path, not a small additive change; the
+  spoof-resistant turn-cap *detection* (structural match on the stream-json result message,
+  never a text grep — cf. `classify-security-noverdict.sh`) is ready to build.
+
+The older tier-sensed `model-hint: auto` escalation (opus on the HIGH tier) remains opt-in
+per caller. effort otherwise auto-scales from tier, bumped one notch org-wide 2026-07-15.
+This policy is single-sourced in [`.github/model-policy.json`](../../.github/model-policy.json)
+and gated by `scripts/test-model-policy.sh`. `max-turns`/`scope` per fixer tier.
+`budget-governor.yml` writes a `level:` line into each repo's "Autonomy throttle" issue;
+`check-throttle` stands workloads down under budget pressure (defer-at: yellow). Headroom
+target and cadence math live in [`budget-and-cadence.md`](budget-and-cadence.md).
 
 ### Local plane — orchestration only (the "routines that push it forward")
 Scheduled tasks on the operator's machine. They do NOT do the work; they assess the cloud
