@@ -1,0 +1,49 @@
+name: Self next-arc reconciler
+
+# Scheduled caller for the §4 next-arc reconciler
+# (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.4/§3.5, #556/#557),
+# wired on a daily cadence SEPARATE from self-fabric-health.yml's 15-minute cron.
+# The §4 decision table is inherently day-granularity (a 7-day backlog-zero streak,
+# headroom trends) — running it every 15 minutes would just be 96 identical
+# tracking-issue upserts a day for no benefit. Mirrors the self-* pattern
+# (self-fabric-health.yml, self-pr-watch.yml): the reusable workflow holds the
+# logic, this file owns the schedule + org repo list + the `next-arc-reconciler`
+# flag that turns the tracking-issue write on. Read-only against every surveyed
+# repo except the single tracking-issue upsert in THIS repo.
+
+on:
+  schedule: [{ cron: "17 6 * * *" }]
+  workflow_dispatch:
+
+jobs:
+  # Same derivation as self-fabric-health.yml's load-repos job — see its comment
+  # for why this repeats the derivation instead of hardcoding the repo list.
+  load-repos:
+    name: Load managed-repo list
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      repos: ${{ steps.load.outputs.repos }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: load
+        run: |
+          set -euo pipefail
+          echo "repos=$(jq -r '(.repos + [".github"]) | join(" ")' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
+
+  reconcile:
+    needs: load-repos
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      actions: read
+      checks: read
+    uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
+    with:
+      repos: ${{ needs.load-repos.outputs.repos }}
+      edge-smoke-checks: "sux=https://suxos.net/mcp=401"
+      next-arc-reconciler: true
+    secrets: inherit

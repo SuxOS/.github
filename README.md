@@ -40,7 +40,10 @@ fabric-stability-v2 spine, reusable: drain-controller PI-formula, collection-int
 contract, Grafana Cloud push, produces the `fabric-status.json` ground-truth artifact
 that `issue-build.yml`'s select/requeue jobs consume) · `self-fabric-health.yml` (its
 org-wide caller stub, run from `.github` every 15 min against every repo in
-`managed-repos.json` plus `.github` itself)
+`managed-repos.json` plus `.github` itself) · `self-next-arc-reconciler.yml` (same
+reusable `fabric-health.yml`, `next-arc-reconciler: true`, daily cron — the §4
+next-arc decision table is day-granularity, so it's deliberately decoupled from the
+15-min cadence, #557)
 
 **Autonomy pipeline** (keeps PRs moving hands-off — native GitHub auto-merge, not a merge
 queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)):
