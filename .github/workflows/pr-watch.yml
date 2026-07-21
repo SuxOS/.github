@@ -87,15 +87,27 @@ jobs:
           # Only a FAILING check in this set is
           # "required"; a failing optional/advisory check must not be labelled required.
           required=""
+          prot_ok=false
+          rules_ok=false
           if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+            prot_ok=true
             required="$required
           $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
           fi
           if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+            rules_ok=true
             required="$required
           $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
           fi
           required_json=$(printf '%s\n' "$required" | sed 's/^ *//' | { grep -v '^$' || true; } | sort -u | jq -R . | jq -sc .)
+
+          # If BOTH reads fail (missing admin perms, transient API blip), required_json
+          # silently becomes [] and $failing below is permanently false for this whole
+          # run — pr-watch stops flagging genuinely-failing-required-check PRs with zero
+          # visibility. Surface that degradation instead of letting it pass silently.
+          if [ "$prot_ok" = false ] && [ "$rules_ok" = false ]; then
+            echo "::warning::could not read branch protection or rulesets for main (both gh api calls failed) — required-check detection is disabled this run, no PRs will be flagged for a failing required check"
+          fi
 
           stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" --argjson flagBehind "$FLAG_BEHIND" --argjson required "$required_json" '
             [ .[]
