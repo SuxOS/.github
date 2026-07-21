@@ -127,3 +127,7 @@ jobs:
       - name: Assert model-policy.json stays in sync with fixer/issue-build defaults, caller-stub pins, and budget-governor's opus classification
         run: bash scripts/test-model-policy.sh
         shell: bash
+
+      - name: Assert residential-egress contract schema stays valid JSON and both check stubs smoke-run without crashing
+        run: bash scripts/test-residential-egress-contract.sh
+        shell: bash
