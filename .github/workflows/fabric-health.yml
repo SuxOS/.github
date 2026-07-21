@@ -20,7 +20,10 @@ name: Fabric health spine (reusable)
 # next-arc reconciler (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.4,
 # #556) upserts a single tracking issue in THIS repo (.github) stating the current
 # decision-table verdict, same dedup-by-title pattern as budget-governor.yml's org-wide
-# report. Caller (self-fabric-health.yml)
+# report. That write is gated behind the `next-arc-reconciler` input (default false,
+# #557): the underlying decision table is day-granularity, so self-fabric-health.yml's
+# 15-minute cadence leaves it off and self-next-arc-reconciler.yml's daily cadence turns
+# it on — see that file for the caller wiring. Caller (self-fabric-health.yml)
 # owns the schedule and passes the repo list + optional edge smoke checks:
 #   uses: SuxOS/.github/.github/workflows/fabric-health.yml@main
 #   with: { repos: "sux suxlib suxrouter claude-config .github" }
@@ -82,6 +85,20 @@ on:
           read, only the "Autonomy throttle" issue body's absolute-minutes numbers.
         type: string
         default: "900"
+      next-arc-reconciler:
+        description: >-
+          Gate for the §4 next-arc reconciler's tracking-issue write (the
+          "Evaluate/Build/Refresh" steps below) — the decision table is inherently
+          day-granularity (7-day streak, headroom trend), so a caller wiring this on
+          a coarse daily schedule (see self-next-arc-reconciler.yml) sets this true;
+          self-fabric-health.yml's 15-minute cadence leaves it false so it isn't
+          upserting the same tracking issue 96 times a day for no benefit
+          (docs/design/2026-07-19-next-arc-decision-rule-design.md §3.5, #557). The
+          signals it reads (history, edge checks, budget headroom) are still
+          collected every run regardless of this flag — only the tracking-issue
+          write is gated.
+        type: boolean
+        default: false
       workflow-disabled-exempt:
         description: >-
           Comma-separated workflow file basenames that are exempt from
@@ -683,6 +700,7 @@ jobs:
       # rate (insufficient history) falls through rather than fabricating a match.
       - name: Evaluate §4 next-arc decision table
         id: next-arc
+        if: inputs.next-arc-reconciler
         env:
           OPUS_BUDGET_MIN: ${{ inputs.opus-budget-min }}
           WINDOW_HOURS: ${{ inputs.merged-window-hours }}
@@ -722,6 +740,7 @@ jobs:
 
       - name: Build §4 next-arc tracking-issue body
         id: next-arc-body
+        if: inputs.next-arc-reconciler
         env:
           VERDICT: ${{ steps.next-arc.outputs.verdict }}
         run: |
@@ -754,6 +773,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Refresh §4 next-arc tracking issue
+        if: inputs.next-arc-reconciler
         uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

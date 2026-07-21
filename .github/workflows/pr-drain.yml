@@ -48,7 +48,7 @@ on:
         type: string
         default: "200"
       dry-run:
-        description: "If true, log the computed close-set but skip the actual `gh pr close` mutation (and the heads-up comment that announces it). Read-only preview of CLOSE-STALE."
+        description: "If true, log the computed close/arm-set but skip the actual mutation (`gh pr close`/`gh pr merge --auto`, and the heads-up comment that announces a close). Read-only preview of RECONCILE, CLOSE-STALE, and DIRTY-CONFLICT."
         type: boolean
         default: false
       required-gates:
@@ -102,6 +102,7 @@ jobs:
       # avoids threading a potentially large `files`-laden PR list through GITHUB_OUTPUT.
       - name: Reconcile — compute candidates
         id: reconcile-scan
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -112,6 +113,14 @@ jobs:
             --json number,title,isDraft,labels,mergeStateStatus,autoMergeRequest); then
             echo "::error::gh pr list failed — aborting reconcile scan"
             exit 1
+          fi
+
+          # gh pr list returns created-desc order with no way to narrow further, so hitting
+          # the cap silently drops the OLDEST open PRs from RECONCILE's batch, reintroducing
+          # the #482 undercount at this call site specifically (SuxOS/.github#572).
+          pr_count=$(printf '%s' "$prs" | jq 'length')
+          if [ "$pr_count" -eq "$PR_LIMIT" ]; then
+            echo "::warning::open PR count hit pr-limit ($PR_LIMIT) — oldest open PRs beyond the cap were not considered for reconcile this run"
           fi
 
           # Structural filter only (green, unarmed, not held/feature). The drift-prone
@@ -132,14 +141,20 @@ jobs:
 
       - name: Evaluate shared eligibility predicate
         id: eligible
+        continue-on-error: true
         uses: SuxOS/.github/.github/actions/pr-eligibility@main
         with:
           prs-json: ${{ steps.reconcile-scan.outputs.reconcile-candidates }}
 
       # Share automerge.yml's fail-closed branch-protection gate before arming any
       # auto-merge, so a misconfigured main that dropped a required security gate
-      # stops this sweep from re-arming just as it stops automerge.yml.
+      # stops this sweep from re-arming just as it stops automerge.yml. continue-on-error
+      # here means a genuine fail-closed trip (the action's own documented contract) just
+      # skips arming for this cycle instead of also taking down CLOSE-STALE/DIRTY-CONFLICT
+      # below (SuxOS/.github#571).
       - name: Assert main branch protection requires the security gates
+        id: branch-protection
+        continue-on-error: true
         uses: SuxOS/.github/.github/actions/assert-branch-protection@main
         with:
           github-token: ${{ steps.app-token.outputs.token }}
@@ -147,8 +162,12 @@ jobs:
 
       # The batch list picks candidates; each PR is re-read live before arming so a
       # `hold`, a lost mergeStateStatus, or an already-armed auto-merge set by a
-      # concurrent bot in the interim wins.
+      # concurrent bot in the interim wins. Gated on branch-protection's own outcome
+      # (not just job success, since that step now runs continue-on-error) so its
+      # fail-closed trip still stops arming, not just its own step (SuxOS/.github#571).
       - name: Reconcile — arm auto-merge on eligible green PRs
+        if: steps.branch-protection.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -181,6 +200,11 @@ jobs:
               echo "::endgroup::"
               continue
             fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would arm auto-merge on #$n"
+              echo "::endgroup::"
+              continue
+            fi
             gh pr merge --auto --squash "$n" 2>/dev/null && echo "armed auto-merge on #$n" || echo "::warning::could not arm auto-merge on #$n (branch protection unmet / already merging)"
             echo "::endgroup::"
             sleep 2
@@ -189,8 +213,12 @@ jobs:
       # ── CLOSE-STALE ────────────────────────────────────────────────────────────────
       # The batch list picks candidates; each PR is re-read live before closing so a
       # `hold`/`keep` or fresh activity from a concurrent bot in the interim wins.
+      # if: always() so a RECONCILE-side failure above (now continue-on-error, but
+      # belt-and-suspenders since RECONCILE may grow non-continue-on-error steps later)
+      # can never again skip this step, and with it DIRTY-CONFLICT, entirely (SuxOS/.github#571).
       - name: Close stale PRs
         id: drain
+        if: always()
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
