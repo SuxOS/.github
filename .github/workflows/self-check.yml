@@ -60,6 +60,10 @@ jobs:
         run: bash scripts/test-classify-security-noverdict.sh
         shell: bash
 
+      - name: Assert Dependabot security-review routing (pull_request_target ⇒ secrets; exactly one trigger)
+        run: bash scripts/test-security-review-dependabot-routing.sh
+        shell: bash
+
       - name: Assert budget-governor live rate-limit signal
         run: bash scripts/test-budget-governor-ratelimit.sh
         shell: bash
@@ -90,6 +94,10 @@ jobs:
 
       - name: Assert issue-build disposition dropped/superseded close path
         run: bash scripts/test-issue-build-disposition-close.sh
+        shell: bash
+
+      - name: Assert issue-build never selects a needs-human/hold-gated issue on scheduled sweeps
+        run: bash scripts/test-issue-build-preflight-exclusion.sh
         shell: bash
 
       - name: Assert caller-stub conformance check flags missing/dead/stale/misconfigured stubs

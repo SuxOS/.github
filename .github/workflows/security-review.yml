@@ -81,7 +81,14 @@ jobs:
     steps:
       - name: Preflight — need the key
         id: pre
-        if: github.event_name == 'pull_request'
+        # pull_request_target is honored too (not just pull_request): GitHub withholds secrets
+        # — including CLAUDE_CODE_OAUTH_TOKEN — from Dependabot-authored `pull_request` runs, so
+        # the review went inert and this REQUIRED gate failed closed forever on every dep-bump PR
+        # (SuxOS/.github#621/#622). Callers route Dependabot PRs to a `pull_request_target` trigger
+        # (base-repo context ⇒ secrets present), scoped to the dependabot[bot] actor only — see
+        # self-security-review.yml. Everyone else stays on plain `pull_request`; this guard just
+        # lets the Dependabot path reach the review steps below instead of skipping them.
+        if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
         run: |
           if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
             echo "CLAUDE_CODE_OAUTH_TOKEN not set → security review inert (run 'claude setup-token')"; echo "go=false" >> "$GITHUB_OUTPUT"
@@ -97,6 +104,17 @@ jobs:
         # once the tool was granted — full history is needed to resolve the base SHA.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # pull_request checks out the PR MERGE ref by default (base+head both reachable), which
+          # is exactly what makes `git diff base...head` below work. pull_request_target defaults
+          # to the BASE branch instead (PR head absent → the diff command sees nothing), so for
+          # the Dependabot pull_request_target path pin that SAME merge ref explicitly. The result
+          # is byte-for-byte the pull_request review; the ONLY delta is that secrets are now present
+          # (the whole point — GitHub withholds them from Dependabot pull_request runs, #621/#622).
+          # `github.event.pull_request.number` is an integer, not injectable; the caller gates this
+          # trigger to the dependabot[bot] actor + the review tools are read-only, so this stays off
+          # the pull_request_target untrusted-checkout risk path (mirrors self-automerge.yml's model).
+          # Empty ref under plain pull_request = actions/checkout's default (the merge ref) — unchanged.
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || '' }}
           fetch-depth: 0
       - name: Claude security review
         id: claude

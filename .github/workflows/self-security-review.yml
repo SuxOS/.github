@@ -3,13 +3,35 @@ name: Self security review
 # The safety gate for suxbot[bot]-authored PRs against THIS repo's own workflow
 # files (see self-fixer.yml). ready_for_review is required — see
 # scripts/test-scaffold-caller-regression.sh for why omitting it is a regression.
+#
+# Dependabot dep-bump PRs (this repo runs weekly github-actions bumps, see
+# .github/dependabot.yml) hit a wall on plain `pull_request`: GitHub withholds ALL
+# secrets — including CLAUDE_CODE_OAUTH_TOKEN — from Dependabot-authored pull_request
+# runs, so the review went inert and this REQUIRED gate failed CLOSED forever, blocking
+# every dep bump (#621/#622). `pull_request_target` runs in the base-repo context WITH
+# secrets even for Dependabot — the same mechanism self-automerge.yml already relies on
+# for the Dependabot actor. We add it, but route each PR to EXACTLY ONE trigger via the
+# job `if` below so the (expensive) review never runs twice and an untrusted human PR can
+# never reach the privileged, secret-bearing pull_request_target context:
+#   • dependabot[bot]  → pull_request_target  (secrets present ⇒ the gate can actually run)
+#   • everyone else    → pull_request          (unchanged; NO secret-bearing context)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   security-review:
+    # Exactly-one-trigger router (see header). Dependabot is a first-party GitHub actor whose
+    # PRs only bump pinned dependency SHAs; scoping the privileged pull_request_target path to
+    # its login keeps human/other-bot PRs on the safe pull_request path. This is a SAFETY gate,
+    # not a bypass: the reusable still runs the full review with the same fail-closed policy —
+    # the only thing that changes for Dependabot is that the token is now actually present.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
     permissions:
       contents: read
       pull-requests: write
@@ -17,5 +39,8 @@ jobs:
       id-token: write
     uses: SuxOS/.github/.github/workflows/security-review.yml@main
     with:
-      allowed-bots: "suxbot[bot]"
+      # dependabot[bot] must be in allowed-bots or claude-code-action refuses to review a
+      # bot-authored PR and hard-fails this required gate (a mechanical block, not a finding —
+      # see security-review.yml's allowed-bots input doc). suxbot[bot] stays for self-fixer PRs.
+      allowed-bots: "suxbot[bot],dependabot[bot]"
     secrets: inherit

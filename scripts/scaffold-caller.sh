@@ -115,11 +115,26 @@ name: Security review
 # without the review ever re-running. (Every hand-written caller stub in the org
 # already carries this; this template used to lag them — see SuxOS/.github#144-era
 # audit finding.)
+#
+# pull_request_target is added ONLY to route Dependabot dep-bump PRs through a
+# secret-bearing base-repo context: GitHub withholds secrets (incl.
+# CLAUDE_CODE_OAUTH_TOKEN) from Dependabot pull_request runs, so the review goes inert
+# and this REQUIRED gate fails CLOSED forever on every dep bump (SuxOS/.github#621/#622).
+# The job \`if\` routes each PR to EXACTLY ONE trigger — dependabot[bot] →
+# pull_request_target, everyone else → pull_request — so the review never double-runs and
+# no untrusted human PR reaches the privileged context. Mirrors self-automerge.yml's
+# proven handling of the Dependabot actor. Harmless for a repo without Dependabot (the
+# pull_request_target path simply never fires).
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
 jobs:
   security-review:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]')
     permissions:
       contents: read
       pull-requests: write
@@ -127,7 +142,9 @@ jobs:
       id-token: write
     uses: $REPO/.github/workflows/security-review.yml@$REF
     with:
-      allowed-bots: "suxbot[bot]"
+      # dependabot[bot] must be allowed or claude-code-action refuses the bot PR and hard-fails
+      # this required gate (a mechanical block, not a finding). suxbot[bot] stays for bot builds.
+      allowed-bots: "suxbot[bot],dependabot[bot]"
     secrets: inherit
 YAML
 
