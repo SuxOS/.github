@@ -24,6 +24,14 @@ bad()  { echo "  FAIL: $*" >&2; fail=1; }
 command -v yq >/dev/null || { echo "FAIL: yq not on PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq not on PATH" >&2; exit 1; }
 
+# The extracted script shells out to the shared marker-cycle-read/upsert helpers (#589) via
+# .suxos-ci/.github/actions/... (a real run checks that repo out to that path separately —
+# see issue-build.yml's "Checkout SuxOS/.github (shared marker-cycle helper)" step). This
+# test only has this repo itself checked out, and it already IS SuxOS/.github, so a
+# self-referential symlink resolves the same real, unmodified scripts with no drift.
+[ -e .suxos-ci ] || ln -s . .suxos-ci
+trap '[ -L .suxos-ci ] && rm -f .suxos-ci' EXIT
+
 wf=".github/workflows/issue-build.yml"
 push_run="$(yq -r '.jobs.build.steps[] | select(.name == "Push and open ONE PR, or release claims on failure") | .run' "$wf")"
 
@@ -79,7 +87,7 @@ log1="$(mktemp)"
 run_scenario "plain-dropped" '[1,2]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"too risky this session","superseded":false}]}' "$log1"
 if grep -q 'GH issue edit 2 --repo test/repo --remove-label building' "$log1" \
-  && grep -q -- 'GH issue comment 2 --repo test/repo --body <!-- issue-build:drop cycle=1' "$log1" \
+  && grep -q -- 'GH api repos/test/repo/issues/2/comments -f body=<!-- issue-build:drop cycle=1' "$log1" \
   && grep -q '🤖 Dropped from this batch (not shipped in this PR): too risky this session' "$log1" \
   && ! grep -q 'GH issue close 2' "$log1" \
   && ! grep -q 'GH issue edit 2 --repo test/repo --add-label needs-human' "$log1"; then
@@ -107,7 +115,7 @@ echo "[3/5] mixed batch: one plain-dropped + one superseded-dropped + one built 
 log3="$(mktemp)"
 run_scenario "mixed" '[1,2,3]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"deferred","superseded":false},{"number":3,"reason":"stale, fixed elsewhere","superseded":true}]}' "$log3"
-if grep -q -- 'GH issue comment 2 --repo test/repo --body <!-- issue-build:drop cycle=1' "$log3" \
+if grep -q -- 'GH api repos/test/repo/issues/2/comments -f body=<!-- issue-build:drop cycle=1' "$log3" \
   && grep -q -- 'GH issue close 3 --repo test/repo --reason not planned' "$log3" \
   && grep -q 'GH pr create --repo test/repo --base main --head bot/issue-build-test --title build: drain high-priority backlog (1 issues) --body' "$log3" \
   && grep -q 'Closes #1' "$log3" \
@@ -124,7 +132,7 @@ log4="$(mktemp)"
 run_scenario "first-drop-cycle1" '[4]' \
   '{"built":[],"dropped":[{"number":4,"reason":"too large this session","superseded":false}]}' "$log4"
 if grep -q 'GH api repos/test/repo/issues/4/comments --paginate' "$log4" \
-  && grep -q -- 'GH issue comment 4 --repo test/repo --body <!-- issue-build:drop cycle=1' "$log4" \
+  && grep -q -- 'GH api repos/test/repo/issues/4/comments -f body=<!-- issue-build:drop cycle=1' "$log4" \
   && grep -q '🤖 Dropped from this batch (not shipped in this PR): too large this session' "$log4" \
   && ! grep -q 'GH issue edit 4 --repo test/repo --add-label needs-human' "$log4" \
   && ! grep -q 'PATCH' "$log4"; then
@@ -143,7 +151,7 @@ if grep -q 'GH issue edit 5 --repo test/repo --add-label needs-human' "$log5" \
   && grep -q -- 'GH api repos/test/repo/issues/comments/777 -X PATCH -f body=<!-- issue-build:drop cycle=2' "$log5" \
   && grep -q 'Dropped from this batch for the 2th time' "$log5" \
   && grep -q 'needs-human' "$log5" \
-  && ! grep -q -- 'GH issue comment 5 --repo test/repo --body <!-- issue-build:drop' "$log5"; then
+  && ! grep -q -- 'GH api repos/test/repo/issues/5/comments -f body=<!-- issue-build:drop' "$log5"; then
   note "second drop of #5: cycle=2 escalates (needs-human applied, marker PATCHed in place, not posted as a new comment)"
 else
   bad "second drop of #5: expected cycle=2 escalation (needs-human + PATCH) — got: $(cat "$log5")"

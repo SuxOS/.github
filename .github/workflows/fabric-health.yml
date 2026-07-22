@@ -498,6 +498,11 @@ jobs:
           # spine signal here already uses.
           opus_avail_min=$(grep -m1 -oE '^opus_avail_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
           total_avail_min=$(grep -m1 -oE '^total_avail_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
+          # Denominator the two *_avail_min numbers above are a fraction of (#588) — same
+          # structural-line-off-the-throttle-body read, so a consumer can compute the ratio
+          # itself instead of hardcoding budget-governor.yml's OPUS_BUDGET_MIN/TOTAL_BUDGET_MIN.
+          opus_budget_min=$(grep -m1 -oE '^opus_budget_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
+          total_budget_min=$(grep -m1 -oE '^total_budget_min: [0-9]+$' <<<"$github_throttle_body" | awk '{print $2}') || true
 
           # Gate backlog_zero on issue-collection success (#305): only assert org backlog
           # is zero when every repo's issue query was actually observed. An unobserved
@@ -513,6 +518,8 @@ jobs:
             --argjson collection_ok "$collection_all_ok" \
             --arg opus_avail_min "${opus_avail_min:-}" \
             --arg total_avail_min "${total_avail_min:-}" \
+            --arg opus_budget_min "${opus_budget_min:-}" \
+            --arg total_budget_min "${total_budget_min:-}" \
             '{
               schema: "suxos-fabric-status/v1",
               generated_at_epoch: $ts,
@@ -521,6 +528,8 @@ jobs:
               budget_throttle_active: $throttle_active,
               budget_opus_avail_min: (if ($opus_avail_min | length) > 0 then ($opus_avail_min | tonumber) else null end),
               budget_total_avail_min: (if ($total_avail_min | length) > 0 then ($total_avail_min | tonumber) else null end),
+              budget_opus_budget_min: (if ($opus_budget_min | length) > 0 then ($opus_budget_min | tonumber) else null end),
+              budget_total_budget_min: (if ($total_budget_min | length) > 0 then ($total_budget_min | tonumber) else null end),
               collection_ok: $collection_ok,
               repos: $repos
             }' > fabric-status.json

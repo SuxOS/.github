@@ -213,6 +213,10 @@ jobs:
       # dampener in place of the coarse yellow/green stand-in.
       spine_budget_opus_avail_min: ${{ steps.spine.outputs.budget_opus_avail_min }}
       spine_budget_total_avail_min: ${{ steps.spine.outputs.budget_total_avail_min }}
+      # Denominator the two *_avail_min fields above are a fraction of (#588), read
+      # structurally off fabric-status.json instead of hardcoded below.
+      spine_budget_opus_budget_min: ${{ steps.spine.outputs.budget_opus_budget_min }}
+      spine_budget_total_budget_min: ${{ steps.spine.outputs.budget_total_budget_min }}
     steps:
       - name: Preflight — need the token
         id: pre
@@ -274,6 +278,8 @@ jobs:
           recommended_parallel_batches=""
           budget_opus_avail_min=""
           budget_total_avail_min=""
+          budget_opus_budget_min=""
+          budget_total_budget_min=""
           age_min=""
           reason=""
           repo_name="${GITHUB_REPOSITORY##*/}"
@@ -321,6 +327,13 @@ jobs:
                     /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   budget_total_avail_min=$( { jq -r '.budget_total_avail_min // empty' \
                     /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
+                  # Denominator the two *_avail_min numbers above are a fraction of (#588) —
+                  # lets the drain-controller step below read the real capacity instead of a
+                  # hardcoded copy that can drift when budget-governor.yml is recalibrated.
+                  budget_opus_budget_min=$( { jq -r '.budget_opus_budget_min // empty' \
+                    /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
+                  budget_total_budget_min=$( { jq -r '.budget_total_budget_min // empty' \
+                    /tmp/fabric-status/fabric-status.json 2>/dev/null; } || true)
                   if [ -z "$backlog_total" ] || [ -z "$collection_ok" ]; then
                     reason="fabric-status.json missing expected fields"
                   else
@@ -345,6 +358,8 @@ jobs:
             echo "recommended_parallel_batches=$recommended_parallel_batches"
             echo "budget_opus_avail_min=$budget_opus_avail_min"
             echo "budget_total_avail_min=$budget_total_avail_min"
+            echo "budget_opus_budget_min=$budget_opus_budget_min"
+            echo "budget_total_budget_min=$budget_total_budget_min"
           } >> "$GITHUB_OUTPUT"
 
       - name: Non-buildable labels
@@ -682,6 +697,27 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # Scoped to SuxOS/.github specifically (this job's own app-token above is scoped to
+      # whichever repo is being built, not necessarily .github) so the disposition-handling
+      # step below can check out the shared marker-cycle-read/upsert helper scripts (#589) —
+      # same pattern as `select`'s spine-token / .suxos-ci checkout above.
+      - name: Mint app token for shared-helper checkout (SuxOS/.github)
+        id: helper-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
+
+      - name: Checkout SuxOS/.github (shared marker-cycle helper)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
+          token: ${{ steps.helper-token.outputs.token }}
+
       - name: Checkout default branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -976,25 +1012,24 @@ jobs:
                 # dropped once already for exactly this before a human noticed and scoped
                 # it by hand). Same marker-comment idiom, applied to the issue instead of
                 # the PR: upsert a `<!-- issue-build:drop cycle=N -->` comment so the count
-                # survives across separate builder runs/sessions.
+                # survives across separate builder runs/sessions. Shared reader (#589) — see
+                # .github/actions/marker-cycle-read/read-cycle.sh.
                 DROP_MARKER='<!-- issue-build:drop'
                 DROP_ESCALATE_THRESHOLD=2
-                comments='[]'
-                if ! comments=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}/comments" --paginate 2>/dev/null); then
-                  echo "::warning::could not fetch comments for issue #$n — treating drop-cycle count as 0 (not escalating) rather than failing the disposition step"
-                  comments='[]'
-                fi
-                marker=$(echo "$comments" | jq -c --arg m "$DROP_MARKER" '[.[] | select(.body | startswith($m))] | last' 2>/dev/null || echo 'null')
-                cycle=0
-                comment_id=""
-                if [ "$marker" != "null" ] && [ -n "$marker" ]; then
-                  comment_id=$(echo "$marker" | jq -r '.id' 2>/dev/null || true)
-                  body=$(echo "$marker" | jq -r '.body' 2>/dev/null || true)
-                  cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
-                  cycle=${cycle:-0}
+                READ_HELPER=".suxos-ci/.github/actions/marker-cycle-read/read-cycle.sh"
+                if [ -f "$READ_HELPER" ]; then
+                  eval "$(bash "$READ_HELPER" "$GITHUB_REPOSITORY" "$n" "$DROP_MARKER")"
+                  if [ "$ok" != "true" ]; then
+                    echo "::warning::could not fetch comments for issue #$n — treating drop-cycle count as 0 (not escalating) rather than failing the disposition step"
+                    cycle=0
+                    comment_id=""
+                  fi
+                else
+                  echo "::warning::shared marker-cycle-read helper unavailable (checkout failed) — treating drop-cycle count as 0"
+                  cycle=0
+                  comment_id=""
                 fi
                 next_cycle=$((cycle + 1))
-                marker_line="${DROP_MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
 
                 if [ "$next_cycle" -ge "$DROP_ESCALATE_THRESHOLD" ]; then
                   # Past the threshold, don't just release the claim back to the same fate —
@@ -1009,13 +1044,11 @@ jobs:
                   summary_line="🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL"
                 fi
 
-                new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
-                if [ -n "$comment_id" ]; then
-                  gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
-                    || echo "::warning::could not update the drop-cycle marker comment on issue #$n"
+                UPSERT_HELPER=".suxos-ci/.github/actions/marker-cycle-upsert/upsert-cycle.sh"
+                if [ -f "$UPSERT_HELPER" ]; then
+                  bash "$UPSERT_HELPER" "$GITHUB_REPOSITORY" "$n" "$DROP_MARKER" "$next_cycle" "$comment_id" "$summary_line"
                 else
-                  gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body "$new_body" 2>/dev/null \
-                    || echo "::warning::could not post the drop-cycle marker comment on issue #$n"
+                  echo "::warning::shared marker-cycle-upsert helper unavailable (checkout failed) — could not update the drop-cycle marker comment on issue #$n"
                 fi
               fi
             done
@@ -1232,6 +1265,8 @@ jobs:
           SPINE_RECOMMENDED_PARALLEL_BATCHES: ${{ needs.select.outputs.spine_recommended_parallel_batches }}
           SPINE_BUDGET_OPUS_AVAIL_MIN: ${{ needs.select.outputs.spine_budget_opus_avail_min }}
           SPINE_BUDGET_TOTAL_AVAIL_MIN: ${{ needs.select.outputs.spine_budget_total_avail_min }}
+          SPINE_BUDGET_OPUS_BUDGET_MIN: ${{ needs.select.outputs.spine_budget_opus_budget_min }}
+          SPINE_BUDGET_TOTAL_BUDGET_MIN: ${{ needs.select.outputs.spine_budget_total_budget_min }}
           THROTTLE_LEVEL: ${{ steps.throttle.outputs.level }}
           NONBUILDABLE_LABELS: ${{ steps.nonbuildable.outputs.labels }}
           INCLUDE: ${{ inputs.include }}
@@ -1261,14 +1296,16 @@ jobs:
             const rawRecommended = rawRecommendedStr === "" ? NaN : Number(rawRecommendedStr);
             let effectiveCap = cap;
             if (spineAvailable && Number.isFinite(rawRecommended) && rawRecommended >= 0) {
-              // budget-governor's weekly runner-minute budgets (#501/#565) — the same
-              // OPUS_BUDGET_MIN/TOTAL_BUDGET_MIN constants budget-governor.yml computes
-              // opus_avail_min/total_avail_min against (its own env block, keep these two
-              // numbers in sync with that file if it's ever recalibrated). fabric-status.json
-              // exposes the two *_avail_min numbers structurally (fabric-health.yml, #501) but
-              // not the capacity they're a fraction of, so the denominator has to live here.
-              const OPUS_BUDGET_MIN = 900;
-              const TOTAL_BUDGET_MIN = 12000;
+              // budget-governor's weekly runner-minute budgets (#501/#565), read structurally
+              // off fabric-status.json (#588: budget_opus_budget_min/budget_total_budget_min,
+              // fabric-health.yml re-emitting budget-governor.yml's own OPUS_BUDGET_MIN/
+              // TOTAL_BUDGET_MIN env-block constants off the throttle-issue body) instead of a
+              // hardcoded copy here that would silently drift the next time that env block is
+              // recalibrated. Falls back to the last-known constants only when the structured
+              // fields aren't available yet (pre-#588 fabric-status.json, or governor hasn't
+              // run) — fail-soft, not fail-closed.
+              const FALLBACK_OPUS_BUDGET_MIN = 900;
+              const FALLBACK_TOTAL_BUDGET_MIN = 12000;
               // Empty-string-means-NaN, same as rawRecommendedStr above — Number("") is 0, not
               // NaN, which would otherwise misread "field absent" as "zero minutes available"
               // and force maximum dampening instead of falling back to the THROTTLE_LEVEL guess.
@@ -1276,6 +1313,10 @@ jobs:
               const opusAvailMin = opusAvailMinStr === "" ? NaN : Number(opusAvailMinStr);
               const totalAvailMinStr = process.env.SPINE_BUDGET_TOTAL_AVAIL_MIN || "";
               const totalAvailMin = totalAvailMinStr === "" ? NaN : Number(totalAvailMinStr);
+              const opusBudgetMinStr = process.env.SPINE_BUDGET_OPUS_BUDGET_MIN || "";
+              const opusBudgetMin = opusBudgetMinStr === "" ? FALLBACK_OPUS_BUDGET_MIN : Number(opusBudgetMinStr);
+              const totalBudgetMinStr = process.env.SPINE_BUDGET_TOTAL_BUDGET_MIN || "";
+              const totalBudgetMin = totalBudgetMinStr === "" ? FALLBACK_TOTAL_BUDGET_MIN : Number(totalBudgetMinStr);
               // Real headroom ratio in place of the coarse yellow/green stand-in (#565): the
               // more-constrained tier governs, same "either bucket can force it" logic
               // budget-governor.yml's own level computation uses. Falls back to the old
@@ -1283,8 +1324,8 @@ jobs:
               // (governor hasn't run, or a pre-#501 body) — fail-soft, not fail-closed.
               let headroomFraction;
               if (Number.isFinite(opusAvailMin) && Number.isFinite(totalAvailMin)) {
-                const opusFraction = Math.max(0, Math.min(1, opusAvailMin / OPUS_BUDGET_MIN));
-                const totalFraction = Math.max(0, Math.min(1, totalAvailMin / TOTAL_BUDGET_MIN));
+                const opusFraction = Math.max(0, Math.min(1, opusAvailMin / opusBudgetMin));
+                const totalFraction = Math.max(0, Math.min(1, totalAvailMin / totalBudgetMin));
                 headroomFraction = Math.min(opusFraction, totalFraction);
               } else {
                 headroomFraction = process.env.THROTTLE_LEVEL === "yellow" ? 0.5 : 1;

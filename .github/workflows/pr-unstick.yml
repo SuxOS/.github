@@ -169,28 +169,24 @@ jobs:
           if [ "$count" -eq 0 ]; then exit 0; fi
 
           MARKER='<!-- pr-unstick:'
+          READ_HELPER=".suxos-ci/.github/actions/marker-cycle-read/read-cycle.sh"
+          UPSERT_HELPER=".suxos-ci/.github/actions/marker-cycle-upsert/upsert-cycle.sh"
 
           for n in $(echo "$prs" | jq -r '.[].number'); do
             echo "::group::PR #$n"
 
             # Read this PR's marker comment (if any) for cycle count + last-attempt time.
             # The marker is upserted (edited in place), never duplicated, so there's at
-            # most one per PR — plain 'last' pick is unambiguous.
-            if ! comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null); then
-              echo "::warning::could not fetch comments for PR #$n — skipping this run rather than treating the fetch failure as 'no marker exists' (that would silently reset the cycle cap)"
+            # most one per PR — plain 'last' pick is unambiguous. Shared reader (#589) —
+            # see .github/actions/marker-cycle-read/read-cycle.sh.
+            if [ ! -f "$READ_HELPER" ]; then
+              echo "::warning::shared marker-cycle-read helper unavailable (checkout failed) — skipping PR #$n"
               echo "::endgroup::"; continue
             fi
-            marker=$(echo "$comments" | jq -c --arg m "$MARKER" '[.[] | select(.body | startswith($m))] | last')
-            cycle=0
-            last_at_epoch=0
-            comment_id=""
-            if [ "$marker" != "null" ] && [ -n "$marker" ]; then
-              comment_id=$(echo "$marker" | jq -r '.id')
-              body=$(echo "$marker" | jq -r '.body')
-              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
-              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2 || true)
-              last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
-              cycle=${cycle:-0}
+            eval "$(bash "$READ_HELPER" "$GH_REPO" "$n" "$MARKER")"
+            if [ "$ok" != "true" ]; then
+              echo "::warning::could not fetch comments for PR #$n — skipping this run rather than treating the fetch failure as 'no marker exists' (that would silently reset the cycle cap)"
+              echo "::endgroup::"; continue
             fi
 
             if [ "$cycle" -ge "$MAX_CYCLES" ]; then
@@ -239,15 +235,11 @@ jobs:
 
             gh pr edit "$n" --remove-label needs-human 2>/dev/null || true
 
-            marker_line="${MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
             summary_line="🔁 Auto-unstick attempt ${next_cycle}/${MAX_CYCLES}: re-ran this PR's failed checks and updated the branch onto main, then removed \`needs-human\`. If it's still red, the normal autofix/needs-human path re-applies on its own — this doesn't spend a fresh autofix attempt, it only retries the free/cheap moves (flaky reruns, staleness). After ${MAX_CYCLES} cycles this stops auto-retrying until a human looks or pr-drain.yml's close-stale sweep closes it."
-            new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
-            if [ -n "$comment_id" ]; then
-              gh api "repos/${GH_REPO}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
-                || echo "::warning::could not update the marker comment on PR #$n"
+            if [ -f "$UPSERT_HELPER" ]; then
+              bash "$UPSERT_HELPER" "$GH_REPO" "$n" "$MARKER" "$next_cycle" "$comment_id" "$summary_line"
             else
-              gh pr comment "$n" --body "$new_body" 2>/dev/null \
-                || echo "::warning::could not post the marker comment on PR #$n"
+              echo "::warning::shared marker-cycle-upsert helper unavailable (checkout failed) — could not update the marker comment on PR #$n"
             fi
 
             echo "::endgroup::"
@@ -406,6 +398,8 @@ jobs:
           cooldown_sec=$(( COOLDOWN_HOURS * 3600 ))
           now=$(date -u +%s)
           MARKER='<!-- pr-unstick-reachability:'
+          READ_HELPER=".suxos-ci/.github/actions/marker-cycle-read/read-cycle.sh"
+          UPSERT_HELPER=".suxos-ci/.github/actions/marker-cycle-upsert/upsert-cycle.sh"
 
           IFS=',' read -ra prs_arr <<< "$GENERIC_PRS"
           for n in "${prs_arr[@]}"; do
@@ -427,21 +421,14 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
-            if ! comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null); then
-              echo "::warning::could not fetch comments for PR #$n — skipping this run rather than resetting the cycle cap"
+            if [ ! -f "$READ_HELPER" ]; then
+              echo "::warning::shared marker-cycle-read helper unavailable (checkout failed) — skipping PR #$n"
               echo "::endgroup::"; continue
             fi
-            marker=$(echo "$comments" | jq -c --arg m "$MARKER" '[.[] | select(.body | startswith($m))] | last')
-            cycle=0
-            last_at_epoch=0
-            comment_id=""
-            if [ "$marker" != "null" ] && [ -n "$marker" ]; then
-              comment_id=$(echo "$marker" | jq -r '.id')
-              body=$(echo "$marker" | jq -r '.body')
-              cycle=$(echo "$body" | grep -oE 'cycle=[0-9]+' | head -1 | cut -d= -f2 || true)
-              last_at=$(echo "$body" | grep -oE 'at=[0-9TZ:-]+' | head -1 | cut -d= -f2 || true)
-              last_at_epoch=$(date -u -d "$last_at" +%s 2>/dev/null || echo 0)
-              cycle=${cycle:-0}
+            eval "$(bash "$READ_HELPER" "$GH_REPO" "$n" "$MARKER")"
+            if [ "$ok" != "true" ]; then
+              echo "::warning::could not fetch comments for PR #$n — skipping this run rather than resetting the cycle cap"
+              echo "::endgroup::"; continue
             fi
 
             if [ "$cycle" -ge "$MAX_CYCLES" ]; then
@@ -498,15 +485,11 @@ jobs:
             fi
             echo "#$n pushed empty commit ${new_sha} onto ${head_ref} to re-fire 'synchronize' (reachability cycle ${next_cycle}/${MAX_CYCLES})"
 
-            marker_line="${MARKER} cycle=${next_cycle} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
             summary_line="🔁 Auto-unstick attempt ${next_cycle}/${MAX_CYCLES}: pushed an empty commit to re-fire \`synchronize\` because a required check has never reported on this PR's head — most likely because this PR predates that check being required (the 'onboarding window' case). If the real cause is instead a path-filtered required workflow, this was a harmless no-op and the PR stays flagged for a human. After ${MAX_CYCLES} cycles this stops auto-retrying until a human looks."
-            new_body="$(printf '%s\n%s' "$marker_line" "$summary_line")"
-            if [ -n "$comment_id" ]; then
-              gh api "repos/${GH_REPO}/issues/comments/${comment_id}" -X PATCH -f body="$new_body" >/dev/null 2>&1 \
-                || echo "::warning::could not update the marker comment on PR #$n"
+            if [ -f "$UPSERT_HELPER" ]; then
+              bash "$UPSERT_HELPER" "$GH_REPO" "$n" "$MARKER" "$next_cycle" "$comment_id" "$summary_line"
             else
-              gh pr comment "$n" --body "$new_body" 2>/dev/null \
-                || echo "::warning::could not post the marker comment on PR #$n"
+              echo "::warning::shared marker-cycle-upsert helper unavailable (checkout failed) — could not update the marker comment on PR #$n"
             fi
 
             echo "::endgroup::"
