@@ -405,6 +405,10 @@ expect_v "sum() over a conditionally-emitted series, gated on WRONG collector (#
   'sum(last_over_time(suxos_workflow_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="prs"}[20m])) == 1)' 1
 expect_v "sum() over suxos_pr_red_total, gated on its own correct collector (#391)" \
   'sum(last_over_time(suxos_pr_red_total[20m])) and on() (min(last_over_time(suxos_collection_ok{collector="prs"}[20m])) == 1)' 0
+expect_v "suxos_needs_human_total, gated on its own correct collector (#648/#659)" \
+  'last_over_time(suxos_needs_human_total[20m]) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector="issues"}[20m])) == 1)' 0
+expect_v "suxos_needs_human_total, gated on WRONG collector (#648/#659)" \
+  'last_over_time(suxos_needs_human_total[20m]) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector="prs"}[20m])) == 1)' 1
 
 # ===========================================================================
 # Part B — live gate: every expr in the real grafana/*.json must be clean.

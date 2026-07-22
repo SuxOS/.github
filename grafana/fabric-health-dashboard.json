@@ -645,6 +645,53 @@
           "legendFormat": "recommended_batches {{repo}}"
         }
       ]
+    },
+    {
+      "id": 14,
+      "title": "Needs-human issues by repo",
+      "description": "suxos_needs_human_total{repo} (#648): the other half of §4 spine-green alongside workflow_red/pr_red+stuck, gating drain_green. Gated on collection.issues (#305) — an issue-query failure is an absent sample, not a healthy-looking 0.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROM}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "last_over_time(suxos_needs_human_total[20m]) and on(repo) (min by (repo) (last_over_time(suxos_collection_ok{collector=\"issues\"}[20m])) == 1)",
+          "legendFormat": "{{repo}}"
+        }
+      ]
     }
   ]
 }
