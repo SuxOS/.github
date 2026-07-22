@@ -86,6 +86,10 @@ jobs:
           # main's required check names (classic branch protection + rulesets, unioned).
           # Only a FAILING check in this set is
           # "required"; a failing optional/advisory check must not be labelled required.
+          # Match is exact-OR-trailing-segment (a live name can be "<caller-workflow> / <job>"
+          # while the required context is only the shorter job-level "<job>"), same
+          # context_reachable() fix as #210 / detect-unreachable-checks/check.sh:32-41 —
+          # ported here so pr-watch doesn't miss a genuinely failing required check to name drift.
           required=""
           prot_ok=false
           rules_ok=false
@@ -117,7 +121,7 @@ jobs:
                   | select((.conclusion // .state // "" | ascii_upcase)
                       | . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")
                   | (.name // .context // "")]) as $failed
-              | (($failed | map(select(. as $n | $required | index($n))) | length) > 0) as $failing
+              | (($failed | map(select(. as $n | $required | any(. as $r | $n == $r or ($n | endswith(" / " + $r))))) | length) > 0) as $failing
               | (($now - (.updatedAt | fromdateiso8601)) >= $stale) as $isStale
               | ( if ($flagBehind and .mergeStateStatus == "BEHIND") then "behind main — needs rebase/update"
                   elif $failing then "failing required check"
