@@ -438,14 +438,28 @@ jobs:
             # (#522) — budget-governor.yml writes one per managed repo, and a per-repo
             # `throttle-manual` pin or a stale write can leave one repo's level diverged
             # from the rest, so this must be read per repo like every other collector
-            # here, not sampled once off .github. Same body-match (never a label) and
-            # fail-open-to-green-on-lookup-error semantics as the fleet-wide read below.
-            repo_throttle_body=$(gh issue list --repo "$slug" --state open \
+            # here, not sampled once off .github. Unlike the other collectors this one used
+            # to fail OPEN to "green" (not throttled) on a lookup failure, with no
+            # `collection.*` flag to catch it — exactly the silent-healthy-zero the
+            # collection-integrity contract (#305) exists to prevent (#615). throttle_ok is
+            # 1 only when the `gh issue list` call itself succeeds; on failure the level
+            # degrades to "unknown" (treated as active/non-green), never a fabricated green.
+            if repo_throttle_raw=$(gh issue list --repo "$slug" --state open \
                 --search "\"Autonomy throttle\" in:title" --limit 100 \
-                --json title,body 2>/dev/null \
-              | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""') || true
+                --json title,body 2>/dev/null); then
+              throttle_ok=1
+              repo_throttle_body=$(printf '%s' "$repo_throttle_raw" \
+                | jq -r '[.[] | select(.title == "Autonomy throttle")] | first | .body // ""')
+            else
+              throttle_ok=0
+              repo_throttle_body=""
+            fi
             repo_throttle_level=$(grep -m1 -oE '^level: (green|yellow|red)$' <<<"$repo_throttle_body" | awk '{print $2}') || true
-            repo_throttle_level=${repo_throttle_level:-green}
+            if [ "$throttle_ok" -eq 1 ]; then
+              repo_throttle_level=${repo_throttle_level:-green}
+            else
+              repo_throttle_level="unknown"
+            fi
             repo_throttle_active=$([ "$repo_throttle_level" != "green" ] && echo 1 || echo 0)
             [ "$repo_throttle_active" -eq 1 ] && throttle_any_active=1
             [ "$repo" = ".github" ] && github_throttle_body="$repo_throttle_body"
@@ -459,7 +473,7 @@ jobs:
               --argjson throttle_active "$repo_throttle_active" \
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
               --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
-              --argjson gok "$integral_ok" \
+              --argjson gok "$integral_ok" --argjson tok "$throttle_ok" \
               '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
                 workflows_disabled: $disabled,
                 merged_prs_in_window: $merged,
@@ -467,7 +481,7 @@ jobs:
                 recommended_parallel_batches: $recommended,
                 budget_throttle_active: $throttle_active,
                 checked_at: $checked_at,
-                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok}}')
+                collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok, throttle: $tok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
             # A single failed collector anywhere degrades the whole spine to "unknown".
@@ -476,7 +490,7 @@ jobs:
             [ "$issues_ok" -eq 1 ] || issues_all_ok=0
             if [ "$issues_ok" -eq 0 ] || [ "$prs_ok" -eq 0 ] \
                 || [ "$runs_ok" -eq 0 ] || [ "$wfs_ok" -eq 0 ] || [ "$merged_ok" -eq 0 ] \
-                || [ "$integral_ok" -eq 0 ]; then
+                || [ "$integral_ok" -eq 0 ] || [ "$throttle_ok" -eq 0 ]; then
               collection_all_ok=0
             fi
           done
@@ -681,7 +695,11 @@ jobs:
           while IFS= read -r line; do
             [ -z "${line//[[:space:]]/}" ] && continue
             service="${line%%=*}"; rest="${line#*=}"
-            url="${rest%%=*}"; want="${rest##*=}"
+            # want is extracted greedily from the end (robust to embedded "="), then
+            # stripped off rest so url keeps everything between the first and last "="
+            # instead of truncating at url's own first "=" (SuxOS/.github#614 — broke
+            # any URL with a query string, e.g. "...?token=abc").
+            want="${rest##*=}"; url="${rest%=*}"
             got=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 "$url" || echo "000")
             ok=$([ "$got" = "$want" ] && echo 1 || echo 0)
             echo "edge $service $url want=$want got=$got ok=$ok"

@@ -83,22 +83,28 @@ jobs:
           now=$(date -u +%s)
           stale=$(( STALE_HOURS * 3600 ))
 
-          # main's required check names (classic branch protection + rulesets, unioned).
+          # default branch's required check names (classic branch protection + rulesets,
+          # unioned). Resolved dynamically (not hardcoded "main") — a caller whose default
+          # branch isn't literally main would otherwise 404 both reads below and silently
+          # disable this whole detector (SuxOS/.github#612, same class as
+          # assert-branch-protection's base-branch input).
           # Only a FAILING check in this set is
           # "required"; a failing optional/advisory check must not be labelled required.
           # Match is exact-OR-trailing-segment (a live name can be "<caller-workflow> / <job>"
           # while the required context is only the shorter job-level "<job>"), same
           # context_reachable() fix as #210 / detect-unreachable-checks/check.sh:32-41 —
           # ported here so pr-watch doesn't miss a genuinely failing required check to name drift.
+          default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch 2>/dev/null) || default_branch=""
+          default_branch="${default_branch:-main}"
           required=""
           prot_ok=false
           rules_ok=false
-          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null); then
+          if prot=$(gh api "repos/${GITHUB_REPOSITORY}/branches/${default_branch}/protection" 2>/dev/null); then
             prot_ok=true
             required="$required
           $(printf '%s' "$prot" | jq -r '[(.required_status_checks.contexts // [])[], (.required_status_checks.checks // [])[].context] | .[]')"
           fi
-          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main" 2>/dev/null); then
+          if rules=$(gh api "repos/${GITHUB_REPOSITORY}/rules/branches/${default_branch}" 2>/dev/null); then
             rules_ok=true
             required="$required
           $(printf '%s' "$rules" | jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context] | .[]')"
@@ -110,7 +116,7 @@ jobs:
           # run — pr-watch stops flagging genuinely-failing-required-check PRs with zero
           # visibility. Surface that degradation instead of letting it pass silently.
           if [ "$prot_ok" = false ] && [ "$rules_ok" = false ]; then
-            echo "::warning::could not read branch protection or rulesets for main (both gh api calls failed) — required-check detection is disabled this run, no PRs will be flagged for a failing required check"
+            echo "::warning::could not read branch protection or rulesets for ${default_branch} (both gh api calls failed) — required-check detection is disabled this run, no PRs will be flagged for a failing required check"
           fi
 
           stuck=$(echo "$prs" | jq -c --argjson now "$now" --argjson stale "$stale" --argjson flagBehind "$FLAG_BEHIND" --argjson required "$required_json" '

@@ -257,14 +257,13 @@ jobs:
             sleep 2
           done
 
-      - name: Requeue security-review-retry PRs (rate-limit infra defers), honoring resetsAt
+      - name: Requeue security-review-retry PRs (rate-limit infra defers)
         if: steps.throttle.outputs.go == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          now=$(date -u +%s)
 
           # security-review.yml's Gate parks an account five-hour rate-limit (INFRA, not a
           # security finding) by leaving the PR ARMED (no `hold`) with a `security-review-retry`
@@ -345,25 +344,12 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
-            # Completed non-success (rate-limit red, or a genuine re-fail). Gate the rerun on
-            # the rate limit's resetsAt when the deferral comment carries one, so we don't just
-            # re-hit the same five-hour ceiling; absent one, proceed (the daily cadence already
-            # clears the five-hour window). resetsAt may be epoch seconds or milliseconds.
-            reset_epoch=0
-            if comments=$(gh api "repos/${GH_REPO}/issues/${n}/comments" --paginate 2>/dev/null); then
-              raw=$(echo "$comments" \
-                | jq -r '[.[] | select(.body | test("security[ -]?review"; "i")) | .body] | join("\n")' \
-                | grep -oiE 'resets?[-_ ]?at["=: ]*[0-9]{10,13}' | grep -oE '[0-9]{10,13}' | head -1 || true)
-              if [ -n "$raw" ]; then
-                if [ "${#raw}" -ge 13 ]; then reset_epoch=$(( raw / 1000 )); else reset_epoch="$raw"; fi
-              fi
-            fi
-            if [ "$reset_epoch" -gt 0 ] && [ "$now" -lt "$reset_epoch" ]; then
-              wait=$(( reset_epoch - now ))
-              echo "#$n rate limit resets in ${wait}s (resetsAt=$reset_epoch) — deferring rerun to a later sweep"
-              echo "::endgroup::"; continue
-            fi
-
+            # Completed non-success (rate-limit red, or a genuine re-fail). security-review.yml's
+            # deferral comment ("the Claude account hit a five-hour usage limit...") is plain
+            # prose with no numeric resetsAt to gate on (SuxOS/.github#613 — a prior resetsAt-
+            # aware parser here was permanently dead code since that field never existed), so
+            # this relies solely on the sweep's own daily cadence to stay clear of re-hitting the
+            # same five-hour ceiling on every run.
             rid=$(echo "$sr" | jq -r '.databaseId')
             if gh run rerun "$rid" --repo "$GH_REPO" --failed 2>/dev/null; then
               echo "#$n re-ran failed security-review run $rid — marker stays until the review is green"
