@@ -128,7 +128,7 @@ jobs:
         # (below) so it can actually SEE the diff instead of guessing from post-change file
         # contents. Shallow history made a real `git diff <base>...<head>` impossible even
         # once the tool was granted — full history is needed to resolve the base SHA.
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # pull_request checks out the PR MERGE ref by default (base+head both reachable), which
           # is exactly what makes `git diff base...head` below work. pull_request_target defaults
@@ -307,7 +307,7 @@ jobs:
       - name: Checkout classifier (SuxOS/.github — scripts/classify-security-noverdict.sh lives only there, never in caller repos)
         if: steps.pre.outputs.go == 'true'
         continue-on-error: true
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SuxOS/.github
           ref: main

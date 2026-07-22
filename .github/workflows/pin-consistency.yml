@@ -55,7 +55,7 @@ jobs:
     outputs:
       repos: ${{ steps.load.outputs.repos }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: load
         run: echo "repos=$(jq -c '.repos' .github/managed-repos.json)" >> "$GITHUB_OUTPUT"
 
@@ -67,7 +67,7 @@ jobs:
       canon_checkout: ${{ steps.pins.outputs.canon_checkout }}
       canon_setup_node: ${{ steps.pins.outputs.canon_setup_node }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert third-party actions are SHA-pinned and drift-free
         id: pins
         run: |
@@ -181,7 +181,7 @@ jobs:
       - name: Checkout SuxOS/${{ matrix.repo }}
         id: checkout
         continue-on-error: true
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SuxOS/${{ matrix.repo }}
           token: ${{ steps.app-token.outputs.token }}
