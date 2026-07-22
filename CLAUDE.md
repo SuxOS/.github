@@ -263,3 +263,13 @@ anchor). When you add a field to a `run:` block that a sibling test extracts thi
 that test's anchor (and any new `--argjson`/`--arg` the extracted snippet now references) in
 the same commit — `grep` the test directory for the block's distinctive text before assuming
 an edit to a workflow's `run:` block is self-contained.
+
+A `jq` filter embedded in a `run:` block is itself wrapped in a bash SINGLE-quoted string
+(`jq '...'`) — a stray apostrophe inside a `#`-comment line WITHIN that jq program (e.g. "the
+current run's own status", "today's sample") silently closes the outer bash quote early, and
+everything after it is parsed as shell syntax instead of jq. The failure shows up far from the
+apostrophe itself — a `syntax error near unexpected token '('` on some later jq operator line —
+and every YAML/jq linter this repo runs (actionlint's embedded shellcheck, `yaml.safe_load`)
+passes clean, since the YAML and the jq text are each individually well-formed; only running the
+actual extracted `run:` block (`bash -n`, or a `scripts/test-*.sh` that exercises it) catches it.
+Write jq comments without apostrophes, or re-word to avoid one, rather than trying to escape it.

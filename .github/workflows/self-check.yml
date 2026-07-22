@@ -88,6 +88,10 @@ jobs:
         run: bash scripts/test-dashboard-queries.sh
         shell: bash
 
+      - name: Assert gardener exact-rename dead-link repair (unique/zero/multi-match, cap)
+        run: bash scripts/test-gardener-relink.sh
+        shell: bash
+
       - name: Assert issue-build prerequisite-gating defers issues behind unmerged prerequisites
         run: bash scripts/test-issue-build-prereq-gating.sh
         shell: bash
