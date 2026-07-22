@@ -60,6 +60,10 @@ jobs:
         run: bash scripts/test-classify-security-noverdict.sh
         shell: bash
 
+      - name: Assert owner risk-acceptance label validator (admin-only, fresh-per-push, fail closed)
+        run: bash scripts/test-risk-accepted-label.sh
+        shell: bash
+
       - name: Assert Dependabot security-review routing (pull_request_target ⇒ secrets; exactly one trigger)
         run: bash scripts/test-security-review-dependabot-routing.sh
         shell: bash

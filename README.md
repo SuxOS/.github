@@ -27,7 +27,13 @@ for the `sux` ↔ `suxrouter` residential-egress contract (schema at
 ## The two groups
 
 **Gates** (required checks that block merge):
-`ci.yml` · `security-review.yml` · `audit.yml` · `pin-consistency.yml` (supply-chain
+`ci.yml` · `security-review.yml` (high/critical findings block via `hold`; an
+owner-authorized risk-acceptance is expressible with the `security-risk-accepted`
+label — valid only when applied by a human repo **admin** *after* the current head's
+checks began (a new push stales it; bot/non-admin/revoked applications are ignored —
+`scripts/check-risk-accepted.sh` validates, fail-closed), which turns that verdict
+advisory instead of forcing an `--admin` merge over a permanently-red check) ·
+`audit.yml` · `pin-consistency.yml` (supply-chain
 pin hygiene: SHA-pin drift + unpinned-tag checks, HARD-FAIL required gate on this repo;
 also runs an ADVISORY-only consumer sweep of the same rules across every repo in
 `managed-repos.json`, never fails a merge there) — secret scanning is
