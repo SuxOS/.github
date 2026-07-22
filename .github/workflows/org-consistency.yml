@@ -54,7 +54,7 @@ jobs:
       # the later steps don't check it out again.
       - name: Checkout .github (this repo)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Managed-repo list (.github/managed-repos.json, single source of truth shared
       # with pin-consistency.yml/deep-audit.yml/budget-governor.yml — see #233/#253).

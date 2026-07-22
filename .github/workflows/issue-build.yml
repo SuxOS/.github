@@ -396,7 +396,7 @@ jobs:
       # scoped to SuxOS/.github) rather than minting a third token.
       - name: Checkout SuxOS/.github (shared trust predicate)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SuxOS/.github
           ref: main
@@ -789,7 +789,7 @@ jobs:
           repositories: .github
 
       - name: Checkout SuxOS/.github (shared marker-cycle helper)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SuxOS/.github
           ref: main
@@ -797,7 +797,7 @@ jobs:
           token: ${{ steps.helper-token.outputs.token }}
 
       - name: Checkout default branch
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
@@ -1323,7 +1323,7 @@ jobs:
       # predicate (#551) — see the matching checkout in the select job above.
       - name: Checkout SuxOS/.github (shared trust predicate)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SuxOS/.github
           ref: main
