@@ -252,3 +252,14 @@ and fixing whatever the earlier attempt's own security-review/self-check finding
 (this is how #469/#470/#471/#540/#541 landed together: salvaged from #611, a DIRTY-closed
 PR building the identical batch, with its one real high-severity finding — an unvalidated,
 model-authored cross-repo issue-filing destination in fixer.yml's epic step — fixed on top).
+
+A `scripts/test-*.sh` that extracts a workflow's `run:` block via `awk '/start-pattern/,/end-
+pattern/'` anchored on the LITERAL closing text of a jq/shell construct (not a stable marker
+comment) breaks silently the moment that construct grows a field after the anchor — the range
+either never closes or captures the wrong span, and the failure reads as a jq syntax error, not
+an obviously-related diff (#648: adding a field to fabric-health.yml's Loki-rollup jq object
+moved its closing `}` past `test-fabric-health-sweep.sh`'s `pr_stuck: \$stuck_total\}` end-
+anchor). When you add a field to a `run:` block that a sibling test extracts this way, update
+that test's anchor (and any new `--argjson`/`--arg` the extracted snippet now references) in
+the same commit — `grep` the test directory for the block's distinctive text before assuming
+an edit to a workflow's `run:` block is self-contained.
