@@ -989,10 +989,14 @@ jobs:
                 # survives across separate builder runs/sessions.
                 DROP_MARKER='<!-- issue-build:drop'
                 DROP_ESCALATE_THRESHOLD=2
-                comments='[]'
                 if ! comments=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}/comments" --paginate 2>/dev/null); then
-                  echo "::warning::could not fetch comments for issue #$n — treating drop-cycle count as 0 (not escalating) rather than failing the disposition step"
-                  comments='[]'
+                  # #602: a failed fetch must NOT be treated as "no marker exists" — that
+                  # silently resets the escalation cycle count (the #198 bug class). Mirror
+                  # pr-unstick.yml's sibling marker fetch: skip escalation handling for this
+                  # issue this run. The `building` label was already stripped above, so it's
+                  # still released back to the pool, just without touching the cycle marker.
+                  echo "::warning::could not fetch comments for issue #$n — skipping drop-cycle escalation this run rather than treating the fetch failure as 'no marker exists' (that would silently reset the cycle cap)"
+                  continue
                 fi
                 marker=$(echo "$comments" | jq -c --arg m "$DROP_MARKER" '[.[] | select(.body | startswith($m))] | last' 2>/dev/null || echo 'null')
                 cycle=0
