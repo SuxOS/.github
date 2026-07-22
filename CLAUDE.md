@@ -13,7 +13,8 @@ A change here is a change to every caller repo's CI/automerge/backlog pipeline
 simultaneously — there's no per-repo blast-radius limit. Before editing:
 
 - Check `inputs:` defaults are still sane for every known caller (`sux`, `suxrouter`,
-  `claude-config`, `suxlib`) — a default that fits `sux` may silently break a
+  `claude-config`, `suxlib`, `suxdash`, plus the cold-tier `suxos-net`/`nix`) — a default
+  that fits `sux` may silently break a
   caller with a different layout (e.g. no Worker to dry-run-deploy). Keep this list in
   sync with the org repo list in README.md as new repos join.
 - Don't add a new required secret/var without updating the "Required secrets/vars"

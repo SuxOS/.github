@@ -12,6 +12,8 @@ SuxOS repo inherits this pipeline via a thin caller stub instead of copying
 - `sux-fileops` — **retired** (absorbed into `suxlib`; de-registered from the pipeline, kept for history pending archive).
 - `claude-config` — shared Claude Code configuration.
 - `suxlib` — SuxOS v2 op-engine library (`@suxos/lib`), no Cloudflare Worker to deploy.
+- `suxdash` — SuxOS dashboard Worker (dash.suxos.net, Access-gated). Warm-tier caller set (#638).
+- `nix` — org base flake (pinned ucode-box overlay + shared devShell). Cold-tier caller set (single weekly fixer, like `suxos-net`) (#638).
 - `.github` — this repo: org profile + the reusable CI/autonomy pipeline.
 
 ## Cross-repo contracts
