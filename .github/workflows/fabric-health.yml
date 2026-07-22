@@ -251,6 +251,7 @@ jobs:
           # failing status rollup, or has been idle past the threshold.
           repos_json="[]"
           backlog_total=0
+          needs_human_total=0
           issues_all_ok=1      # every repo's issue query observed → backlog_zero is assertable
           collection_all_ok=1  # every collector on every repo succeeded → spine not degraded
           throttle_any_active=0  # OR across every repo's own throttle level (#522)
@@ -293,6 +294,18 @@ jobs:
                   | select(is_trusted_author)
                 ]
               | length')
+
+            # --- needs-human pile-up (#648): open issues explicitly parked for a human —
+            # the §4 spine-green definition (docs/design/2026-07-16-suxos-vx-next-arc.md §4)
+            # requires "no needs-human pile-up" alongside "no suxos_* red panels", but until
+            # now nothing here counted them (they're EXCLUDED from backlog above precisely
+            # because they aren't build-eligible, so they were invisible to every signal).
+            # No trust filter: applying the label itself already requires repo write access
+            # (private repo, no anonymous-fork actor — same reasoning as automerge.yml's own
+            # no-author-gate note), so unlike backlog there's no untrusted-inflation vector
+            # to guard against here.
+            needs_human=$(printf '%s' "$issues" | jq \
+              '[ .[] | select(any(.labels[]?; .name == "needs-human")) ] | length')
 
             # --- PRs: open / red (failing checks) / stuck ---
             # Same cap-hit detection as the issues collector above (#345).
@@ -475,6 +488,7 @@ jobs:
             [ "$repo" = ".github" ] && github_throttle_body="$repo_throttle_body"
 
             repo_obj=$(jq -n --arg repo "$repo" --argjson backlog "$backlog" \
+              --argjson needs_human "$needs_human" \
               --argjson pr "$pr_stats" --argjson wf_red "$wf_red" \
               --argjson disabled "$disabled_json" \
               --argjson merged "$merged_count" \
@@ -484,7 +498,7 @@ jobs:
               --argjson iok "$issues_ok" --argjson pok "$prs_ok" \
               --argjson rok "$runs_ok" --argjson wok "$wfs_ok" --argjson mok "$merged_ok" \
               --argjson gok "$integral_ok" --argjson tok "$throttle_ok" \
-              '{repo: $repo, backlog: $backlog, prs: $pr, workflow_red: $wf_red,
+              '{repo: $repo, backlog: $backlog, needs_human: $needs_human, prs: $pr, workflow_red: $wf_red,
                 workflows_disabled: $disabled,
                 merged_prs_in_window: $merged,
                 integral_error: $integral,
@@ -494,6 +508,7 @@ jobs:
                 collection: {issues: $iok, prs: $pok, runs: $rok, workflows: $wok, merged: $mok, integral: $gok, throttle: $tok}}')
             repos_json=$(printf '%s' "$repos_json" | jq --argjson o "$repo_obj" '. + [$o]')
             backlog_total=$((backlog_total + backlog))
+            needs_human_total=$((needs_human_total + needs_human))
             # A single failed collector anywhere degrades the whole spine to "unknown".
             # issues_all_ok separately gates backlog_zero: a missed issue query means org
             # backlog can't be asserted zero (the merge-relevant 7-day DoD streak).
@@ -541,6 +556,7 @@ jobs:
             --argjson repos "$repos_json" \
             --argjson backlog_total "$backlog_total" \
             --argjson backlog_zero "$backlog_zero" \
+            --argjson needs_human_total "$needs_human_total" \
             --argjson throttle_active "$throttle_active" \
             --argjson collection_ok "$collection_all_ok" \
             --arg opus_avail_min "${opus_avail_min:-}" \
@@ -552,6 +568,7 @@ jobs:
               generated_at_epoch: $ts,
               backlog_total: $backlog_total,
               backlog_zero: $backlog_zero,
+              needs_human_total: $needs_human_total,
               budget_throttle_active: $throttle_active,
               budget_opus_avail_min: (if ($opus_avail_min | length) > 0 then ($opus_avail_min | tonumber) else null end),
               budget_total_avail_min: (if ($total_avail_min | length) > 0 then ($total_avail_min | tonumber) else null end),
@@ -561,7 +578,7 @@ jobs:
               repos: $repos
             }' > fabric-status.json
 
-          echo "backlog_total=$backlog_total backlog_zero=$backlog_zero throttle=$throttle_active collection_ok=$collection_all_ok"
+          echo "backlog_total=$backlog_total backlog_zero=$backlog_zero needs_human_total=$needs_human_total throttle=$throttle_active collection_ok=$collection_all_ok"
           echo "status-file=fabric-status.json" >> "$GITHUB_OUTPUT"
 
       # Bounded multi-day backlog history (docs/design/2026-07-19-next-arc-decision-rule-
@@ -758,7 +775,13 @@ jobs:
             | ((.edge_checks // []) | any(.ok == false)) as $edge_red
             | ([.repos[] | select(.collection.runs == 1) | .workflow_red] | add // 0) as $workflow_red_total
             | ([.repos[] | select(.collection.prs == 1) | (.prs.red + .prs.stuck)] | add // 0) as $pr_red_stuck_total
-            | (($streak >= 7) and (.collection_ok == 1) and ($workflow_red_total == 0) and ($pr_red_stuck_total == 0)) as $drain_green
+            # needs-human pile-up (#648): §4 spine-green ("no suxos_* red panels, no
+            # needs-human pile-up") had no signal for the second half of that definition —
+            # drain_green could read true with a pile of needs-human issues sitting
+            # unaddressed. Gated on .collection.issues per repo (same as backlog_total)
+            # so a repo whose issue query failed contributes 0, never a fabricated count.
+            | ([.repos[] | select(.collection.issues == 1) | .needs_human] | add // 0) as $needs_human_total
+            | (($streak >= 7) and (.collection_ok == 1) and ($workflow_red_total == 0) and ($pr_red_stuck_total == 0) and ($needs_human_total == 0)) as $drain_green
             | {
                 row: (
                   if $drain_green and $headroom != null and $headroom >= 0.5 then "scale-unit-of-work"
@@ -777,6 +800,7 @@ jobs:
                 drain_green: $drain_green,
                 workflow_red_total: $workflow_red_total,
                 pr_red_stuck_total: $pr_red_stuck_total,
+                needs_human_total: $needs_human_total,
                 inflow_bound: $inflow_bound,
                 edge_red: $edge_red
               }' fabric-status.json)
@@ -805,7 +829,7 @@ jobs:
             "" \
             "Evidence:" \
             "$(printf '%s' "$VERDICT" | jq -r '
-              "- backlog-zero streak: \(.streak_days)d (history sampled \(.days_available)/\(.days_requested) days) — drain_green=\(.drain_green) (workflow_red=\(.workflow_red_total), pr_red+stuck=\(.pr_red_stuck_total))\n" +
+              "- backlog-zero streak: \(.streak_days)d (history sampled \(.days_available)/\(.days_requested) days) — drain_green=\(.drain_green) (workflow_red=\(.workflow_red_total), pr_red+stuck=\(.pr_red_stuck_total), needs_human=\(.needs_human_total))\n" +
               "- opus headroom fraction: \(.headroom_fraction // "unknown")\n" +
               "- backlog growth/day: \(.growth_per_day // "unknown (insufficient history)") vs drain rate/day: \(.drain_rate_per_day) — inflow_bound=\(.inflow_bound)\n" +
               "- edge panels red: \(.edge_red)"')" \
@@ -961,6 +985,11 @@ jobs:
               "suxos_pr_stuck_total,repo=\(.repo) value=\(.prs.stuck) \($ts)"' <<< "$status"
             jq -r --arg ts "$ts" '.repos[] | select(.collection.runs == 1) |
               "suxos_workflow_red_total,repo=\(.repo) value=\(.workflow_red) \($ts)"' <<< "$status"
+            # Gated on collection.issues (#648) — same absent-sample contract as the other
+            # derived per-repo series above, so an issue-query failure never reads as a
+            # healthy-looking "0 needs-human".
+            jq -r --arg ts "$ts" '.repos[] | select(.collection.issues == 1) |
+              "suxos_needs_human_total,repo=\(.repo) value=\(.needs_human) \($ts)"' <<< "$status"
             # Gated on collection.merged (#473/#305) — same absent-sample-not-a-
             # misleading-zero contract as the other derived per-repo series above.
             jq -r --arg ts "$ts" '.repos[] | select(.collection.merged == 1) |
@@ -1011,19 +1040,24 @@ jobs:
             # silently understating the true total instead of surfacing the outage.
             red_total=$(jq '[.repos[] | select(.collection.runs == 1) | .workflow_red] | add // 0' <<< "$status")
             stuck_total=$(jq '[.repos[] | select(.collection.prs == 1) | .prs.stuck] | add // 0' <<< "$status")
+            needs_human_total=$(jq '[.repos[] | select(.collection.issues == 1) | .needs_human] | add // 0' <<< "$status")
             collection_ok=$(jq '.collection_ok' <<< "$status")
             # A degraded collection is error-level too (#305): "couldn't measure" is not "info".
-            if [ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] || [ "$collection_ok" -eq 0 ]; then
+            # needs-human pile-up (#648) is error-level for the same reason workflow_red/pr_stuck
+            # are: it's half of the §4 spine-green definition, not merely informational.
+            if [ "$red_total" -gt 0 ] || [ "$stuck_total" -gt 0 ] || [ "$needs_human_total" -gt 0 ] || [ "$collection_ok" -eq 0 ]; then
               level=error
             else
               level=info
             fi
             line=$(jq -c --argjson red_total "$red_total" --argjson stuck_total "$stuck_total" \
+              --argjson needs_human_total "$needs_human_total" \
               '{backlog: (if .collection_ok == 1 then .backlog_total else null end), backlog_zero,
               throttle: .budget_throttle_active,
               collection_ok,
               workflow_red: $red_total,
-              pr_stuck: $stuck_total}' <<< "$status")
+              pr_stuck: $stuck_total,
+              needs_human: $needs_human_total}' <<< "$status")
             body=$(jq -n --arg ts "$ts" --arg line "$line" --arg level "$level" \
               '{streams: [{stream: {service: "suxos-fabric", level: $level}, values: [[$ts, $line]]}]}')
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 \
