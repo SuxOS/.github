@@ -82,7 +82,7 @@ run_scenario() {
   rm -f "$dfile"
 }
 
-echo "[1/5] plain dropped (superseded absent/false) -> release claim + marker+'dropped from batch' comment, no close"
+echo "[1/6] plain dropped (superseded absent/false) -> release claim + marker+'dropped from batch' comment, no close"
 log1="$(mktemp)"
 run_scenario "plain-dropped" '[1,2]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"too risky this session","superseded":false}]}' "$log1"
@@ -97,7 +97,7 @@ else
 fi
 rm -f "$log1"
 
-echo "[2/5] superseded dropped (superseded=true) -> release claim + close --reason 'not planned', no plain comment, no marker read"
+echo "[2/6] superseded dropped (superseded=true) -> release claim + close --reason 'not planned', no plain comment, no marker read"
 log2="$(mktemp)"
 run_scenario "superseded-dropped" '[1,3]' \
   '{"built":[1],"dropped":[{"number":3,"reason":"already fixed by #999","superseded":true}]}' "$log2"
@@ -111,7 +111,7 @@ else
 fi
 rm -f "$log2"
 
-echo "[3/5] mixed batch: one plain-dropped + one superseded-dropped + one built -> each takes its own path, built one only gets Closes"
+echo "[3/6] mixed batch: one plain-dropped + one superseded-dropped + one built -> each takes its own path, built one only gets Closes"
 log3="$(mktemp)"
 run_scenario "mixed" '[1,2,3]' \
   '{"built":[1],"dropped":[{"number":2,"reason":"deferred","superseded":false},{"number":3,"reason":"stale, fixed elsewhere","superseded":true}]}' "$log3"
@@ -127,7 +127,7 @@ else
 fi
 rm -f "$log3"
 
-echo "[4/5] (#562) escalation ladder: first drop -> cycle=1 marker posted as a NEW comment, no needs-human escalation yet"
+echo "[4/6] (#562) escalation ladder: first drop -> cycle=1 marker posted as a NEW comment, no needs-human escalation yet"
 log4="$(mktemp)"
 run_scenario "first-drop-cycle1" '[4]' \
   '{"built":[],"dropped":[{"number":4,"reason":"too large this session","superseded":false}]}' "$log4"
@@ -142,7 +142,7 @@ else
 fi
 rm -f "$log4"
 
-echo "[5/5] (#562) escalation ladder: second drop with a prior cycle=1 marker -> cycle=2 hits the threshold, needs-human applied, marker PATCHed in place"
+echo "[5/6] (#562) escalation ladder: second drop with a prior cycle=1 marker -> cycle=2 hits the threshold, needs-human applied, marker PATCHed in place"
 log5="$(mktemp)"
 prior='[{"id":777,"body":"<!-- issue-build:drop cycle=1 at=2026-07-18T00:00:00Z -->\n🤖 Dropped from this batch (not shipped in this PR): first attempt too risky."}]'
 run_scenario "second-drop-cycle2" '[5]' \
@@ -157,6 +157,22 @@ else
   bad "second drop of #5: expected cycle=2 escalation (needs-human + PATCH) — got: $(cat "$log5")"
 fi
 rm -f "$log5"
+
+echo "[6/6] (#679) partial: a multi-item issue with some but not all asks shipped -> claim released + summary comment, not closed, no Closes #n"
+log6="$(mktemp)"
+run_scenario "partial" '[6,7]' \
+  '{"built":[7],"partial":[{"number":6,"shipped":"items 1-4","remaining":"items 5-6","reason":"ran out of turns this session"}]}' "$log6"
+if grep -q 'GH issue edit 6 --repo test/repo --remove-label building' "$log6" \
+  && grep -q '🤖 Partially shipped in this batch (not auto-closed): shipped — items 1-4; remaining — items 5-6 (ran out of turns this session)' "$log6" \
+  && grep -q 'Closes #7' "$log6" \
+  && ! grep -q 'Closes #6' "$log6" \
+  && ! grep -q 'GH issue close 6' "$log6" \
+  && ! grep -q -- 'GH api repos/test/repo/issues/6/comments -f body=<!-- issue-build:drop' "$log6"; then
+  note "partial #6: claim released + shipped/remaining summary comment, not closed, only #7 gets Closes"
+else
+  bad "partial #6: expected release+summary comment, no close, no Closes #6 — got: $(cat "$log6")"
+fi
+rm -f "$log6"
 
 if [ "$fail" -eq 0 ]; then
   echo "All issue-build disposition dropped/superseded close-path tests passed."
