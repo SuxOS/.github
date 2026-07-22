@@ -45,11 +45,17 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  # claude-code-action fetches a GitHub OIDC token. A reusable workflow's own permissions
-  # block is the ceiling for its jobs, so a caller that grants `id-token: write` has it
-  # silently dropped unless it's ALSO listed here. Its absence left the OIDC fetch ungranted
-  # — intermittently failing ("Could not fetch an OIDC token") → no verdict → a spurious
-  # fail-closed `hold` on legitimate PRs. Listing it here makes the caller's grant effective.
+  # STALE AS OF #649 (see #660): claude-code-action fetches a GitHub OIDC token to mint its
+  # own default token ONLY when not given an explicit `github_token`. #649 added an explicit
+  # mint-app-token step + `github_token:` input to all three review attempts below (the primary
+  # path on every trigger this workflow actually exercises, including the Dependabot
+  # pull_request_target path this was originally added for), so none of them fall through to
+  # the action's own OIDC-based mint anymore. This permission now only matters as a fallback for
+  # the unlikely case the mint-app-token step itself fails/is skipped and `github_token` comes
+  # through empty — kept rather than removed since that fallback is still a live (if rare) path,
+  # not because OIDC is the primary token source anymore. A reusable workflow's own permissions
+  # block is the ceiling for its jobs either way, so a caller that grants `id-token: write` has
+  # it silently dropped unless it's ALSO listed here.
   id-token: write
 
 concurrency:
