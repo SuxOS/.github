@@ -5,6 +5,12 @@ name: CI (reusable)
 #   with: { ... }
 #   secrets: inherit
 # Defaults match sux-mcp's layout; override `with:` for a different repo shape.
+#
+# NOTE (#579): no current managed repo (sux/suxrouter/claude-config/suxlib) actually
+# wires this — each forked its own ci.yml instead. Kept as an optional starting
+# template (see docs/design/2026-07-22-ci-yml-fate-decision.md), not a proven-live
+# default — adapt the `with:` defaults for your own layout rather than trusting them
+# as-is.
 
 on:
   workflow_call:

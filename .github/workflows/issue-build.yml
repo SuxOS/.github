@@ -421,17 +421,27 @@ jobs:
             const openPrs = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", per_page: 100,
             });
-            // Also matches the "Related to #n" wording issue-build.yml's own multi-issue-batch
-            // fail-closed path uses when disposition.json is missing/malformed (line ~980) — a
-            // PR opened that way otherwise falls through this guard entirely, letting the reaper
-            // strip `building` from its linked issues while the PR is still open (#544). Negative
-            // lookbehind excludes "not related to #n" (same negated-form gap pr-drain.yml's
-            // sibling regex was fixed for, #538).
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
+            // Strict set: only real closing keywords, used below for the buildable-exclusion
+            // checks (step 2). A bare "related to #n" mention in an unrelated PR's body does
+            // NOT mean that PR is building/closing #n — this file's own CASUAL_REF regex
+            // (below) already classifies "related to" as a casual, non-dependency phrase, and
+            // widening this set to buildable-exclusion purposes wrongly hid issue #n for as
+            // long as any PR merely mentioned it in passing (#576).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            // Wide set: also matches the "Related to #n" wording issue-build.yml's own
+            // multi-issue-batch fail-closed path uses when disposition.json is missing/
+            // malformed (line ~980) — a PR opened that way otherwise falls through the reap
+            // guard entirely, letting the reaper strip `building` from its linked issues while
+            // the PR is still open (#544). Negative lookbehind excludes "not related to #n"
+            // (same negated-form gap pr-drain.yml's sibling regex was fixed for, #538). Used
+            // ONLY for reap-protection (step 1) — NOT for buildable-exclusion (#576).
+            const REAP_PROTECT_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
+            const reapProtected = new Set();
             for (const pr of openPrs) {
               if (!isTrusted(pr.user, pr.author_association)) continue;
               for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
+              for (const m of (pr.body || "").matchAll(REAP_PROTECT_KW)) reapProtected.add(Number(m[1]));
             }
 
             // 1. Reap: an issue stuck in `building` with no activity for >reapHours is an
@@ -443,7 +453,7 @@ jobs:
             });
             const now = Date.now();
             for (const issue of stale) {
-              if (referencedByOpenPr.has(issue.number)) continue;
+              if (reapProtected.has(issue.number)) continue;
               const ageH = (now - new Date(issue.updated_at).getTime()) / 3_600_000;
               if (ageH >= reapHours) {
                 core.info(`reaping orphaned building issue #${issue.number} (idle ${ageH.toFixed(1)}h)`);
@@ -1310,10 +1320,14 @@ jobs:
               github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
               github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
             ]);
-            // Also matches "Related to #n" (issue-build.yml's own no-disposition fail-closed
-            // wording, line ~980), excluding the negated "not related to #n" form — see the
-            // matching comment on this same regex above (#544).
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
+            // Strict set only — no "related to" here. This set is used purely for the
+            // buildable-exclusion check below (there's no reap logic in this job), and a bare
+            // "related to #n" mention in an unrelated PR's body does NOT mean that PR is
+            // building/closing #n (this file's CASUAL_REF regex classifies "related to" as
+            // casual, non-dependency phrasing) — widening this set wrongly hid issue #n for as
+            // long as any PR merely mentioned it in passing (#576). See the matching comment on
+            // this same regex in the `select` job above (#544 is what originally widened it).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
               // Only a trusted-author PR's closing keywords count — an untrusted PR body
