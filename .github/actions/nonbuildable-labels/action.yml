@@ -9,6 +9,16 @@ description: >-
   ADDITIONAL labels of its own that aren't about buildability (e.g.
   fabric-health's blocked/throttle) — only this shared floor is
   centralized here.
+  Two semantically distinct groups share this floor: (a) NOT-real-work /
+  in-flight markers (`building`, `tracking`, `epic`) and human-hold gates
+  (`hold`, `needs-human`); and (b) `effort:large` — a HUMAN-APPROVAL GATE
+  (2026-07-21 operator setpoint: "minor/easy features ungated, everything
+  else human approval", docs/design/2026-07-17-automation-structure-and-
+  anti-drift.md). Large work of ANY type (incl. bugs) is real and buildable
+  but deliberately NOT auto-attempted — a large issue just exhausted the
+  Sonnet turn cap and ended up `needs-human` anyway, so gating it open for a
+  human go-ahead is strictly cheaper than escalating. Visibility of why a
+  gated issue isn't building is the separate #628 explainer, not this action.
 
 outputs:
   labels:
@@ -20,4 +30,5 @@ runs:
   steps:
     - id: emit
       shell: bash
-      run: echo "labels=building,hold,needs-human,tracking,epic" >> "$GITHUB_OUTPUT"
+      # effort:large is a human-approval GATE, not a not-real-work marker — see description.
+      run: echo "labels=building,hold,needs-human,tracking,epic,effort:large" >> "$GITHUB_OUTPUT"

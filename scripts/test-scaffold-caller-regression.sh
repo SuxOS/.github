@@ -28,6 +28,29 @@ else
   bad "scaffold-caller.sh's security-review template omits ready_for_review — a newly-scaffolded repo's required security gate will silently never re-run when a draft PR goes ready (GitHub counts a skipped required check as passing)"
 fi
 
+# Dependabot dep-bump PRs get NO secrets on `pull_request`, so the required review fails closed
+# forever (#621/#622). The template must trigger on pull_request_target (secrets present) AND
+# route ONLY dependabot[bot] there (the job `if`) AND allow the dependabot[bot] actor — dropping
+# any one silently re-breaks dep-bump merges. (Behavioral routing matrix lives in
+# scripts/test-security-review-dependabot-routing.sh, which drives BOTH this template and the
+# checked-in self-security-review.yml stub; this is the coarse "template didn't lose it" guard.)
+if printf '%s\n' "$stub" | grep -q 'pull_request_target'; then
+  note "generated security-review stub triggers on pull_request_target (Dependabot secrets path)"
+else
+  bad "scaffold-caller.sh's security-review template omits pull_request_target — Dependabot dep-bump PRs get no secrets on plain pull_request, so the required review fails closed forever (#621/#622)"
+fi
+if printf '%s\n' "$stub" | grep -q "user.login != 'dependabot\[bot\]'" \
+   && printf '%s\n' "$stub" | grep -q "user.login == 'dependabot\[bot\]'"; then
+  note "generated security-review stub routes each PR to exactly one trigger by the dependabot[bot] actor"
+else
+  bad "scaffold-caller.sh's security-review template lost the dependabot[bot] routing 'if' — the review would double-run or a human PR could reach the privileged pull_request_target context"
+fi
+if printf '%s\n' "$stub" | grep -q 'allowed-bots: "suxbot\[bot\],dependabot\[bot\]"'; then
+  note "generated security-review stub allows the dependabot[bot] actor"
+else
+  bad "scaffold-caller.sh's security-review template must list dependabot[bot] in allowed-bots or claude-code-action refuses the bot PR and hard-fails the required gate"
+fi
+
 echo "[2/5] pr-eligibility's auto-merge safety regex fixture matrix (#229)"
 pr_eligibility_run=$(extract_run .github/actions/pr-eligibility/action.yml evaluate)
 check_pr_eligibility() {
