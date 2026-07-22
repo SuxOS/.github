@@ -107,6 +107,16 @@ on:
           their own and so are routinely left `disabled_manually` by design.
         type: string
         default: "audit.yml,automerge.yml,ci.yml,claude-autofix.yml,claude.yml,fabric-health.yml,fixer.yml,health.yml,issue-build.yml,pr-auto-update.yml,pr-drain.yml,pr-unstick.yml,pr-watch.yml,security-review.yml,skill-sync.yml"
+      epic-reconciler:
+        description: >-
+          Enable the epic reconciler pass (docs/design/2026-07-18-epic-decomposition-design.md
+          §2.3, companion to fixer.yml's epic-filing input, #471): ticks/closes "Epic: <id>"
+          tracking issues in .github as their `epic:<id>`-labeled child issues close across
+          every repo in `repos`. Disabled by default per the design doc's §2.5/§5 gating
+          note — arm only once the vX-arc DoD (7-day drain streak + >=50% opus headroom) is
+          confirmed live (see the §4 next-arc verdict this same workflow already computes).
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -817,6 +827,95 @@ jobs:
           title: "Next-arc decision (§4)"
           body: ${{ steps.next-arc-body.outputs.body }}
           labels: "tracking"
+
+      # Epic reconciler (docs/design/2026-07-18-epic-decomposition-design.md §2.3, companion
+      # to fixer.yml's epic-filing step, #470/#471): a single, non-looped gh-list-exhaustive
+      # call — genuinely unbounded over time, the exact undercount class the action guards
+      # against (CLAUDE.md) — finds every open "Epic: <id>" tracking issue this repo's own
+      # fixer.yml step upserted.
+      - name: Discover open epic tracking issues
+        if: inputs.epic-reconciler == true
+        id: epic-discover
+        uses: SuxOS/.github/.github/actions/gh-list-exhaustive@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          json-fields: number,title
+          args: |
+            issue
+            list
+            --repo
+            ${{ github.repository }}
+            --state
+            open
+            --label
+            tracking
+
+      # `upsert-tracking-issue` is a `uses:` composite-action step and, like every `uses:`
+      # step, can't be invoked from inside a bash loop over a dynamic (runtime-discovered)
+      # list of epic ids (CLAUDE.md's documented limitation for this exact shape). Since the
+      # discovery step above already resolved each tracking issue's number, this edits/closes
+      # it directly with plain `gh issue edit`/`gh issue close` instead — no upsert-by-title
+      # search needed, and no loop-over-a-`uses:`-step problem, and it handles arbitrarily
+      # many concurrently-open epics correctly in one pass (unlike fixer.yml's filing step,
+      # which only upserts one epic's tracking issue per run for that same structural reason).
+      - name: Reconcile epic tracking issues
+        if: inputs.epic-reconciler == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          REPOS: ${{ inputs.repos }}
+          TRACKING: ${{ steps.epic-discover.outputs.json }}
+        run: |
+          set -uo pipefail
+          mapfile -t tracking_entries < <(printf '%s' "$TRACKING" | jq -c '.[]')
+          for entry in "${tracking_entries[@]}"; do
+            title=$(printf '%s' "$entry" | jq -r '.title')
+            case "$title" in
+              "Epic: "*) ;;
+              *) continue ;;
+            esac
+            number=$(printf '%s' "$entry" | jq -r '.number')
+            id="${title#Epic: }"
+
+            total=0
+            closed=0
+            checklist=""
+            for repo in $REPOS; do
+              # Bounded, not gh-list-exhaustive: an epic's repo set is a small, manually-
+              # curated list (an `epic.repos` array a fixer proposal authored, §2.1), never
+              # organically growing past a handful — the silent-undercount class
+              # gh-list-exhaustive exists to prevent doesn't apply to a per-repo,
+              # per-epic-label query like this one.
+              page=$( { gh issue list --repo "${ORG}/${repo}" --label "epic:${id}" --state all --limit 200 --json number,title,state,url 2>/dev/null; } || true)
+              [ -z "$page" ] && continue
+              n=$(printf '%s' "$page" | jq 'length')
+              [ "$n" -eq 0 ] && continue
+              c=$(printf '%s' "$page" | jq '[.[] | select(.state == "CLOSED")] | length')
+              total=$((total + n))
+              closed=$((closed + c))
+              checklist="${checklist}$(printf '%s' "$page" | jq -r '.[] | "- [\(if .state == "CLOSED" then "x" else " " end)] \(.url) \(.title)"')"$'\n'
+            done
+
+            if [ "$total" -eq 0 ]; then
+              echo "epic ${id}: no child issues found yet (tracking issue #${number}) — leaving as-is"
+              continue
+            fi
+
+            body=$(printf '%s\n' \
+              "Auto-maintained by fabric-health.yml (docs/design/2026-07-18-epic-decomposition-design.md §2.3). Last updated $(date -u '+%Y-%m-%d %H:%M UTC')." \
+              "Tracks the child issues filed for epic \`${id}\`." \
+              "" \
+              "$checklist")
+
+            if [ "$closed" -eq "$total" ]; then
+              echo "epic ${id}: all ${total} child issues closed — closing tracking issue #${number}"
+              gh issue comment "$number" --repo "${ORG}/.github" --body "$body" || true
+              gh issue close "$number" --repo "${ORG}/.github" --comment "All ${total} child issues closed — epic complete." || true
+            else
+              echo "epic ${id}: ${closed}/${total} child issues closed — refreshing tracking issue #${number}"
+              gh issue edit "$number" --repo "${ORG}/.github" --body "$body" || true
+            fi
+          done
 
       - name: Ship snapshot to Grafana Cloud (Prometheus + Loki)
         env:

@@ -78,6 +78,16 @@ on:
           has no equivalent as of 2026-07.
         type: string
         default: "copilot-swe-agent[bot]"
+      epic-filing:
+        description: >-
+          Consume a proposal's optional `epic: {id, repos}` field
+          (docs/design/2026-07-18-epic-decomposition-design.md §2.2): instead of filing the
+          proposal as an ordinary single-repo issue, file one child issue per named repo
+          (labeled `epic:<id>`) plus one tracking issue in .github. Disabled by default per
+          the design doc's §2.5/§5 gating note — arm only once the vX-arc DoD (7-day drain
+          streak + >=50% opus headroom) is confirmed live.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -149,6 +159,57 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # Minimal (.github-only) token just to read the deterministic managed-repos.json
+      # allowlist below — NOT the token epic filing itself writes with. Needed because
+      # fixer.yml runs in every caller repo's own checkout, none of which carry
+      # SuxOS/.github's managed-repos.json locally.
+      - name: Mint app token for managed-repos read (SuxOS/.github)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true
+        id: managed-repos-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: ".github"
+
+      # Deterministic allowlist for epic child-issue destinations (security-review finding
+      # on this PR's first draft, #470: a proposal's `epic.repos` is model-authored content —
+      # filing directly into whatever repo names it lists, under an org-wide token, lets a
+      # prompt-injection payload steer writes into any repo the App can reach. managed-repos.json
+      # is this org's single source of truth for "repos we manage" (CLAUDE.md), so it's the
+      # deterministic config this repo's own doctrine requires in-scope destinations come from —
+      # never the model's own output. Read failure degrades to empty (fail-closed below, not
+      # fail-open to unrestricted).
+      - name: Read managed-repos.json (deterministic epic-repo allowlist)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true
+        id: managed-repos
+        env:
+          GH_TOKEN: ${{ steps.managed-repos-token.outputs.token }}
+        run: |
+          repos=$( { gh api repos/SuxOS/.github/contents/.github/managed-repos.json --jq '.content' 2>/dev/null \
+            | base64 -d 2>/dev/null | jq -r '(.repos // []) | join(",")' 2>/dev/null; } || true)
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+
+      # Scoped (never wider than managed-repos.json's repos + .github — see the allowlist
+      # read above) token for epic filing: a proposal's `epic.repos` can name repos other than
+      # this caller's own, plus the tracking issue always goes in .github regardless of which
+      # repo fixer.yml is running against (docs/design/2026-07-18-epic-decomposition-design.md
+      # §2.2) — the default app-token above is scoped to only the calling repo, which can't
+      # write either of those. Minted even when a run's proposals end up carrying no epic, to
+      # keep the "File proposed issues" step's token selection a plain fallback (below) rather
+      # than a runtime branch on proposal content. If the allowlist read above failed
+      # (empty repos=""), this falls back to `.github`-only — fail-closed, never org-wide.
+      - name: Mint app token for epic filing (scoped to managed repos + .github)
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true
+        id: epic-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: ${{ steps.managed-repos.outputs.repos != '' && format('{0},.github', steps.managed-repos.outputs.repos) || '.github' }}
 
       - name: Checkout
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
@@ -370,12 +431,21 @@ jobs:
       # model-authored JSON, no shell-quoting surface.
       - name: File proposed issues
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
+        id: file
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Read from whichever attempt produced output (retry only ran if the first was empty).
           VERDICT: ${{ steps.claude.outputs.structured_output || steps.claude_retry.outputs.structured_output }}
+          EPIC_FILING: ${{ inputs.epic-filing }}
+          # Same deterministic allowlist the epic-token mint above was scoped to (belt-and-
+          # suspenders, #470 security fix): a model-proposed epic.repos entry outside this set
+          # is dropped here even if the token could somehow still reach it.
+          MANAGED_REPOS: ${{ steps.managed-repos.outputs.repos }}
         with:
-          github-token: ${{ steps.app-token.outputs.token }}
+          # Falls back to the calling-repo-scoped app-token when epic-filing is off (the
+          # epic-token step above didn't run, so its output is empty) — same token, same
+          # behavior as before this input existed.
+          github-token: ${{ steps.epic-token.outputs.token || steps.app-token.outputs.token }}
           script: |
             const { owner, repo } = context.repo;
             const raw = process.env.VERDICT;
@@ -386,9 +456,24 @@ jobs:
             const proposals = Array.isArray(verdict.proposals) ? verdict.proposals : [];
             core.info(`proposals: ${proposals.length} (discarded as duplicate/baseless: ${verdict.discarded_count ?? 0})`);
 
+            const epicFiling = process.env.EPIC_FILING === "true";
+            // Deterministic allowlist (managed-repos.json via the epic-token mint step) —
+            // epic.repos is model-authored content and must never itself decide which repo
+            // gets written to (#470 security fix; see the epic-token step's own comment).
+            const managedRepos = new Set((process.env.MANAGED_REPOS || "").split(",").filter(Boolean));
+            // docs/design/2026-07-18-epic-decomposition-design.md §2.2. id -> { children }.
+            // Only the FIRST distinct epic id proposed this run gets its tracking issue
+            // upserted below (see the note on the tracking-issue step in this same job) —
+            // `upsert-tracking-issue` is a `uses:` composite-action step, which (like every
+            // `uses:` step) can't be invoked from inside a loop over a dynamic,
+            // model-proposed list of epic ids. In practice this isn't a real limit: fixer's
+            // own prompt already asks for at most one ambitious idea per `deep` pass, and an
+            // epic proposal IS that ambitious idea.
+            const epics = new Map();
+
             const filed = [];
             for (const p of proposals) {
-              const { title, body, type, security, effort } = p || {};
+              const { title, body, type, security, effort, epic } = p || {};
               if (!["bug", "enhancement", "documentation"].includes(type)) { core.warning(`skipping proposal with unexpected type '${type}': ${title}`); continue; }
 
               const labels = [type];
@@ -396,6 +481,37 @@ jobs:
               // An invalid/missing effort is not fatal to filing — issue-build's select step
               // defaults an unlabeled issue to medium effort. Only a known-good value gets a label.
               if (["small", "medium", "large"].includes(effort)) labels.push(`effort:${effort}`);
+
+              const epicId = epic && typeof epic.id === "string" && epic.id ? epic.id : null;
+              const epicReposRaw = epic && Array.isArray(epic.repos) ? epic.repos.filter((r) => typeof r === "string" && r) : [];
+              // Drop any model-proposed repo not in the deterministic managed-repos.json
+              // allowlist (#470 security fix) — never let content-derived output pick an
+              // out-of-scope write destination, even though the epic-token mint above is
+              // already scoped narrowly enough to make an out-of-allowlist write fail anyway.
+              const epicRepos = epicReposRaw.filter((r) => managedRepos.has(r));
+              if (epicReposRaw.length > epicRepos.length) {
+                core.warning(`epic '${epicId}' proposed repo(s) outside the managed-repos.json allowlist — dropping: ${epicReposRaw.filter((r) => !managedRepos.has(r)).join(", ")}`);
+              }
+
+              if (epicFiling && epicId && epicRepos.length > 0) {
+                // Cross-repo epic: one child issue per named repo, each tagged `epic:<id>`,
+                // instead of one ordinary issue in this proposal's own (calling) repo.
+                const entry = epics.get(epicId) || { children: [] };
+                for (const targetRepo of epicRepos) {
+                  try {
+                    const { data } = await github.rest.issues.create({
+                      owner, repo: targetRepo, title, body, labels: [...labels, `epic:${epicId}`],
+                    });
+                    core.info(`filed epic child: ${data.html_url}`);
+                    filed.push(data.html_url);
+                    entry.children.push({ repo: targetRepo, number: data.number, url: data.html_url, title });
+                  } catch (e) {
+                    core.warning(`failed to file epic child '${title}' in ${owner}/${targetRepo}: ${e.message}`);
+                  }
+                }
+                epics.set(epicId, entry);
+                continue;
+              }
 
               try {
                 const { data } = await github.rest.issues.create({ owner, repo, title, body, labels });
@@ -409,6 +525,35 @@ jobs:
             if (filed.length > 0) {
               await core.summary.addHeading("fixer: proposals filed", 3).addList(filed).write();
             }
+
+            const [firstEpicId, firstEpic] = epics.size > 0 ? [...epics.entries()][0] : [];
+            if (firstEpicId) {
+              if (epics.size > 1) core.warning(`${epics.size} distinct epic ids proposed this run — only the tracking issue for '${firstEpicId}' is upserted now; the rest pick up on a future run`);
+              const checklist = firstEpic.children.map((c) => `- [ ] ${owner}/${c.repo}#${c.number} ${c.title}`).join("\n");
+              const body = [
+                "Auto-maintained by fixer.yml (docs/design/2026-07-18-epic-decomposition-design.md §2.2).",
+                `Tracks the child issues filed for epic \`${firstEpicId}\`.`,
+                "",
+                checklist,
+              ].join("\n");
+              core.setOutput("epic_id", firstEpicId);
+              core.setOutput("epic_tracking_title", `Epic: ${firstEpicId}`);
+              core.setOutput("epic_tracking_body", body);
+            }
+
+      # Separate step because upsert-tracking-issue is a composite `uses:` step (see the
+      # comment on the epic-id map above for why it can't run inside the filing loop itself).
+      - name: Refresh epic tracking issue
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.epic-filing == true && steps.file.outputs.epic_id != ''
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ steps.epic-token.outputs.token }}
+          repo: SuxOS/.github
+          mode: open
+          update-mode: replace
+          title: ${{ steps.file.outputs.epic_tracking_title }}
+          body: ${{ steps.file.outputs.epic_tracking_body }}
+          labels: "tracking"
 
       # Deterministic on purpose (cardinal rule: script over model call whenever exact) —
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped

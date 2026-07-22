@@ -55,6 +55,14 @@ ALLOWLIST=(
   ".github/workflows/pr-auto-update.yml::A bounded \`gh pr list --limit N\`"
   ".github/actions/upsert-tracking-issue/action.yml::gh issue list --repo \"\$REPO\" --state open --limit \"\$limit\""
   ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/.github\" --state open"
+  # Epic reconciler (#471): per-repo, per-epic-label query. Bounded by construction — an
+  # epic's repo set is a small, manually-curated `epic.repos` array a fixer proposal
+  # authored (docs/design/2026-07-18-epic-decomposition-design.md §2.1), never organically
+  # growing past a handful — not the silent-undercount class gh-list-exhaustive guards
+  # against. Also can't use gh-list-exhaustive here regardless: it's a `uses:` composite
+  # action, and this call sits inside a bash loop over runtime-discovered epic ids/repos,
+  # which a `uses:` step structurally can't be invoked from (CLAUDE.md).
+  ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/\${repo}\" --label \"epic:\${id}\" --state all --limit 200"
 )
 
 is_allowlisted() {
