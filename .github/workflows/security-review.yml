@@ -83,7 +83,13 @@ jobs:
     # (fork/public-repo hardening: re-earn at go-public, not before — private today)
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Was 20 — org-wide audit (2026-07-22) measured ~10-13% of runs in the busiest callers
+    # (sux, suxrouter) landing on "cancelled" at almost exactly the 20min mark: the job-level
+    # timeout killing the review mid-flight on large diffs (e.g. batch-drain PRs bundling
+    # several issues), which then fails closed and applies `hold` with zero verdict produced —
+    # pure wasted spend with no signal. 35min gives large diffs room to finish instead of
+    # burning a full timeout for nothing.
+    timeout-minutes: 35
     steps:
       - name: Preflight — need the key
         id: pre
