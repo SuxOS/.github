@@ -45,6 +45,14 @@ on:
       max-turns:
         type: number
         default: 120
+      backlog-high-water:
+        description: >-
+          Fixer stands down (proposes nothing this pass) when the repo already has at least
+          this many OPEN buildable issues (bug/enhancement/documentation, excluding
+          needs-human/hold/blocked). Keeps the proposer (source) from out-running the builder's
+          drain and bloating the backlog buffer. Deterministic pre-check, no model call.
+        type: number
+        default: 12
       scope:
         description: >-
           What this pass looks for — lets callers run a tight, cheap bug-only sweep often and
@@ -102,8 +110,39 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           defer-at: "yellow"
 
-      - name: Mint app token
+      # Backlog gate (Fixer Cadence v2) — fixer is the SOURCE in source->buffer->drain
+      # (propose -> issue backlog -> issue-build drains). A Claude scan that proposes MORE work
+      # into an already-deep backlog just bloats the buffer and spends a session whose output
+      # cannot drain. This deterministic count (no model call, runs before the app token is even
+      # minted) stands fixer down when the open buildable backlog is at/above the high-water
+      # mark. Complements the runner-minute throttle above, which is blind to backlog depth.
+      # Fails OPEN (proceeds) if the count cannot be read — a cost guard degrades to the
+      # existing behavior, it never hard-blocks a pass.
+      - name: Backlog gate
+        id: backlog
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIGH_WATER: ${{ inputs.backlog-high-water }}
+        run: |
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 300 \
+                --json labels \
+                --jq '[.[] | (.labels|map(.name)) as $l
+                       | select((($l|any(. == "bug" or . == "enhancement" or . == "documentation")))
+                                and ((($l|any(. == "needs-human" or . == "hold" or . == "blocked"))) | not))]
+                      | length' 2>/dev/null) || n=""
+          if [ -z "$n" ]; then
+            echo "backlog count unavailable -> fail-open, proceed"; echo "go=true" >> "$GITHUB_OUTPUT"
+          elif [ "$n" -ge "$HIGH_WATER" ]; then
+            echo "open buildable backlog $n >= high-water $HIGH_WATER -> fixer stands down (buffer full, let issue-build drain)"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "open buildable backlog $n < high-water $HIGH_WATER -> proceed"
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
         id: app-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -111,18 +150,18 @@ jobs:
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
       - name: Checkout
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: { fetch-depth: 0 }
 
       - name: Record scan-start time
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.auto-assign-agent == true
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true' && inputs.auto-assign-agent == true
         id: scan-start
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
 
       - name: Claude — scan and propose issues
         id: claude
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
         # The action hard-fails (exit 1) when the model runs fine but ends its turn without
         # emitting --json-schema structured_output ("Result subtype: success" + no output —
         # a proposer that wrote a prose summary instead of the tool call, a flaky/refusing
@@ -233,7 +272,7 @@ jobs:
         # into an auto-recovery instead of a silently-empty pass; a genuinely fruitless scan
         # still yields no output after this and the File step below simply files nothing (green).
         # Mirrors security-review.yml's claude/claude_retry pair (#139).
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
         continue-on-error: true
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
@@ -329,7 +368,7 @@ jobs:
       # as issue-build.yml's select step (2026-07-15): a real language for structured
       # model-authored JSON, no shell-quoting surface.
       - name: File proposed issues
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           # Read from whichever attempt produced output (retry only ran if the first was empty).
@@ -374,7 +413,7 @@ jobs:
       # we don't ask Claude to self-report which issues it filed; we just ask GitHub, scoped
       # to this run's time window. See the workflow-level comment for why this needs a PAT.
       - name: Auto-assign freshly filed issues to a coding agent
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && inputs.auto-assign-agent == true
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && steps.backlog.outputs.go == 'true' && inputs.auto-assign-agent == true
         env:
           GH_TOKEN: ${{ secrets.AGENT_ASSIGN_PAT }}
           ASSIGNEE: ${{ inputs.agent-assignee }}
