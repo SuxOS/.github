@@ -70,6 +70,17 @@ on:
           jammed.
         type: string
         default: "30"
+      building-reap-hours:
+        description: >-
+          Minimum age (since the issue's last update) before an open issue
+          carrying `building` with no open PR referencing it is treated as a
+          zombie claim (SuxOS/.github#677) and stripped, instead of a just-
+          started builder that hasn't opened its PR yet. Should stay at or
+          above the caller's own trigger cadence for this workflow — a value
+          shorter than one loop period risks racing a build that's still in
+          flight.
+        type: string
+        default: "6"
 
 permissions:
   contents: write
@@ -116,9 +127,12 @@ jobs:
       # PRIVATE, so this needs its own token scoped to just `.github` (same reasoning as
       # security-review.yml's classifier-token). continue-on-error degrades to skip (guarded
       # in the loops below), same posture as this file's other cross-repo steps.
+      # Not gated on the throttle (unlike those two sweeps): the zombie building-label sweep
+      # below (#677) also depends on this checkout for the shared is-trusted-author helper, and
+      # that sweep is read-only-ish (removeLabel + a comment, no LLM spend) so it must still run
+      # when the throttle is red — the mutating PR sweeps below keep their own throttle gate.
       - name: Mint app token for shared-helper checkout (SuxOS/.github)
         id: helper-token
-        if: steps.throttle.outputs.go == 'true'
         continue-on-error: true
         uses: SuxOS/.github/.github/actions/mint-app-token@main
         with:
@@ -128,9 +142,8 @@ jobs:
           repositories: .github
           permission-contents: read
 
-      - name: Checkout SuxOS/.github (pr-live-hold-check helper)
+      - name: Checkout SuxOS/.github (pr-live-hold-check + is-trusted-author helpers)
         id: helper-checkout
-        if: steps.throttle.outputs.go == 'true'
         continue-on-error: true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -360,6 +373,74 @@ jobs:
             echo "::endgroup::"
             sleep 2
           done
+
+      # #677: the `building` claim lifecycle (apply on claim → remove on PR close/merge) leaks
+      # when a builder dies mid-batch before opening a PR, or a PR merges/closes through a path
+      # that doesn't strip the label. issue-build.yml's own reaper (issue-build.yml step "Reap
+      # stale claims...") only runs when THAT workflow fires in this repo — a repo that goes
+      # quiet (no new buildable backlog, throttled, erroring) never re-runs it, so a leaked
+      # claim sits forever. This is the repo-independent backstop: it runs on pr-unstick's own
+      # cadence regardless of issue-build activity. Mirrors the existing DIRTY-zombie PR-claim
+      # handling above (pr-drain.yml's build_failed/DIRTY-CONFLICT sweeps) but for issue-side
+      # claims. Read-only-ish (removeLabel + a comment) — no LLM spend, so it isn't gated behind
+      # the autonomy throttle like the two check-rerunning sweeps above.
+      - name: Sweep zombie building-labelled issues (no open PR referencing them)
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BUILDING_REAP_HOURS: ${{ inputs.building-reap-hours }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require("fs");
+            const { owner, repo } = context.repo;
+            const reapHours = Number(process.env.BUILDING_REAP_HOURS);
+            if (!Number.isFinite(reapHours) || reapHours < 0) {
+              core.warning(`building-reap-hours ('${process.env.BUILDING_REAP_HOURS}') is not a non-negative number — skipping the zombie building-label sweep`);
+              return;
+            }
+
+            const libPath = `${process.env.GITHUB_WORKSPACE}/.suxos-ci/scripts/lib/is-trusted-author.js`;
+            if (!fs.existsSync(libPath)) {
+              core.warning("shared is-trusted-author helper unavailable (checkout failed) — skipping the zombie building-label sweep rather than trusting PR references without the trust filter");
+              return;
+            }
+            const { isTrusted } = require(libPath);
+
+            // Same wide "referencing" set issue-build.yml's own reaper uses for reap-protection
+            // (REAP_PROTECT_KW) — Closes/Fixes/Resolves plus "related to", so a batch PR opened
+            // via the fail-closed "Related to #n (please verify)" path still protects its issues.
+            const REAP_PROTECT_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
+            const openPrs = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+            const reapProtected = new Set();
+            for (const pr of openPrs) {
+              if (!isTrusted(pr.user, pr.author_association)) continue;
+              for (const m of (pr.body || "").matchAll(REAP_PROTECT_KW)) reapProtected.add(Number(m[1]));
+            }
+
+            const claimed = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", labels: "building", per_page: 100,
+            });
+            const now = Date.now();
+            const reaped = [];
+            for (const issue of claimed) {
+              if (issue.pull_request) continue; // listForRepo also returns PRs
+              if (reapProtected.has(issue.number)) continue;
+              const ageH = (now - new Date(issue.updated_at).getTime()) / 3_600_000;
+              if (ageH < reapHours) continue;
+              core.info(`reaping zombie building claim on #${issue.number} (idle ${ageH.toFixed(1)}h, no open PR references it)`);
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: "building" }).catch(() => {});
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number,
+                body: `🤖 Released a stale \`building\` claim: this issue was labeled \`building\` for over ${reapHours}h with no open PR referencing it — looks like a build session claimed it and never opened a PR (crashed, or the repo went quiet before issue-build.yml's own in-run reaper could fire again). Free to be picked up again. Run: ${process.env.RUN_URL}`,
+              }).catch(() => {});
+              reaped.push(issue.number);
+            }
+            if (reaped.length > 0) {
+              await core.summary.addHeading("pr-unstick: zombie building claims reaped", 3)
+                .addList(reaped.map((n) => `#${n}`)).write();
+            }
 
       # Answers the INVERSE question from the two sweeps above: those retry a
       # check-run that already has a failure conclusion; this finds a required

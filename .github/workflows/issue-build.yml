@@ -960,17 +960,27 @@ jobs:
                step reads to open the PR, so don't skip it). Write a JSON object to
                `${{ runner.temp }}/disposition.json` using the Write tool (absolute path, OUTSIDE
                the repo tree): `{"built": [n, ...], "dropped": [{"number": n, "reason": "...",
-               "superseded": true|false}]}`. `built` is every issue number actually shipped in
-               this push — the original batch MINUS anything you REDUCE-dropped PLUS anything you
-               EXPAND-claimed — this is what drives the PR's `Closes #n` list, so an EXPAND issue
-               missing from `built` won't get closed on merge and a REDUCE-dropped issue left IN
-               `built` will get wrongly auto-closed without ever having been built. `dropped` is
-               every issue you REDUCE-dropped, each with a short reason; those get their `building`
-               claim released immediately instead of sitting locked until the reaper's timeout —
-               UNLESS you set `"superseded": true` on that entry (the issue is stale/already
-               resolved/redundant, not merely deferred), in which case it gets closed as "not
-               planned" instead, so it stops being re-claimed and re-dropped by every future
-               builder run forever. Omit the field or set it `false` for an ordinary defer.
+               "superseded": true|false}], "partial": [{"number": n, "shipped": "...",
+               "remaining": "...", "reason": "..."}]}`. `built` is every issue number actually
+               shipped in this push — the original batch MINUS anything you REDUCE-dropped PLUS
+               anything you EXPAND-claimed — this is what drives the PR's `Closes #n` list, so an
+               EXPAND issue missing from `built` won't get closed on merge and a REDUCE-dropped
+               issue left IN `built` will get wrongly auto-closed without ever having been built.
+               `dropped` is every issue you REDUCE-dropped, each with a short reason; those get
+               their `building` claim released immediately instead of sitting locked until the
+               reaper's timeout — UNLESS you set `"superseded": true` on that entry (the issue is
+               stale/already resolved/redundant, not merely deferred), in which case it gets
+               closed as "not planned" instead, so it stops being re-claimed and re-dropped by
+               every future builder run forever. Omit the field or set it `false` for an ordinary
+               defer. `partial` is for a DIFFERENT case than `dropped`: an issue whose body asks
+               for multiple distinct things where you shipped some but not all of them in this
+               push (e.g. #632/sux#1326-shape — 6 asks, 4 landed). Never put a multi-item issue
+               you only partly finished in `built` (that wrongly closes it with the remainder
+               silently lost) or in `dropped` (that wrongly implies nothing landed). List it in
+               `partial` instead — it gets a comment summarizing what shipped vs what's left, the
+               `building` claim is released so the remainder can be retried, and it is NOT closed
+               and NOT listed in the PR's `Closes #n`, even though your commit is in the same PR.
+               A number must appear in at most one of `built`/`dropped`/`partial`.
                CAVEAT (#496): this only works when the disposition-handling logic you're
                relying on already existed BEFORE this run started — a workflow step runs the
                script as it was when the job was triggered, not as edited mid-run by your own
@@ -1157,6 +1167,38 @@ jobs:
                 echo "::warning::disposition.json's built/dropped overlap is total — falling back to Related-to linkage for $(echo "$overlap" | tr '\n' ' ')"
                 nums=$(echo "$overlap" | tr '\n' ' ')
               fi
+            fi
+
+            # #679: `partial` is a THIRD bucket, distinct from `dropped` — a multi-item issue
+            # where some but not all asks shipped in this push. It must never get `Closes #n`
+            # (the remainder would silently vanish, the #632/sux#1326-shape bug) but it also
+            # isn't a plain "not shipped" drop (real work landed) — so it gets its own comment,
+            # the `building` claim is released for the remainder, and it is excluded from
+            # `built`/`nums` entirely rather than falling into either the dropped-comment or the
+            # Closes/Related-to paths above.
+            partial_nums=$(jq -r '.partial // [] | .[].number' "$DISPOSITION_FILE" 2>/dev/null || true)
+            for n in $partial_nums; do
+              shipped=$(jq -r --arg n "$n" '.partial[] | select((.number|tostring) == $n) | .shipped // "unspecified"' "$DISPOSITION_FILE" 2>/dev/null || echo "unspecified")
+              remaining=$(jq -r --arg n "$n" '.partial[] | select((.number|tostring) == $n) | .remaining // "unspecified"' "$DISPOSITION_FILE" 2>/dev/null || echo "unspecified")
+              preason=$(jq -r --arg n "$n" '.partial[] | select((.number|tostring) == $n) | .reason // "no reason given"' "$DISPOSITION_FILE" 2>/dev/null || echo "no reason given")
+              gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --remove-label building 2>/dev/null || true
+              gh issue comment "$n" --repo "$GITHUB_REPOSITORY" \
+                --body "🤖 Partially shipped in this batch (not auto-closed): shipped — $shipped; remaining — $remaining ($preason). Released the \`building\` claim so the remainder can be retried or picked up later. Run: $RUN_URL" 2>/dev/null || true
+            done
+            if [ -n "$partial_nums" ] && [ -n "$built" ]; then
+              overlap_bp=$(comm -12 <(echo "$built" | tr ' ' '\n' | sort -u) <(echo "$partial_nums" | tr ' ' '\n' | sort -u))
+              if [ -n "$overlap_bp" ]; then
+                echo "::warning::disposition.json lists issue(s) in both built and partial: $(echo "$overlap_bp" | tr '\n' ' ')"
+                built=$(comm -23 <(echo "$built" | tr ' ' '\n' | sort -u) <(echo "$overlap_bp" | sort -u) | tr '\n' ' ')
+                nums="$built"
+              fi
+            fi
+            # Already handled above (comment posted, claim released) — strip from `nums` so a
+            # partial issue with an otherwise-empty `built` doesn't also fall into the
+            # "Related to ... please verify" fallback below and get a second, contradictory
+            # comment on the same issue.
+            if [ -n "$partial_nums" ]; then
+              nums=$(comm -23 <(echo "$nums" | tr ' ' '\n' | sort -u) <(echo "$partial_nums" | tr ' ' '\n' | sort -u) | tr '\n' ' ')
             fi
           fi
 
