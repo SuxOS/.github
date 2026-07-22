@@ -48,6 +48,10 @@ ALLOWLIST=(
   ".github/actions/check-throttle/action.yml::gh issue list --repo \"\$REPO\" --state open --search"
   ".github/actions/detect-unreachable-checks/check.sh::gh pr list --state open --limit \"\$pr_limit\""
   ".github/workflows/fixer.yml::gh issue list --limit 300 --state all"
+  # Backlog gate (#640): a bounded count compared against a high-water mark far below the
+  # cap — a capped page is already >= high-water, so exhaustive listing buys nothing and
+  # the gate fails open by design.
+  ".github/workflows/fixer.yml::gh issue list --repo \"\$GITHUB_REPOSITORY\" --state open --limit 300"
   ".github/workflows/pr-auto-update.yml::A bounded \`gh pr list --limit N\`"
   ".github/actions/upsert-tracking-issue/action.yml::gh issue list --repo \"\$REPO\" --state open --limit \"\$limit\""
   ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/.github\" --state open"
