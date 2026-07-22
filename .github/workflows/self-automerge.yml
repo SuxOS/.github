@@ -10,7 +10,7 @@ name: Self automerge
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, labeled, ready_for_review]
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review, edited]
   pull_request_review:
     types: [submitted]
 
