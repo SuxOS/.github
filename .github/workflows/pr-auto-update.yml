@@ -67,7 +67,7 @@ jobs:
             --state
             open
 
-      - name: Update armed BEHIND PRs onto main
+      - name: Update armed BEHIND PRs onto default branch
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -76,10 +76,15 @@ jobs:
           set -uo pipefail
           # mergeStateStatus alone under-selects: GitHub reports BLOCKED (not BEHIND)
           # whenever required checks are failing/pending, even if the PR is ALSO
-          # behind main — e.g. a stale merge base whose checks inherited a bug
-          # already fixed on main. Candidate on BEHIND or BLOCKED, then confirm via
+          # behind the default branch — e.g. a stale merge base whose checks inherited
+          # a bug already fixed there. Candidate on BEHIND or BLOCKED, then confirm via
           # compare's behind_by so a BLOCKED-but-current PR (blocked for some other
           # reason) isn't needlessly churned.
+          # Resolved dynamically, not hardcoded "main" — a caller whose default branch
+          # isn't literally main would otherwise always see behind_by="" and never
+          # rebase any PR (SuxOS/.github#612), same fix as pr-watch.yml.
+          default_branch=$(gh api "repos/$GH_REPO" --jq .default_branch 2>/dev/null) || default_branch=""
+          default_branch="${default_branch:-main}"
           if ! prs=$(jq -r '.[]
               | select(.isDraft == false)
               | select(.autoMergeRequest != null)
@@ -96,9 +101,9 @@ jobs:
           fi
           while IFS=$'\t' read -r n head_ref; do
             [ -z "$n" ] && continue
-            behind_by=$(gh api "repos/$GH_REPO/compare/main...$head_ref" --jq '.behind_by' 2>/dev/null) || behind_by=""
+            behind_by=$(gh api "repos/$GH_REPO/compare/${default_branch}...$head_ref" --jq '.behind_by' 2>/dev/null) || behind_by=""
             if ! [ "$behind_by" -gt 0 ] 2>/dev/null; then
-              echo "PR #$n ($head_ref) not behind main (behind_by=${behind_by:-unknown}) — skipping"
+              echo "PR #$n ($head_ref) not behind ${default_branch} (behind_by=${behind_by:-unknown}) — skipping"
               continue
             fi
             echo "::group::update-branch PR #$n"
