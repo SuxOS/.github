@@ -172,11 +172,17 @@ for row in $(echo "$prs" | jq -c '.[]'); do
   else
     while IFS= read -r gate; do
       [ -z "$gate" ] && continue
-      disabled_wf=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
-        '[.workflows[]? | select(.state == "disabled_manually") | .name as $n | select($n == $g or ($g | startswith($n + " / ")))] | .[0].name // empty' 2>/dev/null || true)
+      disabled_wf_state=$(printf '%s' "$workflows_json" | jq -r --arg g "$gate" \
+        '[.workflows[]? | select(.state == "disabled_manually" or .state == "disabled_inactivity") | .name as $n | select($n == $g or ($g | startswith($n + " / "))) | $n + "\t" + .state] | .[0] // empty' 2>/dev/null || true)
+      disabled_wf="${disabled_wf_state%%$'\t'*}"
+      disabled_wf_reason="${disabled_wf_state##*$'\t'}"
       if [ -n "$disabled_wf" ]; then
         pr_has_disabled=1
-        echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
+        if [ "$disabled_wf_reason" = "disabled_inactivity" ]; then
+          echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') was auto-disabled for inactivity (60+ days with no runs). Remedy: re-enable the workflow."
+        else
+          echo "::warning::required context '${gate}' can never report on PR #$n — its workflow ('${disabled_wf}') is manually disabled. Remedy: re-enable the workflow."
+        fi
       else
         pr_has_generic=1
         echo "::warning::required context '${gate}' has not reported on PR #$n head ${sha} after ${grace_minutes}m. Remedy: if it's a path-filtered required workflow that doesn't match this PR's diff, drop it from required or add a no-op reporting job; if this PR predates the context (onboarding window), push an empty commit to re-fire 'synchronize' (close/reopen does NOT work)."
