@@ -1,0 +1,47 @@
+name: Marker-comment cycle-tracking reader
+description: >-
+  Read the current cycle count off an upserted `<!-- prefix: cycle=N at=... -->` marker
+  comment on an issue or PR (SuxOS/.github#589) — the shared read half of the
+  fetch-comments/find-marker/parse-cycle idiom pr-unstick.yml and issue-build.yml each
+  hand-rolled independently. Pair with marker-cycle-upsert to write the next cycle back.
+  A `uses:` step can't run mid-loop, so a sweep that loops over many issues/PRs in one
+  `run:` step should instead check out this repo and call read-cycle.sh directly — see
+  pr-unstick.yml/issue-build.yml for the pattern (same shape as pr-live-hold-check).
+
+inputs:
+  repo:
+    description: "owner/repo the item lives in."
+    required: true
+  item-number:
+    description: Issue or PR number to read the marker comment from.
+    required: true
+  marker-prefix:
+    description: 'Marker prefix to match, e.g. "<!-- pr-unstick:" (matched via body startswith).'
+    required: true
+  github-token:
+    description: Token gh CLI should use (GH_TOKEN) — needs at least read access to the item's comments.
+    required: true
+
+outputs:
+  ok:
+    description: '"true" if the comment fetch succeeded, "false" on fetch failure (cycle degrades to 0, not a false reset).'
+    value: ${{ steps.read.outputs.ok }}
+  cycle:
+    description: Current cycle count parsed off the marker (0 if no marker exists yet, or fetch failed).
+    value: ${{ steps.read.outputs.cycle }}
+  comment_id:
+    description: The marker comment's id, for an upsert to PATCH — empty if no marker exists yet.
+    value: ${{ steps.read.outputs.comment_id }}
+  last_at_epoch:
+    description: Unix epoch parsed off the marker's `at=` field, or 0 if absent/unparseable.
+    value: ${{ steps.read.outputs.last_at_epoch }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read marker cycle
+      id: read
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "${{ github.action_path }}/read-cycle.sh" "${{ inputs.repo }}" "${{ inputs.item-number }}" "${{ inputs.marker-prefix }}"

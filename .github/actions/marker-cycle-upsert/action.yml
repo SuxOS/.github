@@ -1,0 +1,44 @@
+name: Marker-comment cycle-tracking writer
+description: >-
+  Upsert a `<!-- prefix: cycle=N at=... -->` marker comment (SuxOS/.github#589) — PATCH
+  the existing marker if marker-cycle-read found one (comment-id set), else POST a new
+  comment. Pair with marker-cycle-read, which supplies next-cycle/comment-id. A `uses:`
+  step can't run mid-loop, so a sweep that loops over many issues/PRs in one `run:` step
+  should instead check out this repo and call upsert-cycle.sh directly — see
+  pr-unstick.yml/issue-build.yml for the pattern (same shape as pr-live-hold-check).
+
+inputs:
+  repo:
+    description: "owner/repo the item lives in."
+    required: true
+  item-number:
+    description: Issue or PR number to upsert the marker comment on.
+    required: true
+  marker-prefix:
+    description: 'Marker prefix to write, e.g. "<!-- pr-unstick:" (must match marker-cycle-read''s marker-prefix).'
+    required: true
+  next-cycle:
+    description: The cycle count to write (marker-cycle-read's cycle output + 1).
+    required: true
+  comment-id:
+    description: Existing marker comment id to PATCH (marker-cycle-read's comment_id output) — empty to POST a new comment instead.
+    required: false
+    default: ""
+  summary-line:
+    description: Human-readable line appended after the marker line in the comment body.
+    required: true
+  github-token:
+    description: Token gh CLI should use (GH_TOKEN) — needs write access to post/edit comments.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Upsert marker cycle
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        bash "${{ github.action_path }}/upsert-cycle.sh" \
+          "${{ inputs.repo }}" "${{ inputs.item-number }}" "${{ inputs.marker-prefix }}" \
+          "${{ inputs.next-cycle }}" "${{ inputs.comment-id }}" "${{ inputs.summary-line }}"
