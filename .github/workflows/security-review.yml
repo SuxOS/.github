@@ -332,6 +332,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          # Head SHA anchors the owner risk-acceptance freshness check (the label must be
+          # applied after THIS head's first check-suite — see check-risk-accepted.sh).
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GO: ${{ steps.pre.outputs.go }}
           # Read the verdict from whichever attempt produced one (OAuth first, OAuth retry, then
           # the metered break-glass — each only runs if the prior produced nothing).
@@ -366,9 +369,28 @@ jobs:
             crit=$(printf '%s' "$verdict" | jq -r '.critical // 0'); high=$(printf '%s' "$verdict" | jq -r '.high // 0')
             echo "security verdict: critical=$crit high=$high"
             if [ "${crit:-0}" -gt 0 ] || [ "${high:-0}" -gt 0 ]; then
+              # ── OWNER RISK-ACCEPTANCE (`security-risk-accepted` label) ────────────────
+              # A verdict whose only unresolvable finding IS the PR's authorized intent
+              # (e.g. an owner-ordered policy change the reviewer must flag as a
+              # blast-radius increase — claude-config#427) previously left --admin merge
+              # over a red required check as the only exit. The label is an auditable
+              # alternative, but it counts ONLY when check-risk-accepted.sh validates it:
+              # latest label event is `labeled`, applied by a HUMAN repo ADMIN, at/after
+              # this head SHA's first check-suite (a new push stales it). Anything else —
+              # including a missing/failed .suxos-ci checkout — falls through to the
+              # normal hold+block below (fail closed). `hold` is deliberately NOT removed
+              # here: the accepting admin removes it themselves, so acceptance stays a
+              # two-touch human act (label + unhold) and an unrelated human hold survives.
+              acceptance=$( { bash .suxos-ci/scripts/check-risk-accepted.sh "$PR" "$HEAD_SHA" </dev/null; } || echo not-accepted)
+              if [ "$acceptance" = "accepted" ]; then
+                note=$(printf '%s' "$verdict" | jq -r '.note // "(no reviewer note)"' | head -c 700)
+                gh pr comment "$PR" --body "⚠️ **security review: owner-accepted risk** — $crit critical / $high high finding(s) acknowledged via \`security-risk-accepted\` (validated: applied by a human repo admin after this head's checks began; a new push re-requires it). Gate passes as advisory. Reviewer note: $note" 2>/dev/null || true
+                echo "::warning::security findings ($crit critical, $high high) pass under validated owner risk-acceptance"
+                exit 0
+              fi
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
               gh pr merge --disable-auto "$PR" 2>/dev/null || true
-              gh pr comment "$PR" --body "🛑 **security review**: found $crit critical / $high high security issue(s). Applied \`hold\` (blocks auto-merge). Resolve or justify, then remove \`hold\`." 2>/dev/null || true
+              gh pr comment "$PR" --body "🛑 **security review**: found $crit critical / $high high security issue(s). Applied \`hold\` (blocks auto-merge). Resolve or justify, then remove \`hold\`. If this finding is an owner-authorized risk-acceptance, a repo admin can apply the \`security-risk-accepted\` label (after this push — stale/bot/non-admin applications are ignored), re-run this check, then remove \`hold\`." 2>/dev/null || true
               echo "::error::security review blocked this PR ($crit critical, $high high)"; exit 1
             fi
             echo "✓ no high/critical security findings"
