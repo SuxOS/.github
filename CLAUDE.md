@@ -239,3 +239,15 @@ it with — different mechanism, same abort-the-step outcome). Pull the inner su
 into its own `var=$(cmd)` line first, then do plain arithmetic on the two variables
 (`fabric-health.yml`'s epic reconciler, #471, hit this while summing per-repo child-issue
 counts inside a loop).
+
+Before building a batch, check for a prior attempt on the SAME issue numbers that never
+merged: `gh pr list --state closed --search "Closes #N"` (or `git log --all --oneline` for
+the issue number/title) can turn up a closed-DIRTY or otherwise-abandoned builder PR whose
+commit still exists in git history (nothing garbage-collects it just because the PR closed).
+`git cherry-pick -n <that commit>` onto the current branch and resolving the — usually
+small — conflicts from main having moved on is often far cheaper than re-deriving the same
+implementation from scratch, and lets you focus the session's turns on re-verifying gates
+and fixing whatever the earlier attempt's own security-review/self-check findings flagged
+(this is how #469/#470/#471/#540/#541 landed together: salvaged from #611, a DIRTY-closed
+PR building the identical batch, with its one real high-severity finding — an unvalidated,
+model-authored cross-repo issue-filing destination in fixer.yml's epic step — fixed on top).
