@@ -92,17 +92,23 @@ jobs:
       # managed-repos.json; this makes that class of drift impossible (#402).
       - name: Checkout product repos
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        id: checkout
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PRODUCT_REPOS: ${{ steps.repos.outputs.product_space }}
         run: |
           set -euo pipefail
+          failures=""
           for repo in $PRODUCT_REPOS; do
             if ! gh repo clone "SuxOS/$repo" "repos/$repo" -- --depth=1; then
               echo "::warning::could not clone SuxOS/$repo — skipping it this run"
+              failures="$failures $repo"
               continue
             fi
           done
+          # Surfaced to the Claude prompt below so a clone failure reads as a loud
+          # non-finding instead of a silently N-1-repo "clean" sweep (#599).
+          echo "clone_failures=$(echo "$failures" | xargs)" >> "$GITHUB_OUTPUT"
 
       - name: Claude — cross-repo consistency and refactor sweep
         id: claude
@@ -131,6 +137,8 @@ jobs:
             `.github` hub repo (reusable workflows + scaffold); the product repos are checked
             out under ${{ steps.repos.outputs.product_paths }}. You see what no single-repo
             pass can: drift BETWEEN them.
+
+            ${{ steps.checkout.outputs.clone_failures != '' && format('IMPORTANT: the following repos could NOT be checked out this run and must NOT be treated as drift-free — do not report a clean pass for them, only note the gap: {0}', steps.checkout.outputs.clone_failures) || '' }}
 
             Hunt, in priority order:
               1. Caller-stub drift: each repo's `.github/workflows/*.yml` thin callers vs.
