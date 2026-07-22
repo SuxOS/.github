@@ -357,8 +357,9 @@ Caller stubs scaffolded. Remaining manual steps (see README):
   - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, SUX_BOT_APP_ID,
     SUX_BOT_PRIVATE_KEY. (CI billing is subscription-based via
     CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
-  - Create labels: building, needs-human, automerge, hold, tracking, epic (the
-    nonbuildable-labels floor), bug, enhancement, documentation, security,
+  - Create labels: building, needs-human, automerge, hold, keep, tracking, epic
+    (the nonbuildable-labels floor — `keep` opts a PR out of pr-drain's
+    close-stale sweep), bug, enhancement, documentation, security,
     effort:small, effort:medium, effort:large (the fixer's proposal-typing labels).
   - Protect main with a repository RULESET (Settings → Rules → Rulesets), NOT
     classic branch protection: assert-branch-protection.yml runs with the App

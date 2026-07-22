@@ -562,7 +562,7 @@ jobs:
           # Day 0 = this run's own live snapshot (fabric-status.json, already on disk from
           # the "collect" step above) — the streak/growth math wants an unbroken sequence
           # INCLUDING today, not just the trailing history.
-          today_entry=$(jq -c '{backlog_total, backlog_zero, repos: (.repos // [])}' fabric-status.json)
+          today_entry=$(jq -c '{backlog_total, backlog_zero, collection_ok, repos: (.repos // [])}' fabric-status.json)
           calendar="[$today_entry]"   # newest-first; offsets 1..N appended below
 
           for offset in $(seq 1 "$days"); do
@@ -582,7 +582,7 @@ jobs:
                   --dir /tmp/hist-fabric-status 2>/dev/null \
                   && [ -f /tmp/hist-fabric-status/fabric-status.json ] \
                   && jq -e . /tmp/hist-fabric-status/fabric-status.json >/dev/null 2>&1; then
-                entry=$(jq -c '{backlog_total, backlog_zero, repos: (.repos // [])}' \
+                entry=$(jq -c '{backlog_total, backlog_zero, collection_ok, repos: (.repos // [])}' \
                   /tmp/hist-fabric-status/fabric-status.json)
               fi
             fi
@@ -610,7 +610,7 @@ jobs:
 
             def growth_rate(arr; field):
               arr as $arr
-              | ([range(0; $arr|length) | select($arr[.] != null)]) as $idxs
+              | ([range(0; $arr|length) | select($arr[.] != null and $arr[.].collection_ok == 1)]) as $idxs
               | if ($idxs | length) < 2 then null
                 else
                   ($arr[$idxs[0]]) as $newest
@@ -633,7 +633,8 @@ jobs:
                           else (((.repos[] | select(.repo == $r)) // null)) as $ro
                             | if $ro == null then null
                               else { backlog_total: $ro.backlog,
-                                     backlog_zero: (if $ro.backlog == 0 and $ro.collection.issues != 0 then 1 else 0 end) }
+                                     backlog_zero: (if $ro.backlog == 0 and $ro.collection.issues != 0 then 1 else 0 end),
+                                     collection_ok: (if $ro.collection.issues != 0 then 1 else 0 end) }
                               end
                           end
                         )) as $repo_calendar

@@ -321,7 +321,7 @@ jobs:
             # (mergeable-but-BLOCKED on checks/auto-merge — not a conflict) and `UNKNOWN`
             # (GitHub still computing) both fall through to skip, leaving those PRs to the
             # automerge / auto-update (BEHIND-rebase) loops and re-evaluating next tick.
-            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeable 2>/dev/null) \
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeable,updatedAt 2>/dev/null) \
               || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
             if ! printf '%s' "$live" | jq -e '
                 (.isDraft | not)
@@ -330,6 +330,17 @@ jobs:
                 and (([.labels[].name] | index("hold")) | not)
                 and (([.labels[].name] | index("keep")) | not)' >/dev/null; then
               echo "#$n not CONFLICTING-eligible on live re-check — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            # Freshness guard (SuxOS/.github#591): `mergeable` is recomputed asynchronously
+            # after any push, so a PR being force-pushed to resolve its own conflict at the
+            # exact moment of this re-check can still read a stale CONFLICTING. Defer to the
+            # next tick instead of acting on a read that might already be superseded, same
+            # pattern as CLOSE-STALE's updatedAt re-check above.
+            updated_age=$(( $(date -u +%s) - $(printf '%s' "$live" | jq -r '.updatedAt | fromdateiso8601') ))
+            if [ "$updated_age" -lt 60 ]; then
+              echo "#$n updated ${updated_age}s ago — too fresh for a confident CONFLICTING read, deferring"
               echo "::endgroup::"
               continue
             fi

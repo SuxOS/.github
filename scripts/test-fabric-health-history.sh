@@ -77,13 +77,13 @@ hfield() { printf '%s' "$2" | jq -r ".history$1"; }
 
 day() { date -u -d "-$1 days" +%Y-%m-%d 2>/dev/null || date -u -v-"$1"d +%Y-%m-%d; }
 
-today_zero='{"backlog_total":0,"backlog_zero":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
-today_nonzero='{"backlog_total":4,"backlog_zero":0,"repos":[{"repo":"sux","backlog":4,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
-d1zero='{"backlog_total":0,"backlog_zero":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
-d2zero='{"backlog_total":0,"backlog_zero":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
-d3nonzero='{"backlog_total":2,"backlog_zero":0,"repos":[{"repo":"sux","backlog":2,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+today_zero='{"backlog_total":0,"backlog_zero":1,"collection_ok":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+today_nonzero='{"backlog_total":4,"backlog_zero":0,"collection_ok":1,"repos":[{"repo":"sux","backlog":4,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+d1zero='{"backlog_total":0,"backlog_zero":1,"collection_ok":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+d2zero='{"backlog_total":0,"backlog_zero":1,"collection_ok":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+d3nonzero='{"backlog_total":2,"backlog_zero":0,"collection_ok":1,"repos":[{"repo":"sux","backlog":2,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
 
-echo "[1/4] streak stops at the first non-zero day, growth spans only available (non-null) days, days_available reports the gap"
+echo "[1/5] streak stops at the first non-zero day, growth spans only available (non-null) days, days_available reports the gap"
 d1=$(mktemp -d); f1=$(mktemp -d)
 printf '%s' "$today_zero" > "$f1/101.json"
 printf '%s' "$d1zero" > "$f1/102.json"
@@ -102,7 +102,7 @@ else
 fi
 rm -rf "$d1" "$f1" "$scratch" "$today_file"
 
-echo "[2/4] today itself already non-zero -> streak 0 regardless of prior days"
+echo "[2/5] today itself already non-zero -> streak 0 regardless of prior days"
 d2=$(mktemp -d); f2=$(mktemp -d)
 printf '%s' "$d1zero" > "$f2/201.json"
 today_file=$(mktemp); printf '%s' "$today_nonzero" > "$today_file"
@@ -116,7 +116,7 @@ else
 fi
 rm -rf "$d2" "$f2" "$scratch" "$today_file"
 
-echo "[3/4] no successful run any sampled day (total gap) -> streak/growth degrade to null-safe zero, no crash"
+echo "[3/5] no successful run any sampled day (total gap) -> streak/growth degrade to null-safe zero, no crash"
 d3=$(mktemp -d); f3=$(mktemp -d)
 today_file=$(mktemp); printf '%s' "$today_zero" > "$today_file"
 make_fakegh "$d3" "" "$f3"
@@ -130,9 +130,9 @@ else
 fi
 rm -rf "$d3" "$f3" "$scratch" "$today_file"
 
-echo "[4/4] a repo absent from an older day's repos[] (added to \$REPOS later) breaks only THAT repo's streak, not the org-wide one"
+echo "[4/5] a repo absent from an older day's repos[] (added to \$REPOS later) breaks only THAT repo's streak, not the org-wide one"
 d4=$(mktemp -d); f4=$(mktemp -d)
-d1_missing_suxlib='{"backlog_total":0,"backlog_zero":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}}]}'
+d1_missing_suxlib='{"backlog_total":0,"backlog_zero":1,"collection_ok":1,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":1}}]}'
 printf '%s' "$d1_missing_suxlib" > "$f4/401.json"
 today_file=$(mktemp); printf '%s' "$today_zero" > "$today_file"
 make_fakegh "$d4" "$(day 1):401" "$f4"
@@ -146,6 +146,28 @@ else
   bad "expected org streak=2, suxlib streak=1 (rc=$rc, got org=$org_streak suxlib=$suxlib_streak)"
 fi
 rm -rf "$d4" "$f4" "$scratch" "$today_file"
+
+echo "[5/5] a collection-degraded day (collection_ok=0) with a fabricated low backlog is excluded from growth_rate's endpoint selection (#590)"
+d5=$(mktemp -d); f5=$(mktemp -d)
+d1_healthy='{"backlog_total":8,"backlog_zero":0,"collection_ok":1,"repos":[{"repo":"sux","backlog":8,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+d2_healthy='{"backlog_total":6,"backlog_zero":0,"collection_ok":1,"repos":[{"repo":"sux","backlog":6,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+d3_degraded='{"backlog_total":0,"backlog_zero":0,"collection_ok":0,"repos":[{"repo":"sux","backlog":0,"collection":{"issues":0}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+printf '%s' "$d1_healthy" > "$f5/501.json"
+printf '%s' "$d2_healthy" > "$f5/502.json"
+printf '%s' "$d3_degraded" > "$f5/503.json"
+today_file=$(mktemp)
+today_healthy='{"backlog_total":10,"backlog_zero":0,"collection_ok":1,"repos":[{"repo":"sux","backlog":10,"collection":{"issues":1}},{"repo":"suxlib","backlog":0,"collection":{"issues":1}}]}'
+printf '%s' "$today_healthy" > "$today_file"
+make_fakegh "$d5" "$(day 1):501 $(day 2):502 $(day 3):503" "$f5"
+result=$(run_history "$d5" "$today_file" 3 "sux suxlib")
+rc="${result%%|*}"; rest="${result#*|}"; status_json="${rest%|*}"; scratch="${rest##*|}"
+growth=$(hfield .backlog_growth_per_day "$status_json")
+if [ "$rc" -eq 0 ] && [ "$growth" = "2" ]; then
+  note "growth=2 ((10-6)/2, degraded d3's fabricated backlog=0 excluded from endpoint selection)"
+else
+  bad "expected growth=2 with degraded day excluded (rc=$rc, got growth=$growth, history=$(printf '%s' "$status_json" | jq -c .history))"
+fi
+rm -rf "$d5" "$f5" "$scratch" "$today_file"
 
 if [ "$fail" -eq 0 ]; then
   echo "fabric-health history regression guard: PASS"
