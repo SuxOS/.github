@@ -19,7 +19,11 @@
 #     org bot the rest of this pipeline uses). Reporting-only by design: a
 #     consumer repo's own pin hygiene is that repo's gate, not this one's.
 #
-# Canonical org pins (bump here when the org upgrades):
+# Canonical org pins — bump here (and in every `uses:` line below) when the org
+# upgrades. The `consumers` job below no longer hand-copies these as a second
+# constant (SuxOS/.github#595): it derives CANON_CHECKOUT/CANON_SETUP_NODE from
+# `check`'s own DRIFT-checked $sha_pairs job output, so this comment is documentation
+# only — it can't itself desync the advisory scan, only go stale as a lagging note:
 #   actions/checkout   9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 #   actions/setup-node 820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
 #
@@ -59,9 +63,13 @@ jobs:
     name: pin-consistency
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      canon_checkout: ${{ steps.pins.outputs.canon_checkout }}
+      canon_setup_node: ${{ steps.pins.outputs.canon_setup_node }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Assert third-party actions are SHA-pinned and drift-free
+        id: pins
         run: |
           set -euo pipefail
           # Collect "owner/action<TAB>ref" for every real action `uses:` ref, across
@@ -129,6 +137,16 @@ jobs:
             printf '%s\n' "$local_refs" | sed 's/^/    /'
           fi
 
+          # Expose this repo's own live actions/checkout + actions/setup-node pins as job
+          # outputs for `consumers` to compare callers against (SuxOS/.github#595) — derived
+          # from $sha_pairs (already DRIFT-checked above to be a single SHA per action)
+          # instead of a second hand-copied constant that could silently desync from the
+          # real `uses:` lines after an org-wide bump.
+          canon_checkout="$(printf '%s\n' "$sha_pairs" | awk -F'\t' '$1=="actions/checkout"{print $2}')"
+          canon_setup_node="$(printf '%s\n' "$sha_pairs" | awk -F'\t' '$1=="actions/setup-node"{print $2}')"
+          echo "canon_checkout=$canon_checkout" >> "$GITHUB_OUTPUT"
+          echo "canon_setup_node=$canon_setup_node" >> "$GITHUB_OUTPUT"
+
           if [ "$rc" -ne 0 ]; then exit 1; fi
           echo "OK: every third-party action is SHA-pinned to a single, consistent commit."
 
@@ -140,7 +158,7 @@ jobs:
     # hard failure. NOTE: cross-repo reach depends on the SUX_BOT App being installed
     # on each target repo with `contents: read`; where it is not, that repo is skipped
     # with a warning rather than scanned.
-    needs: managed-repos
+    needs: [managed-repos, check]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -174,6 +192,8 @@ jobs:
           REPO: ${{ matrix.repo }}
           TOKEN_OK: ${{ steps.app-token.outcome }}
           CHECKOUT_OK: ${{ steps.checkout.outcome }}
+          CANON_CHECKOUT: ${{ needs.check.outputs.canon_checkout }}
+          CANON_SETUP_NODE: ${{ needs.check.outputs.canon_setup_node }}
         run: |
           set -euo pipefail
 
@@ -185,9 +205,6 @@ jobs:
             echo "::warning::[$REPO] could not check out repo / no .github tree (App may lack contents:read) — skipping advisory pin scan"
             exit 0
           fi
-
-          CANON_CHECKOUT="9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
-          CANON_SETUP_NODE="820762786026740c76f36085b0efc47a31fe5020"
 
           pairs="$(grep -rhoE "uses:[[:space:]]*['\"]?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._/-]+@[A-Za-z0-9._./-]+" \
               consumer/.github/workflows/ consumer/.github/actions/*/action.yml 2>/dev/null \

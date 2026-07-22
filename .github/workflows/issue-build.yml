@@ -436,17 +436,27 @@ jobs:
             const openPrs = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", per_page: 100,
             });
-            // Also matches the "Related to #n" wording issue-build.yml's own multi-issue-batch
-            // fail-closed path uses when disposition.json is missing/malformed (line ~980) — a
-            // PR opened that way otherwise falls through this guard entirely, letting the reaper
-            // strip `building` from its linked issues while the PR is still open (#544). Negative
-            // lookbehind excludes "not related to #n" (same negated-form gap pr-drain.yml's
-            // sibling regex was fixed for, #538).
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
+            // Strict set: only real closing keywords, used below for the buildable-exclusion
+            // checks (step 2). A bare "related to #n" mention in an unrelated PR's body does
+            // NOT mean that PR is building/closing #n — this file's own CASUAL_REF regex
+            // (below) already classifies "related to" as a casual, non-dependency phrase, and
+            // widening this set to buildable-exclusion purposes wrongly hid issue #n for as
+            // long as any PR merely mentioned it in passing (#576).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            // Wide set: also matches the "Related to #n" wording issue-build.yml's own
+            // multi-issue-batch fail-closed path uses when disposition.json is missing/
+            // malformed (line ~980) — a PR opened that way otherwise falls through the reap
+            // guard entirely, letting the reaper strip `building` from its linked issues while
+            // the PR is still open (#544). Negative lookbehind excludes "not related to #n"
+            // (same negated-form gap pr-drain.yml's sibling regex was fixed for, #538). Used
+            // ONLY for reap-protection (step 1) — NOT for buildable-exclusion (#576).
+            const REAP_PROTECT_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
+            const reapProtected = new Set();
             for (const pr of openPrs) {
               if (!isTrusted(pr.user, pr.author_association)) continue;
               for (const m of (pr.body || "").matchAll(CLOSING_KW)) referencedByOpenPr.add(Number(m[1]));
+              for (const m of (pr.body || "").matchAll(REAP_PROTECT_KW)) reapProtected.add(Number(m[1]));
             }
 
             // 1. Reap: an issue stuck in `building` with no activity for >reapHours is an
@@ -458,7 +468,7 @@ jobs:
             });
             const now = Date.now();
             for (const issue of stale) {
-              if (referencedByOpenPr.has(issue.number)) continue;
+              if (reapProtected.has(issue.number)) continue;
               const ageH = (now - new Date(issue.updated_at).getTime()) / 3_600_000;
               if (ageH >= reapHours) {
                 core.info(`reaping orphaned building issue #${issue.number} (idle ${ageH.toFixed(1)}h)`);
@@ -1020,14 +1030,18 @@ jobs:
                 if [ -f "$READ_HELPER" ]; then
                   eval "$(bash "$READ_HELPER" "$GITHUB_REPOSITORY" "$n" "$DROP_MARKER")"
                   if [ "$ok" != "true" ]; then
-                    echo "::warning::could not fetch comments for issue #$n — treating drop-cycle count as 0 (not escalating) rather than failing the disposition step"
-                    cycle=0
-                    comment_id=""
+                    # #602: a failed fetch must NOT be treated as "no marker exists" — that
+                    # silently resets the escalation cycle count (the #198 bug class). Skip
+                    # drop-cycle escalation for this issue this run; the `building` label was
+                    # already stripped above, so it's still released back to the pool.
+                    echo "::warning::could not fetch comments for issue #$n — skipping drop-cycle escalation this run rather than treating the fetch failure as 'no marker exists' (that would silently reset the cycle cap)"
+                    continue
                   fi
                 else
-                  echo "::warning::shared marker-cycle-read helper unavailable (checkout failed) — treating drop-cycle count as 0"
-                  cycle=0
-                  comment_id=""
+                  # Same #602 semantics when the shared helper itself is unavailable
+                  # (checkout failed): an unreadable marker is never cycle=0.
+                  echo "::warning::shared marker-cycle-read helper unavailable (checkout failed) — skipping drop-cycle escalation for issue #$n this run"
+                  continue
                 fi
                 next_cycle=$((cycle + 1))
 
@@ -1039,7 +1053,7 @@ jobs:
                   # scoping pass: a docs/design/YYYY-MM-DD-*.md doc is a legitimate,
                   # gate-passing build in its own right (precedent: #433, #439).
                   gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
-                  summary_line="🤖 Dropped from this batch for the ${next_cycle}th time (not shipped in this PR): $reason. This has now cycled claim → attempt → drop ${next_cycle} times with nothing landing — applying \`needs-human\` instead of releasing it back to the pool, so it stops being re-selected and re-dropped. This repo's CLAUDE.md sanctions a scoping doc (\`docs/design/YYYY-MM-DD-*.md\`, re-deriving a concrete plan and sizing it into small buildable slices) as a real, gate-passing build for exactly this situation — not a dodge. Run: $RUN_URL"
+                  summary_line="🤖 Dropped from this batch for cycle ${next_cycle} (not shipped in this PR): $reason. This has now cycled claim → attempt → drop ${next_cycle} times with nothing landing — applying \`needs-human\` instead of releasing it back to the pool, so it stops being re-selected and re-dropped. This repo's CLAUDE.md sanctions a scoping doc (\`docs/design/YYYY-MM-DD-*.md\`, re-deriving a concrete plan and sizing it into small buildable slices) as a real, gate-passing build for exactly this situation — not a dodge. Run: $RUN_URL"
                 else
                   summary_line="🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL"
                 fi
@@ -1351,10 +1365,14 @@ jobs:
               github.paginate(github.rest.issues.listForRepo, { owner, repo, state: "open", per_page: 100 }),
               github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 }),
             ]);
-            // Also matches "Related to #n" (issue-build.yml's own no-disposition fail-closed
-            // wording, line ~980), excluding the negated "not related to #n" form — see the
-            // matching comment on this same regex above (#544).
-            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|(?<!not )related to)\s+#(\d+)/gi;
+            // Strict set only — no "related to" here. This set is used purely for the
+            // buildable-exclusion check below (there's no reap logic in this job), and a bare
+            // "related to #n" mention in an unrelated PR's body does NOT mean that PR is
+            // building/closing #n (this file's CASUAL_REF regex classifies "related to" as
+            // casual, non-dependency phrasing) — widening this set wrongly hid issue #n for as
+            // long as any PR merely mentioned it in passing (#576). See the matching comment on
+            // this same regex in the `select` job above (#544 is what originally widened it).
+            const CLOSING_KW = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
             const referencedByOpenPr = new Set();
             for (const pr of openPrs) {
               // Only a trusted-author PR's closing keywords count — an untrusted PR body

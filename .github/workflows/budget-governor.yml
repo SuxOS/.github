@@ -77,8 +77,14 @@ env:
   # rate-limit scan below still forces `red` the instant the real account pool is actually
   # hit, so raising the total proxy widens headroom without risking a true overrun.
   # Recalibrate against claude.ai's usage page per the design-doc ritual as real usage climbs.
-  OPUS_BUDGET_MIN: "900"
-  TOTAL_BUDGET_MIN: "12000"
+  # 2026-07-22 v4-PUSH TEMPORARY (operator: +1000 credits loaded, drive the v4 closeout
+  # drain at full speed): OPUS 900 -> 1800, TOTAL 12000 -> 24000 so the proxy bucket can't
+  # yellow/red mid-push while the drain runs hot. The live five-hour rate-limit scan below
+  # remains the real backstop — it forces `red` the instant the account pool is actually
+  # hit, so the raised proxy widens headroom without risking a true overrun.
+  # REVERT to 900/12000 at steady-state after the v4 push lands (see #640-era history).
+  OPUS_BUDGET_MIN: "1800"
+  TOTAL_BUDGET_MIN: "24000"
   # Fraction of a budget at which the throttle goes yellow.
   YELLOW_FRACTION: "0.75"
   LOOKBACK_DAYS: "7"

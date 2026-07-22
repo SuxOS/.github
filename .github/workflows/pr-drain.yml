@@ -222,6 +222,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
+          REQUIRED_GATES: ${{ inputs.required-gates }}
         run: |
           set -uo pipefail
 
@@ -321,7 +322,7 @@ jobs:
             # (mergeable-but-BLOCKED on checks/auto-merge — not a conflict) and `UNKNOWN`
             # (GitHub still computing) both fall through to skip, leaving those PRs to the
             # automerge / auto-update (BEHIND-rebase) loops and re-evaluating next tick.
-            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeable 2>/dev/null) \
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeable,updatedAt 2>/dev/null) \
               || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
             if ! printf '%s' "$live" | jq -e '
                 (.isDraft | not)
@@ -330,6 +331,17 @@ jobs:
                 and (([.labels[].name] | index("hold")) | not)
                 and (([.labels[].name] | index("keep")) | not)' >/dev/null; then
               echo "#$n not CONFLICTING-eligible on live re-check — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+            # Freshness guard (SuxOS/.github#591): `mergeable` is recomputed asynchronously
+            # after any push, so a PR being force-pushed to resolve its own conflict at the
+            # exact moment of this re-check can still read a stale CONFLICTING. Defer to the
+            # next tick instead of acting on a read that might already be superseded, same
+            # pattern as CLOSE-STALE's updatedAt re-check above.
+            updated_age=$(( $(date -u +%s) - $(printf '%s' "$live" | jq -r '.updatedAt | fromdateiso8601') ))
+            if [ "$updated_age" -lt 60 ]; then
+              echo "#$n updated ${updated_age}s ago — too fresh for a confident CONFLICTING read, deferring"
               echo "::endgroup::"
               continue
             fi
@@ -385,6 +397,106 @@ jobs:
             for num in $nums; do
               gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \
                 || echo "::warning::could not strip building from #$num"
+            done
+            echo "::endgroup::"
+            sleep 2
+          done
+
+          # ── BUILD-FAILED ─────────────────────────────────────────────────────────────
+          # A builder PR that is BLOCKED (not DIRTY), already rebased onto current main
+          # (behind_by == 0), and failing one of its OWN required checks has no loop that
+          # fixes it (SuxOS/.github#598): DIRTY-CONFLICT above only catches real merge
+          # conflicts; RECONCILE only arms already-green PRs; the fixer callers can't push
+          # a fix to a PR branch (contents: read only); pr-unstick only watches
+          # needs-human-labelled PRs; automerge can't merge a red required check. Left
+          # alone it zombies until CLOSE-STALE's stale-days threshold, holding its linked
+          # issue's `building` claim the whole time. Reuses the exact DIRTY-CONFLICT
+          # machinery (close + heads-up comment + strip `building` + requeue-cap already
+          # enforced by issue-build.yml's own requeue job, #434), differing only in the
+          # candidate selector.
+          build_failed=$(printf '%s' "$prs" | jq -r '
+            [.[] | select(.isDraft | not)
+              | select(.headRefName | startswith("bot/issue-build-"))
+              | select(.mergeStateStatus == "BLOCKED")
+              | select(([.labels[].name] | index("hold")) | not)
+              | select(([.labels[].name] | index("keep")) | not)
+              | .number] | .[]')
+
+          echo "BUILD-FAILED live-check candidate set: $(printf '%s' "$build_failed" | tr '\n' ' ')"
+
+          required_gates_json=$(printf '%s' "$REQUIRED_GATES" | sed 's/^ *//' | { grep -v '^$' || true; } | jq -R . | jq -sc .)
+
+          for n in $build_failed; do
+            echo "::group::BUILD-FAILED builder PR #$n"
+            # Re-read this PR's live state — same double-gate the DIRTY pass uses to
+            # survive concurrent-bot flapping (a concurrent rebase/close/hold in the
+            # interim wins).
+            live=$(gh pr view "$n" --json number,body,headRefName,isDraft,labels,mergeStateStatus,statusCheckRollup,updatedAt 2>/dev/null) \
+              || { echo "could not re-read #$n — skipping"; echo "::endgroup::"; continue; }
+            if ! printf '%s' "$live" | jq -e '
+                (.isDraft | not)
+                and (.headRefName | startswith("bot/issue-build-"))
+                and (.mergeStateStatus == "BLOCKED")
+                and (([.labels[].name] | index("hold")) | not)
+                and (([.labels[].name] | index("keep")) | not)' >/dev/null; then
+              echo "#$n not BLOCKED-eligible on live re-check — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Exclude merely-behind PRs — pr-auto-update.yml's rebase-onto-green-main
+            # owns those; only a PR already CURRENT with main and still BLOCKED is this
+            # pass's problem.
+            head_ref=$(printf '%s' "$live" | jq -r '.headRefName')
+            behind_by=$(gh api "repos/$GH_REPO/compare/main...$head_ref" --jq '.behind_by' 2>/dev/null) || behind_by=""
+            if [ "$behind_by" != "0" ]; then
+              echo "#$n behind_by=${behind_by:-unknown} (not 0) — leaving to the auto-updater, skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Same required-check matching as pr-watch.yml (exact-or-trailing-segment,
+            # since a live check name can be "<caller-workflow> / <job>" while the
+            # required context is only the shorter job-level name).
+            failing=$(printf '%s' "$live" | jq -r --argjson required "$required_gates_json" '
+              [.statusCheckRollup[]?
+                | select((.conclusion // .state // "" | ascii_upcase)
+                    | . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "STARTUP_FAILURE")
+                | (.name // .context // "")] as $failed
+              | ($failed | map(select(. as $fn | $required | any(. as $r | $fn == $r or ($fn | endswith(" / " + $r))))) | length) > 0')
+            if [ "$failing" != "true" ]; then
+              echo "#$n has no failing required check on live re-check — skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
+            # Freshness guard, same as DIRTY-CONFLICT above — a PR just pushed to fix
+            # its own check can still read a stale conclusion for a few seconds.
+            updated_age=$(( $(date -u +%s) - $(printf '%s' "$live" | jq -r '.updatedAt | fromdateiso8601') ))
+            if [ "$updated_age" -lt 60 ]; then
+              echo "#$n updated ${updated_age}s ago — too fresh for a confident read, deferring"
+              echo "::endgroup::"
+              continue
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[dry-run] would close #$n (BUILD-FAILED builder PR) and requeue its linked issues"
+              echo "::endgroup::"
+              continue
+            fi
+
+            gh pr comment "$n" --body "🧹 Closing — this builder PR is BLOCKED on its own failing required check, already rebased onto current main (not just behind), and no existing loop resolves that short of a human. Its linked issues are being requeued for a fresh build on current main. See SuxOS/.github#598." 2>/dev/null || true
+            gh pr close "$n" && echo "closed #$n (BUILD-FAILED)" || echo "::warning::could not close #$n (see gh error above)"
+
+            nums=$(printf '%s' "$live" | jq -r '.body // ""' \
+              | grep -ioP '\b(close[sd]?|fix(es|ed)?|resolve[sd]?|(?<!not )related to)[[:space:]]+#[0-9]+' \
+              | grep -oE '[0-9]+' || true)
+            for num in $nums; do
+              gh issue edit "$num" --repo "$GH_REPO" --remove-label building 2>/dev/null \
+                || echo "::warning::could not strip building from #$num"
+              # If the linked issue is already closed (e.g. `Closes #n` landed via an
+              # earlier, now-superseded PR), reopen it so it's re-buildable — a no-op
+              # (harmless failure) if it's already open.
+              gh issue reopen "$num" --repo "$GH_REPO" 2>/dev/null || true
             done
             echo "::endgroup::"
             sleep 2

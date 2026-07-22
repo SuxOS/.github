@@ -176,9 +176,32 @@ parse_metric_collector() {
   local n=${#fh_lines[@]}
   local i in_jq=0 cur_start=-1
   local -a jq_start=() jq_end=()
+  # Step boundary anchor: every job step's `- name:` line sits at this fixed
+  # indent in this file (verified above the workflows/ list at the top of this
+  # script's job). A `jq -r ... <<< "$status"` block is a single bash statement
+  # within ONE step's `run:` block — it can never legitimately span past the
+  # next step boundary. Without this, a `jq -r` trigger with no terminator in
+  # its own step (e.g. an early, unrelated `jq -r` call) silently swallows
+  # every line up to the NEXT block's terminator, however many steps away,
+  # mis-attributing unrelated code as this metric's gate (#554/#580).
   for ((i = 0; i < n; i++)); do
+    if [[ "${fh_lines[$i]}" =~ ^\ \ \ \ \ \ -\ name: ]]; then
+      if [ "$in_jq" -eq 1 ]; then
+        bad "parse_metric_collector: unterminated 'jq -r' block starting at" \
+          "$FABRIC_HEALTH:$((cur_start + 1)) — a step boundary was crossed" \
+          "before finding its '<<< \"\$status\"' terminator; the scanner" \
+          "refuses to guess rather than merge unrelated steps (#580)"
+        return
+      fi
+    fi
     if [ "$in_jq" -eq 0 ]; then
-      if [[ "${fh_lines[$i]}" =~ jq\ -r ]]; then
+      # Trigger only on the metric-emission shape (`jq -r --arg ts ...`), not any bare
+      # `jq -r` — the latter also matches unrelated one-off calls elsewhere in the file
+      # (e.g. the drain-controller prior-run lookup's `| jq -r '.[0].databaseId //
+      # empty'`) that were never meant to be a collector-gate block and have no
+      # `<<< "$status"` terminator at all, which used to send this scanner searching
+      # arbitrarily far forward for one (#580).
+      if [[ "${fh_lines[$i]}" =~ jq\ -r\ --arg\ ts ]]; then
         in_jq=1; cur_start=$i
         [[ "${fh_lines[$i]}" == *'<<< "$status"'* ]] && { jq_start+=("$cur_start"); jq_end+=("$i"); in_jq=0; }
       fi

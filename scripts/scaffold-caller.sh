@@ -78,6 +78,12 @@ emit() {
 # only way a separate stub could listen for "CI failed") structurally never fires for a
 # PR-branch CI run (SuxOS/.github#260) — same-workflow job chaining doesn't have that
 # failure mode. github.event_name == 'pull_request' keeps it from firing on push/merge_group.
+#
+# NOTE (#579): no current managed repo actually wires the reusable ci.yml this stub
+# calls — each forked its own ci.yml instead (see
+# docs/design/2026-07-22-ci-yml-fate-decision.md). Treat this emitted stub as a
+# starting template to adapt (or replace with your own ci.yml keeping the `autofix`
+# job below), not a proven-live default.
 emit ci <<YAML
 name: CI
 on:
@@ -351,8 +357,9 @@ Caller stubs scaffolded. Remaining manual steps (see README):
   - Set org-level secrets: CLAUDE_CODE_OAUTH_TOKEN, SUX_BOT_APP_ID,
     SUX_BOT_PRIVATE_KEY. (CI billing is subscription-based via
     CLAUDE_CODE_OAUTH_TOKEN — ANTHROPIC_API_KEY is retired, do not set it.)
-  - Create labels: building, needs-human, automerge, hold, tracking, epic (the
-    nonbuildable-labels floor), bug, enhancement, documentation, security,
+  - Create labels: building, needs-human, automerge, hold, keep, tracking, epic
+    (the nonbuildable-labels floor — `keep` opts a PR out of pr-drain's
+    close-stale sweep), bug, enhancement, documentation, security,
     effort:small, effort:medium, effort:large (the fixer's proposal-typing labels).
   - Protect main with a repository RULESET (Settings → Rules → Rulesets), NOT
     classic branch protection: assert-branch-protection.yml runs with the App

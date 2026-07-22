@@ -57,7 +57,7 @@ queue; see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.
 issues that scheduled Claude workloads read via the `check-throttle` action — the smarter
 successor to the retired binary `budget-guard.yml`) · `deep-audit.yml` (nightly opus pass
 over each repo's merged diff — the compensating control for the sonnet per-PR
-security-review) · `org-consistency.yml` (weekly opus cross-repo drift + refactor sweep,
+security-review) · `org-consistency.yml` (nightly opus cross-repo drift + refactor sweep,
 files findings into the backlog pipeline) · `caller-conformance.yml` (nightly advisory
 caller-stub drift sweep over every repo in `managed-repos.json` plus this repo's own
 `self-*.yml` stubs, #346/#356; a `workflow_dispatch`-only, opt-in `remediate` input opens/
@@ -80,14 +80,17 @@ org-wide, no Opus escalation) are single-sourced in
 `budget-governor.yml`'s opus/sonnet classification can't silently drift from each other.
 
 **Self-hosted (`self-*.yml`)** — this repo also runs the backlog pipeline on itself:
-`self-fixer.yml` · `self-issue-build.yml` · `self-automerge.yml` ·
-`self-security-review.yml` are caller stubs that wire `fixer.yml`/`issue-build.yml`/
-`automerge.yml`/`security-review.yml` back onto SuxOS/.github, so this repo's own open
-issues flow through the same propose → build → automerge pipeline as `sux`/`suxrouter`.
-Since this repo ships no app (only reusable workflow YAML), `self-issue-build.yml` gates
-on `actionlint` (`self-check.yml`) + `pin-consistency.yml` instead of a Node build/test
-trio. Marked TEMPORARY in `self-fixer.yml`'s header — a consciously self-hosted
-arrangement, not the long-term shape. `self-pr-auto-update.yml` · `self-pr-watch.yml` ·
+`self-fixer.yml` · `self-fixer-30m.yml` · `self-fixer-bugs.yml` · `self-issue-build.yml` ·
+`self-automerge.yml` · `self-security-review.yml` are caller stubs that wire
+`fixer.yml`/`issue-build.yml`/`automerge.yml`/`security-review.yml` back onto
+SuxOS/.github, so this repo's own open issues flow through the same propose → build →
+automerge pipeline as `sux`/`suxrouter`. `self-fixer.yml`/`self-fixer-30m.yml`/
+`self-fixer-bugs.yml` mirror the same 3-tier proposer cadence (deep daily / bugs+feats
+30m / bugs-only 15m) that `fixer.yml`/`fixer-30m.yml`/`fixer-bugs.yml` run for every
+other caller repo. Since this repo ships no app (only reusable workflow YAML),
+`self-issue-build.yml` gates on `actionlint` (`self-check.yml`) + `pin-consistency.yml`
+instead of a Node build/test trio. Marked TEMPORARY in `self-fixer.yml`'s header — a
+consciously self-hosted arrangement, not the long-term shape. `self-pr-auto-update.yml` · `self-pr-watch.yml` ·
 `self-pr-drain.yml` complete Loop 3 on this repo too — without them, a second
 concurrent bot PR against `.github` flips BEHIND on merge with no rebase/visibility/
 drain backstop (issue #189).
