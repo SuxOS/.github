@@ -157,12 +157,23 @@ jobs:
           # --label narrows server-side BEFORE --limit is applied, so the cap binds on the
           # needs-human set (oldest included) instead of truncating the newest-created page
           # of ALL open PRs and only then filtering to needs-human (SuxOS/.github#366).
-          if ! prs=$(gh pr list --state open --label needs-human --limit "$PR_LIMIT" \
-            --json number,isDraft,labels,headRefOid,mergeStateStatus \
-            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+          if ! prs_raw=$(gh pr list --state open --label needs-human --limit "$PR_LIMIT" \
+            --json number,isDraft,labels,headRefOid,mergeStateStatus); then
             echo "::error::gh pr list failed — aborting instead of treating as zero needs-human PRs"
             exit 1
           fi
+
+          # Raw (pre hold/keep filter) count against PR_LIMIT is the right truncation
+          # signal — --limit binds server-side on the needs-human page itself, so a
+          # count taken after the client-side hold/keep jq filter would never read back
+          # as == PR_LIMIT even when the fetch was actually capped (SuxOS/.github#594,
+          # same pattern as pr-drain.yml/pr-watch.yml's #482 warning).
+          raw_count=$(echo "$prs_raw" | jq 'length')
+          if [ "$raw_count" -eq "$PR_LIMIT" ]; then
+            echo "::warning::needs-human PR count hit pr-limit ($PR_LIMIT) — oldest matching PRs beyond the cap were not checked this run"
+          fi
+
+          prs=$(echo "$prs_raw" | jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]')
 
           count=$(echo "$prs" | jq 'length')
           echo "needs-human candidates (not hold/keep): $count"
@@ -273,12 +284,20 @@ jobs:
           # `keep` are excluded — a real finding or an operator pin is not ours to auto-requeue.
           # Same server-side-narrow-before-limit fix as the needs-human sweep above
           # (SuxOS/.github#366): --label binds the cap to the security-review-retry set.
-          if ! prs=$(gh pr list --state open --label security-review-retry --limit "$PR_LIMIT" \
-            --json number,isDraft,labels,headRefOid \
-            --jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]'); then
+          if ! prs_raw=$(gh pr list --state open --label security-review-retry --limit "$PR_LIMIT" \
+            --json number,isDraft,labels,headRefOid); then
             echo "::error::gh pr list failed (security-review-retry) — aborting instead of treating as zero retry PRs"
             exit 1
           fi
+
+          # Same raw-vs-post-filter truncation signal as the needs-human sweep above
+          # (SuxOS/.github#594).
+          raw_count=$(echo "$prs_raw" | jq 'length')
+          if [ "$raw_count" -eq "$PR_LIMIT" ]; then
+            echo "::warning::security-review-retry PR count hit pr-limit ($PR_LIMIT) — oldest matching PRs beyond the cap were not checked this run"
+          fi
+
+          prs=$(echo "$prs_raw" | jq '[.[] | select(.isDraft | not) | select([.labels[].name] | (index("hold") or index("keep")) | not)]')
 
           count=$(echo "$prs" | jq 'length')
           echo "security-review-retry candidates (not hold/keep): $count"
