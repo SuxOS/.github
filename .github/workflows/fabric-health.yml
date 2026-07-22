@@ -719,7 +719,9 @@ jobs:
             | (if $window > 0 then ($merged_sum * (24 / $window)) else 0 end) as $drain_rate
             | (($growth != null) and ($growth > 1) and ($growth > $drain_rate)) as $inflow_bound
             | ((.edge_checks // []) | any(.ok == false)) as $edge_red
-            | (($streak >= 7) and (.collection_ok == 1)) as $drain_green
+            | ([.repos[] | select(.collection.runs == 1) | .workflow_red] | add // 0) as $workflow_red_total
+            | ([.repos[] | select(.collection.prs == 1) | (.prs.red + .prs.stuck)] | add // 0) as $pr_red_stuck_total
+            | (($streak >= 7) and (.collection_ok == 1) and ($workflow_red_total == 0) and ($pr_red_stuck_total == 0)) as $drain_green
             | {
                 row: (
                   if $drain_green and $headroom != null and $headroom >= 0.5 then "scale-unit-of-work"
@@ -736,6 +738,8 @@ jobs:
                 drain_rate_per_day: $drain_rate,
                 headroom_fraction: $headroom,
                 drain_green: $drain_green,
+                workflow_red_total: $workflow_red_total,
+                pr_red_stuck_total: $pr_red_stuck_total,
                 inflow_bound: $inflow_bound,
                 edge_red: $edge_red
               }' fabric-status.json)
@@ -764,7 +768,7 @@ jobs:
             "" \
             "Evidence:" \
             "$(printf '%s' "$VERDICT" | jq -r '
-              "- backlog-zero streak: \(.streak_days)d (history sampled \(.days_available)/\(.days_requested) days) — drain_green=\(.drain_green)\n" +
+              "- backlog-zero streak: \(.streak_days)d (history sampled \(.days_available)/\(.days_requested) days) — drain_green=\(.drain_green) (workflow_red=\(.workflow_red_total), pr_red+stuck=\(.pr_red_stuck_total))\n" +
               "- opus headroom fraction: \(.headroom_fraction // "unknown")\n" +
               "- backlog growth/day: \(.growth_per_day // "unknown (insufficient history)") vs drain rate/day: \(.drain_rate_per_day) — inflow_bound=\(.inflow_bound)\n" +
               "- edge panels red: \(.edge_red)"')" \

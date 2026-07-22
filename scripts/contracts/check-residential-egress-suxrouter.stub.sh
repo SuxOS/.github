@@ -24,13 +24,19 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 status=0
-endpoint_count=$(jq '(.endpoints // []) | length' "$SCHEMA")
+# SCHEMA is the JSON-Schema document itself (contracts/residential-egress.schema.json),
+# whose top-level `.endpoints` key is a `{type: array, items: {...}}` SHAPE descriptor,
+# not an array of actual endpoint instances — `.endpoints // []` is always truthy here
+# (it's a non-empty object), so a plain length check never catches the not-yet-populated
+# case and `.endpoints[]` below would error on a non-array (#607). Detect the shape-only
+# state directly by checking `.endpoints`'s own JSON type before iterating it.
+endpoints_type=$(jq -r '.endpoints | type' "$SCHEMA")
+if [ "$endpoints_type" != "array" ]; then
+  echo "no endpoint entries in schema (contracts/residential-egress.schema.json is shape-only) — skipping"
+  exit 0
+fi
+endpoint_count=$(jq '.endpoints | length' "$SCHEMA")
 if [ "$endpoint_count" -eq 0 ]; then
-  # The schema document itself only defines the SHAPE of an endpoint entry
-  # (under .properties.endpoints.items) — it carries no concrete instances
-  # until a follow-up fills in the TODO fields. A top-level .endpoints being
-  # absent is that not-yet-populated state, not an error; fail-open here so
-  # the stub stays runnable (and smoke-testable) before that data lands.
   echo "no endpoint entries in schema (contracts/residential-egress.schema.json is shape-only) — skipping"
   exit 0
 fi

@@ -141,7 +141,7 @@ run_scenario "second-drop-cycle2" '[5]' \
   '{"built":[],"dropped":[{"number":5,"reason":"still too large","superseded":false}]}' "$log5" "$prior"
 if grep -q 'GH issue edit 5 --repo test/repo --add-label needs-human' "$log5" \
   && grep -q -- 'GH api repos/test/repo/issues/comments/777 -X PATCH -f body=<!-- issue-build:drop cycle=2' "$log5" \
-  && grep -q 'Dropped from this batch for the 2th time' "$log5" \
+  && grep -q 'Dropped from this batch for cycle 2' "$log5" \
   && grep -q 'needs-human' "$log5" \
   && ! grep -q -- 'GH issue comment 5 --repo test/repo --body <!-- issue-build:drop' "$log5"; then
   note "second drop of #5: cycle=2 escalates (needs-human applied, marker PATCHed in place, not posted as a new comment)"

@@ -1014,7 +1014,7 @@ jobs:
                   # scoping pass: a docs/design/YYYY-MM-DD-*.md doc is a legitimate,
                   # gate-passing build in its own right (precedent: #433, #439).
                   gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label needs-human 2>/dev/null || true
-                  summary_line="🤖 Dropped from this batch for the ${next_cycle}th time (not shipped in this PR): $reason. This has now cycled claim → attempt → drop ${next_cycle} times with nothing landing — applying \`needs-human\` instead of releasing it back to the pool, so it stops being re-selected and re-dropped. This repo's CLAUDE.md sanctions a scoping doc (\`docs/design/YYYY-MM-DD-*.md\`, re-deriving a concrete plan and sizing it into small buildable slices) as a real, gate-passing build for exactly this situation — not a dodge. Run: $RUN_URL"
+                  summary_line="🤖 Dropped from this batch for cycle ${next_cycle} (not shipped in this PR): $reason. This has now cycled claim → attempt → drop ${next_cycle} times with nothing landing — applying \`needs-human\` instead of releasing it back to the pool, so it stops being re-selected and re-dropped. This repo's CLAUDE.md sanctions a scoping doc (\`docs/design/YYYY-MM-DD-*.md\`, re-deriving a concrete plan and sizing it into small buildable slices) as a real, gate-passing build for exactly this situation — not a dodge. Run: $RUN_URL"
                 else
                   summary_line="🤖 Dropped from this batch (not shipped in this PR): $reason. Released the \`building\` claim so this can be retried or picked up later. Run: $RUN_URL"
                 fi
