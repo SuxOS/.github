@@ -1,4 +1,4 @@
-name: Self fixer (15m, bugs only)
+name: Self fixer (bugs, on-merge)
 
 # Tightest tier of the 3-cadence proposer (see self-fixer-30m.yml 30m bugs+feats /
 # self-fixer.yml 1h deep). Runs every 15m with scope: bugs — correctness bugs only, no
@@ -14,8 +14,11 @@ name: Self fixer (15m, bugs only)
 # Reusable workflow: SuxOS/.github/.github/workflows/fixer.yml
 
 on:
-  schedule:
-    - cron: "9,24,39,54 * * * *" # every 15m, offset to dodge top-of-hour rush
+  # Fixer Cadence v2: the cheap bugs tier is CHANGE-triggered, not a 15m metronome —
+  # new correctness bugs are born when code lands, so scan the delta on merge to main.
+  # Idle repo -> zero runs; the reusable backlog gate skips it when the buffer is full.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:

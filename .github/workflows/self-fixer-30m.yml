@@ -1,4 +1,4 @@
-name: Self fixer (30m, bugs+feats)
+name: Self fixer (bugs+feats, 12h)
 
 # Mid tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer.yml 1h deep).
 # Runs every 30m with scope: bugs-feats — bugs plus ordinary feature/gap ideas, no push for
@@ -14,7 +14,7 @@ name: Self fixer (30m, bugs+feats)
 
 on:
   schedule:
-    - cron: "14,44 * * * *" # every 30m, offset to dodge top-of-hour rush
+    - cron: "44 */12 * * *" # Fixer Cadence v2: warm-tier baseline sweep, twice daily
   workflow_dispatch:
 
 jobs:

@@ -1,4 +1,4 @@
-name: Self fixer
+name: Self fixer (deep, 3d)
 
 # Wires the backlog "propose" stage onto THIS repo (SuxOS/.github), same as every
 # consumer repo's fixer.yml caller stub. Added 2026-07-15 to unblock the 16 issues
@@ -14,7 +14,7 @@ on:
     # Deep tier of the 3-cadence proposer (see self-fixer-bugs.yml 15m / self-fixer-30m.yml
     # 30m): bugs + feature ideas + an explicit push for at least one ambitious/large idea
     # per pass.
-    - cron: "29 * * * *"
+    - cron: "29 6 */3 * *" # Fixer Cadence v2: warm-tier ambitious-idea sweep, every 3rd day
   workflow_dispatch:
 
 jobs:
