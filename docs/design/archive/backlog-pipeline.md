@@ -1,6 +1,6 @@
 # Backlog pipeline — propose → investigate → build → merge
 
-> **Superseded (2026-07-15) by [three-loop-pipeline.md](three-loop-pipeline.md).** That
+> **Superseded (2026-07-15) by [three-loop-pipeline.md](../three-loop-pipeline.md).** That
 > design deleted `triage.yml` and the `confidence:high|medium|low` label taxonomy this doc
 > describes as current — issues now go straight from proposal to build, with no separate
 > Opus investigate stage or `queued-for-build`/`triaged` handoff. Read the three-loop design
@@ -96,7 +96,7 @@ downstream runs for it; this is why every writer mints a SUX_BOT App token first
 ## Model per stage (right-sized by stakes)
 
 Model choice follows two axes since the 2026-07 budget redesign
-([docs/design/budget-and-cadence.md](budget-and-cadence.md)): **stakes** (the old rule —
+([docs/design/budget-and-cadence.md](../budget-and-cadence.md)): **stakes** (the old rule —
 opus where output takes effect unreviewed) **and frequency** — high-frequency work runs on
 sonnet even when it gates, compensated by a low-frequency opus deep pass. All are `model`
 inputs, so any caller can override.
