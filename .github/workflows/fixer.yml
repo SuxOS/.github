@@ -125,6 +125,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HIGH_WATER: ${{ inputs.backlog-high-water }}
         run: |
+          # shellcheck disable=SC2016  # the --jq program below is jq, not shell — $l must not expand
           n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 300 \
                 --json labels \
                 --jq '[.[] | (.labels|map(.name)) as $l
