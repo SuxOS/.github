@@ -96,6 +96,26 @@ jobs:
           # Whether the metered break-glass is armed (secrets aren't allowed in a step `if:`,
           # so surface presence as an output the break-glass step can gate on).
           echo "apikey=${{ secrets.ANTHROPIC_API_KEY != '' }}" >> "$GITHUB_OUTPUT"
+      - name: Mint app token for review (dependabot OIDC workaround, #649)
+        # claude-code-action mints its own default token via the runner's OIDC (id-token:
+        # write) unless given an explicit `github_token`. GitHub unconditionally blocks the
+        # OIDC token request for ANY workflow run whose triggering actor is dependabot[bot]
+        # — pull_request_target included, and regardless of `permissions:` — so on the
+        # Dependabot path (see self-security-review.yml's router) the action's own token
+        # mint 401s every time ("Invalid OIDC token") even though CLAUDE_CODE_OAUTH_TOKEN and
+        # every other secret came through fine. A GitHub App JWT exchange (mint-app-token,
+        # same SUX_BOT_APP_ID/SUX_BOT_PRIVATE_KEY pair every other Claude workflow already
+        # uses for this exact purpose — see claude.yml/fixer.yml/issue-build.yml) doesn't
+        # touch the Actions OIDC provider at all, so it works unconditionally on every
+        # trigger actor. Minting it for every run (not just Dependabot's) also removes this
+        # gate's one remaining OIDC flakiness source noted in the id-token: write comment
+        # above.
+        if: steps.pre.outputs.go == 'true'
+        id: review-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
         # fetch-depth 0 (was shallow): the review now gets read-only git diff/log/show
@@ -138,6 +158,7 @@ jobs:
         with:
           show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.review-token.outputs.token }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
@@ -183,6 +204,7 @@ jobs:
         with:
           show_full_output: true
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.review-token.outputs.token }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
@@ -229,6 +251,7 @@ jobs:
         with:
           show_full_output: true
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.review-token.outputs.token }}
           allowed_bots: ${{ inputs.allowed-bots }}
           prompt: |
             ${{ inputs.prompt-context }}
@@ -289,6 +312,16 @@ jobs:
         # this is the required merge-gate check, so a skipped Gate reports the job as SUCCESS
         # (GitHub treats a skipped step as non-blocking) and merges the PR with zero review
         # performed. See the GO check below for the fail-closed handling of that case.
+        #
+        # Every `hold` application below also runs `gh pr merge --disable-auto` (#657): native
+        # auto-merge, once armed by enable-automerge, only waits on required-check status — it
+        # never re-reads labels. If auto-merge was armed BEFORE this Gate applied `hold` (e.g. a
+        # prior attempt on an earlier commit passed and armed it), a LATER attempt on a new push
+        # can still turn the required check green while `hold` sits on the PR, and native
+        # auto-merge fires anyway since the label was never its own signal to begin with — hold
+        # only blocked a FUTURE enable-automerge decision, not an already-armed one (observed
+        # PR #652, 2026-07-22: merge fired 06:55:27Z with `hold` still attached, label removed
+        # 38s later as a no-op). Disarming here makes `hold` actually brake, not just advise.
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -315,6 +348,7 @@ jobs:
           # nothing to read (empty VERDICT, no execution logs, no .suxos-ci checkout).
           if [ "${GO:-}" != "true" ]; then
             gh pr edit "$PR" --add-label hold 2>/dev/null || true
+            gh pr merge --disable-auto "$PR" 2>/dev/null || true
             gh pr comment "$PR" --body "🛑 **security review**: \`CLAUDE_CODE_OAUTH_TOKEN\` is not configured, so no review could run on this diff. Failing closed and applying \`hold\` so this PR cannot merge unreviewed. Configure the secret (see README § Auth), then remove \`hold\` once a clean review has run." 2>/dev/null || true
             echo "::error::security review inert (CLAUDE_CODE_OAUTH_TOKEN not set) — failing closed (hold)"; exit 1
           fi
@@ -327,6 +361,7 @@ jobs:
             echo "security verdict: critical=$crit high=$high"
             if [ "${crit:-0}" -gt 0 ] || [ "${high:-0}" -gt 0 ]; then
               gh pr edit "$PR" --add-label hold 2>/dev/null || true
+              gh pr merge --disable-auto "$PR" 2>/dev/null || true
               gh pr comment "$PR" --body "🛑 **security review**: found $crit critical / $high high security issue(s). Applied \`hold\` (blocks auto-merge). Resolve or justify, then remove \`hold\`." 2>/dev/null || true
               echo "::error::security review blocked this PR ($crit critical, $high high)"; exit 1
             fi
@@ -361,5 +396,6 @@ jobs:
           # failure) — the exact starvation path an attacker could use to make the required
           # gate pass by making the reviewer not finish. Block it: `hold` + non-zero exit.
           gh pr edit "$PR" --add-label hold 2>/dev/null || true
+          gh pr merge --disable-auto "$PR" 2>/dev/null || true
           gh pr comment "$PR" --body "🛑 **security review**: produced no verdict on this diff (no account rate-limit signal — the reviewer did not complete a review). Failing closed and applying \`hold\` so a starved/unreviewable diff cannot merge unreviewed. Investigate (very large diff, refusal, looping), then re-run; remove \`hold\` only after a clean review." 2>/dev/null || true
           echo "::error::security review produced no verdict and no infra signal — failing closed (hold)"; exit 1

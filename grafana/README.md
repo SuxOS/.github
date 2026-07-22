@@ -28,6 +28,7 @@ secrets are set on the `.github` repo (reuse the edge's — the token just needs
 | --- | --- | --- |
 | `suxos_pipeline_backlog` | — | Open build-eligible issues across the org |
 | `suxos_backlog_zero` | — | `1` when backlog is 0 (the streak is derived from this) |
+| `suxos_needs_human_total` | `repo` | Open issues labelled `needs-human` — the other half of §4 spine-green ("no needs-human pile-up"); gates `drain_green` alongside workflow_red/pr_red+stuck (#648) |
 | `suxos_budget_throttle_active` | — | `1` when ANY repo's "Autonomy throttle" tracking issue `level:` body line is not `green` (#319/#522 — body-matched, not a `throttle` label; OR across every repo in `$REPOS`) |
 | `suxos_budget_throttle_active` | `repo` | Same signal, per repo — which one is throttled (#522) |
 | `suxos_pr_open_total` | `repo` | Open PRs |
@@ -56,6 +57,26 @@ at zero for 7 days. The dashboard's "Drain-to-zero streak" stat renders exactly 
 > **Influx naming caveat** (same as the edge): if panels show "No data", the
 > receiver may suffix series `_value` (`suxos_pipeline_backlog_value`). Add the
 > suffix to the panel queries if so.
+
+## Loki streams from other repos
+
+This file only documents the `suxos_*` Prometheus surface and the `{service="suxos-fabric"}`
+Loki stream that `fabric-health.yml` itself emits (both above). A panel built against a
+**sibling repo's own** Loki stream — e.g. the `sux` Worker's structured `FAIL_CODES`
+error-taxonomy events (`errorCode`, `fn`, see SuxOS/.github#609/#650) — has no schema
+documented in `.github` at all, because that emission code lives in `sux/src/grafana.ts`
+(`shipToLoki`/`shipEgress`, per the
+[fabric-stability v2 spec](../docs/design/2026-07-16-fabric-stability-v2-design.md)),
+not here, and a `.github`-scoped session's own `gh` token 404s on `gh repo view SuxOS/sux`
+(see this repo's CLAUDE.md § the cross-repo-read gotcha) — so there is no in-repo way to
+read or verify that repo's actual field names before writing a query against them.
+
+**Before building a panel over another repo's Loki stream:** don't guess at field names.
+Either escalate to a human with `sux` read access to paste the relevant `shipToLoki`/
+`shipEgress` call (stream selector + field names) into the issue, or have that confirmed
+schema pasted into the panel's own PR description so `scripts/test-dashboard-queries.sh`
+and a human reviewer can both check the query against real field names instead of an
+unverified guess.
 
 ## Files
 
