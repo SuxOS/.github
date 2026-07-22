@@ -70,7 +70,11 @@ files findings into the backlog pipeline) · `caller-conformance.yml` (nightly a
 caller-stub drift sweep over every repo in `managed-repos.json` plus this repo's own
 `self-*.yml` stubs, #346/#356; a `workflow_dispatch`-only, opt-in `remediate` input opens/
 refreshes a `chore: sync SuxOS caller stubs` PR per drifted repo for the two findings safe
-to fix unattended — missing canonical stubs and dead `workflow_run` stubs — #355).
+to fix unattended — missing canonical stubs and dead `workflow_run` stubs — #355) ·
+`backup-offsite.yml` (nightly: `git clone --mirror` + tar + `aws s3 cp` the vault/sux/
+claude-config repos to Cloudflare R2 and, once provisioned, Backblaze B2; prunes to 14
+dailies + 8 weeklies; monthly restore-verify job downloads the newest tarball and
+`git fsck`s it — see § Required secrets/vars for `backup-offsite.yml`, #682).
 
 **Backlog pipeline** (turns latent work into merged PRs — propose → build):
 `fixer.yml` (propose work as typed issues, run at 3 cadence tiers — 15m bugs-only /
@@ -237,6 +241,32 @@ labels were retired in the three-loop rework — issue-build selects/claims dire
   `automerge.yml`. Note it can only read rulesets with the App token (the
   classic branch-protection API 403s for an App installation token), so a
   ruleset — not classic branch protection — is what it actually verifies.
+
+Optional (safe to omit; the gated step just no-ops until the secret is set):
+
+- `GRAFANA_PROM_URL` / `GRAFANA_PROM_USER` / `GRAFANA_LOKI_URL` / `GRAFANA_LOKI_USER` /
+  `GRAFANA_LOKI_TOKEN` — `fabric-health.yml`'s Grafana Cloud push (Prometheus snapshot +
+  Loki event). Dormant (no-op, no failure) until all are set.
+- `NTFY_URL` / `NTFY_TOKEN` — `fabric-health.yml`'s human-escalation step (#683): POSTs
+  one line + a run link to a push-notification topic when its predicate trips (N
+  consecutive collection failures, budget red, or the backlog-zero streak breaking).
+  Dormant (no-op, no failure) until both are set. Org-level secrets.
+
+### Required secrets/vars for `backup-offsite.yml` (this repo only)
+
+`backup-offsite.yml` runs directly in `SuxOS/.github` (not a caller-repo workflow —
+see its header comment) and nightly-mirrors `vault`/`sux`/`claude-config` offsite.
+Org-level secrets, set once on this repo:
+
+- `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_ACCOUNT_ID` — Cloudflare R2
+  credentials (S3-compatible API via `aws s3 cp --endpoint-url
+  https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`), bucket `backup`. **Required** —
+  this is currently the only provisioned offsite target, so the workflow fails loudly
+  (rather than silently reporting success) if these are unset.
+- `B2_KEY_ID` / `B2_APP_KEY` / `B2_ENDPOINT` / `B2_BUCKET` — Backblaze B2
+  credentials/endpoint/bucket for the second, non-Cloudflare offsite leg. **Optional**
+  — inert (clean no-op, same pattern as `fabric-health.yml`'s `GRAFANA_*` secrets)
+  until all four are provisioned.
 
 ### Required labels
 

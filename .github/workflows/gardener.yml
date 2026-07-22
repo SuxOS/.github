@@ -1,0 +1,229 @@
+name: Gardener — two-tier vault maintenance (reusable)
+
+# Auto-gardener for an Obsidian-style vault repo (SuxOS/.github#676). Autonomy=A:
+# auto-apply changes, git is the undo — every commit here is reversible with a revert.
+#
+# Split (structural, do not violate): this file is the reusable ONLY. The thin caller
+# stub in the vault repo is added by hand, outside this repo's build pipeline — SuxOS/vault
+# is deliberately NOT in managed-repos.json and must stay off the general build pipeline;
+# only this one bespoke workflow gets wired to it.
+#
+# Two tiers, selected by the `tier` input:
+#   on-push — deterministic, cheap, runs on every push to the vault. Lint ratchet +
+#             exact-rename dead-link repair (pure python, ships in this repo) +
+#             signal-rank refresh. No LLM.
+#   daily   — LLM (claude-code-action), cost-bounded, cron-only. Fuzzy dead-link repair,
+#             orphan weaving into MOCs, prune-to-.trash, and a log append. Inert (green
+#             no-op) until CLAUDE_CODE_OAUTH_TOKEN is set.
+#
+# Caller shape (added to the vault repo, NOT here):
+#   on-push:
+#     on: { push: { branches: [main] } }
+#     jobs:
+#       gardener: { uses: SuxOS/.github/.github/workflows/gardener.yml@main, with: { tier: on-push }, secrets: inherit, permissions: { contents: write } }
+#   daily:
+#     on: { schedule: [{ cron: "17 9 * * *" }] }
+#     jobs:
+#       gardener: { uses: SuxOS/.github/.github/workflows/gardener.yml@main, with: { tier: daily }, secrets: inherit, permissions: { contents: write } }
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "Which tier to run: on-push (deterministic) or daily (LLM)."
+        type: string
+        required: true
+      max-turns:
+        description: "claude-code-action --max-turns cap for the daily LLM tier."
+        type: string
+        default: "30"
+      lint-script:
+        description: "Path (in the caller repo) to the vault structure-ratchet linter."
+        type: string
+        default: "scripts/vault-lint.py"
+      link-lint-script:
+        description: "Path (in the caller repo) to the dead/collision link linter."
+        type: string
+        default: "scripts/link-lint.py"
+      orphans-script:
+        description: "Path (in the caller repo) to the orphan-note checker."
+        type: string
+        default: "scripts/check-orphans.py"
+      signal-rank-script:
+        description: "Path (in the caller repo) to the signal-rank refresh script."
+        type: string
+        default: "scripts/signal-rank.py"
+      log-dir:
+        description: "Caller-repo directory the daily tier appends its run-summary log to."
+        type: string
+        default: "_meta/"
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: "Pro/Max subscription token. Absent -> daily tier is a green no-op."
+        required: false
+      SUX_BOT_APP_ID:
+        required: false
+      SUX_BOT_PRIVATE_KEY:
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  on-push:
+    if: inputs.tier == 'on-push'
+    name: Tier 1 — deterministic lint + exact-rename repair
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: gardener-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout vault
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+
+      # Self-retrigger guard: this job's own commits below are pushed with the App
+      # identity so they DO retrigger `push`, so without this guard a `[gardener]` commit
+      # would re-enter this same job forever.
+      - name: Self-retrigger guard
+        id: guard
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --pretty=%s)
+          if [[ "$subject" == "[gardener]"* ]]; then
+            echo "HEAD commit is a prior gardener commit ('$subject') — exiting clean, no re-entry."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout gardener scripts (SuxOS/.github)
+        if: steps.guard.outputs.go == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SuxOS/.github
+          ref: main
+          path: .suxos-ci
+
+      - name: Lint ratchet (fail on baseline regression)
+        if: steps.guard.outputs.go == 'true'
+        run: python3 "${{ inputs.lint-script }}"
+
+      - name: Exact-rename dead-link repair
+        if: steps.guard.outputs.go == 'true'
+        id: relink
+        run: |
+          python3 .suxos-ci/scripts/gardener/relink_dead_links.py . --cap 50
+
+      - name: Signal-rank refresh
+        if: steps.guard.outputs.go == 'true'
+        run: python3 "${{ inputs.signal-rank-script }}"
+
+      - name: Mint app token
+        if: steps.guard.outputs.go == 'true'
+        id: app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Auto-commit and push fixes
+        if: steps.guard.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "suxbot[bot]"
+          git config user.email "suxbot[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "no gardener changes this run"
+            exit 0
+          fi
+          git add -A
+          git commit -m "[gardener] tier1: lint ratchet + exact-rename repair + signal-rank refresh"
+          # The vault receives continuous worker pushes — tolerate one race with a rebase retry.
+          for attempt in 1 2; do
+            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            echo "push attempt $attempt failed, retrying after rebase..."
+          done
+          echo "::error::gardener tier1 could not push after retry"
+          exit 1
+
+  daily:
+    if: inputs.tier == 'daily'
+    name: Tier 2 — LLM fuzzy repair, orphan weaving, prune
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: gardener-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - name: Preflight — need the subscription token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → daily gardener inert (green no-op)."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      - name: Checkout vault
+        if: steps.pre.outputs.go == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Claude — fuzzy repair, orphan weaving, prune, log
+        if: steps.pre.outputs.go == 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
+        env:
+          ENABLE_PROMPT_CACHING_1H: "1"
+          CLAUDE_CODE_RETRY_WATCHDOG: "1"
+        with:
+          show_full_output: true
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          prompt: |
+            You are the daily gardener for this Obsidian-style vault repo. Do ONLY the four
+            things below, in order, then commit and push. Every commit message MUST start
+            with `[gardener]`. Do NOT touch daily notes (`daily-note-ingest.yml` owns those)
+            and do NOT run any vectorize/reindex step.
+
+            1. Fuzzy dead-link repair: find dead wikilinks the deterministic tier1 pass
+               couldn't fix (no unique exact-basename match). Only repair ones you are
+               confident about (close name/typo match to exactly one existing note — if in
+               doubt, skip it). Cap: 20 repairs today, committed as one batch.
+            2. Orphan weaving: for notes with no inbound links, add a link to them from the
+               most relevant MOC/index note (start from `_meta/Life-Organization-Index.md`
+               and the per-area MOCs). Never delete an orphan, only add a link to it.
+            3. Prune to `.trash/<ISO-date>/` via `git mv` (never hard-delete). A note is a
+               prune candidate ONLY if ALL of: signal-rank bottom decile, last modified more
+               than 90 days ago, and not linked from any MOC. Cap: 10 notes today. HARD
+               EXCLUSIONS — never prune anything under `01-records/**`, `05-areas/legal/**`,
+               `_meta/**`, `03-people/**`, or any note tagged `#keep` or `#evidence`.
+            4. Append a one-line run summary (repairs/weaves/prunes counts) to
+               `${{ inputs.log-dir }}Consolidation-Log-<YYYY-MM-DD>.md` (create the file with
+               a top-level heading if it doesn't exist yet for today).
+
+            Re-run ${{ inputs.lint-script }} and ${{ inputs.link-lint-script }} after your
+            changes and make sure neither regresses the baseline before you commit. If
+            nothing qualifies for any of the four steps, make no commit — a no-op run is
+            correct and expected most days.
+          claude_args: >-
+            --max-turns ${{ inputs.max-turns }}
+            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(git mv:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git status:*),Bash(git diff:*),Bash(python3:*)"

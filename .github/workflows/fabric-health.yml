@@ -11,6 +11,12 @@ name: Fabric health spine (reusable)
 # GRAFANA_PROM_USER / GRAFANA_LOKI_TOKEN (and the Loki trio) are set — a clean
 # no-op otherwise, so this is safe to land before the secrets exist.
 #
+# A final escalation step (#683) pushes ONE line + a run link to a push-notification
+# topic via NTFY_URL/NTFY_TOKEN when a deterministic predicate trips (N consecutive
+# collection failures, budget red, or the backlog-zero streak breaking) — same
+# DORMANT-until-secrets contract as the Grafana push above, and inert (no-op, exits 0)
+# with either secret unset.
+#
 # Stateless by design: it emits point-in-time gauges (e.g. suxos_backlog_zero),
 # and the 7-day drain-to-zero streak in the Definition of Done is derived in
 # Prometheus from series history (min_over_time(suxos_backlog_zero[7d]) == 1),
@@ -658,6 +664,18 @@ jobs:
                    else .streak += 1 end
                   ) | .streak;
 
+            # Consecutive days (newest-first, including today) whose org-wide collection
+            # was degraded — the escalation step below (#683) fires once this crosses its
+            # own small threshold, same "stop at first gap/success" contract as streak_zero.
+            def streak_collection_fail(arr):
+              arr as $arr
+              | reduce range(0; $arr|length) as $i
+                  ({streak: 0, stopped: false};
+                   if .stopped then .
+                   elif ($arr[$i] == null) or ($arr[$i].collection_ok == 1) then . + {stopped: true}
+                   else .streak += 1 end
+                  ) | .streak;
+
             def growth_rate(arr; field):
               arr as $arr
               | ([range(0; $arr|length) | select($arr[.] != null and $arr[.].collection_ok == 1)]) as $idxs
@@ -673,6 +691,12 @@ jobs:
             | ($repos_str | split(" ") | map(select(length > 0))) as $repo_list
             | {
                 backlog_zero_streak_days: streak_zero($calendar),
+                # True only on the run where a >0 streak (as of yesterday, i.e. excluding
+                # the current sample) drops to 0 today — a required-loop regression, not
+                # merely "still not zero" (#683 escalation predicate; avoids re-firing every
+                # tick while the backlog stays nonzero).
+                backlog_zero_streak_broke: ((streak_zero($calendar[1:]) > 0) and (streak_zero($calendar) == 0)),
+                collection_failure_streak_days: streak_collection_fail($calendar),
                 backlog_growth_per_day: growth_rate($calendar; "backlog_total"),
                 repos: ($repo_list | map({
                     key: .,
@@ -1068,6 +1092,63 @@ jobs:
           else
             echo "GRAFANA_LOKI_* secrets unset — loki push inert (no-op)"
           fi
+
+      # Proactive human escalation (#683, closes the #600 gap: nothing previously
+      # notified a human when the fabric broke). Deterministic predicate, no state
+      # machine: fires when THIS run's own status (plus the history already computed
+      # above) crosses one of three thresholds. Dormant until NTFY_URL/NTFY_TOKEN are
+      # both set (org secrets, provisioned later) — a clean no-op otherwise, same
+      # contract as the Grafana push above, so this is safe to land before the secrets
+      # exist. On trip, POSTs exactly one line + a link to this run to the ntfy topic.
+      - name: Escalate to human (ntfy)
+        env:
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${NTFY_URL:-}" ] || [ -z "${NTFY_TOKEN:-}" ]; then
+            echo "NTFY_URL/NTFY_TOKEN unset — escalation inert (no-op)"
+            exit 0
+          fi
+
+          status=$(cat fabric-status.json)
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # Threshold for "N consecutive collection failures" — small on purpose: this
+          # is a 15-minute-cadence spine, so 2 consecutive DAYS of degraded collection
+          # is already well past a transient blip.
+          collection_fail_streak=$(jq '.history.collection_failure_streak_days // 0' <<< "$status")
+          budget_red=$(jq -r '.budget_throttle_active == true' <<< "$status")
+          streak_broke=$(jq -r '.history.backlog_zero_streak_broke // false' <<< "$status")
+
+          reason=""
+          if [ "$collection_fail_streak" -ge 2 ]; then
+            reason="collection failing for ${collection_fail_streak} consecutive days"
+          elif [ "$budget_red" = "true" ]; then
+            reason="budget throttle active (red)"
+          elif [ "$streak_broke" = "true" ]; then
+            reason="backlog-zero streak broke (dropped to 0 after being >0)"
+          fi
+
+          if [ -z "$reason" ]; then
+            echo "escalation predicate: not tripped"
+            exit 0
+          fi
+
+          echo "escalation predicate tripped: $reason"
+          msg="suxos fabric-health: ${reason} — ${run_url}"
+          set +e
+          code=$(curl --fail-with-body -sS -o /tmp/ntfy-resp.txt -w "%{http_code}" --max-time 30 \
+            -H "Authorization: Bearer ${NTFY_TOKEN}" \
+            -H "Title: SuxOS fabric-health escalation" \
+            -d "$msg" \
+            "$NTFY_URL")
+          curl_exit=$?
+          set -e
+          [ -z "$code" ] && code="000"
+          echo "ntfy push HTTP $code (curl exit $curl_exit)"
+          [ "${code:0:1}" = "2" ] || echo "::warning::ntfy push non-2xx ($code, curl exit $curl_exit)"
 
       - name: Upload fabric-status.json (ground truth for the orient tool)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
