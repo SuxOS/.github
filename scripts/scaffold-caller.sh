@@ -78,6 +78,12 @@ emit() {
 # only way a separate stub could listen for "CI failed") structurally never fires for a
 # PR-branch CI run (SuxOS/.github#260) — same-workflow job chaining doesn't have that
 # failure mode. github.event_name == 'pull_request' keeps it from firing on push/merge_group.
+#
+# NOTE (#579): no current managed repo actually wires the reusable ci.yml this stub
+# calls — each forked its own ci.yml instead (see
+# docs/design/2026-07-22-ci-yml-fate-decision.md). Treat this emitted stub as a
+# starting template to adapt (or replace with your own ci.yml keeping the `autofix`
+# job below), not a proven-live default.
 emit ci <<YAML
 name: CI
 on:

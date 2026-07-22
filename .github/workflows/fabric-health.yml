@@ -334,14 +334,17 @@ jobs:
             prior_integral=$(printf '%s' "$prior_json" | jq -r --arg r "$repo" \
               '(.repos // [])[] | select(.repo == $r) | .integral_error // empty' 2>/dev/null || true)
             prior_integral="${prior_integral:-0}"
-            # merged_ok=0 means merged_count is a fabricated 0 (#508), not a real
-            # observation — feeding it into `err` would permanently inflate
+            # merged_ok=0 means merged_count is a fabricated 0 (#508); issues_ok=0 means
+            # backlog is a fabricated 0 from an empty issues array (#575) — either way the
+            # observation feeding `err` isn't real, and would permanently corrupt
             # integral_error (it becomes next run's prior_integral). Hold the integral
             # unchanged and derive raw_output from the held integral alone (err=0) so a
-            # transient query failure doesn't corrupt the running PI state.
+            # transient query failure on either collector doesn't corrupt the running PI
+            # state.
             read -r integral_error raw_output <<<"$(awk -v prior="$prior_integral" -v backlog="$backlog" \
-              -v merged="$merged_count" -v window="$merged_window_hours" -v merged_ok="$merged_ok" 'BEGIN {
-                if (merged_ok == 1) {
+              -v merged="$merged_count" -v window="$merged_window_hours" -v merged_ok="$merged_ok" \
+              -v issues_ok="$issues_ok" 'BEGIN {
+                if (merged_ok == 1 && issues_ok == 1) {
                   merged_rate = (window > 0) ? merged / window : 0
                   setpoint = backlog / 48
                   err = setpoint - merged_rate
