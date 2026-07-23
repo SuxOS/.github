@@ -31,7 +31,7 @@ decision. **Accepted risk:** `security-review.yml` is a required merge gate, so 
 shared subscription pool exhausts, the gate can't run and the merge queue jams for
 everyone. It was previously held on the metered `ANTHROPIC_API_KEY` to avoid exactly
 that — if jams appear, revert `security-review.yml` to `anthropic_api_key`. See README
-§ Auth and `docs/design/backlog-pipeline.md`.
+§ Auth and `docs/design/archive/backlog-pipeline.md` (historical, archived).
 
 ## Before merging a workflow change
 
