@@ -449,3 +449,4 @@ jobs:
           gh pr merge --disable-auto "$PR" 2>/dev/null || true
           gh pr comment "$PR" --body "🛑 **security review**: produced no verdict on this diff (no account rate-limit signal — the reviewer did not complete a review). Failing closed and applying \`hold\` so a starved/unreviewable diff cannot merge unreviewed. Investigate (very large diff, refusal, looping), then re-run; remove \`hold\` only after a clean review." 2>/dev/null || true
           echo "::error::security review produced no verdict and no infra signal — failing closed (hold)"; exit 1
+# probe: checking whether the  credit top-up lifted OAuth rate-limiting, 2026-07-23T00:33:53Z
