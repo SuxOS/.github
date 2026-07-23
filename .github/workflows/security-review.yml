@@ -163,18 +163,27 @@ jobs:
         # step fail visibly in the log but keep going so Gate's existing logic decides the
         # outcome from the (here, empty) verdict, same as any other no-verdict case.
         continue-on-error: true
-        # 12 (#686 follow-up): bounds how long CLAUDE_CODE_RETRY_WATCHDOG may wait out a
-        # rate-limit before this ONE attempt gives up — without it, a persistent rate-limit
-        # window could let this single step consume the entire job's timeout-minutes, cancelling
-        # the whole job (not just this step) and skipping the retry/break-glass/classifier chain
-        # entirely instead of falling through to it. See the job-level timeout-minutes comment.
-        timeout-minutes: 12
+        # 5 (#719): bounds how long this ONE attempt may spend before falling through to the
+        # next. Was 12, sized to let CLAUDE_CODE_RETRY_WATCHDOG wait out a rate-limit window —
+        # but that sizing predates the metered break-glass below, and with the watchdog now off
+        # (see below) an attempt either returns a verdict quickly or is throttled, so a long
+        # bound only delays the fallback. Still bounded rather than unbounded for the original
+        # #686 reason: an unbounded attempt consumes the job's timeout-minutes and cancels the
+        # whole job, skipping the retry/break-glass/classifier chain entirely.
+        timeout-minutes: 5
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
-          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
-          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
-          CLAUDE_CODE_RETRY_WATCHDOG: "1"
+          # OFF as of #719 — deliberately, and only on the two SUBSCRIPTION attempts.
+          # The watchdog re-polls a 429/529 window instead of failing, which was correct when a
+          # throttled pool meant this REQUIRED gate simply could not run. The metered break-glass
+          # below removed that premise: there is now a working fallback, and making the
+          # subscription attempts wait only postpones it. Observed on claude-config#449 — 49
+          # `rate_limit` responses, both attempts re-polling to their full 12min timeout, then
+          # break-glass producing a verdict in 2min. 24 minutes of critical-path stall on a
+          # required merge gate, to reach a path that was always going to answer.
+          # Left ON for break-glass, which has no further fallback behind it.
+          CLAUDE_CODE_RETRY_WATCHDOG: "0"
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
@@ -215,14 +224,15 @@ jobs:
         # never runs when the review was intentionally inert (missing key).
         if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
         continue-on-error: true
-        # See the main attempt's timeout-minutes comment — same starvation risk, same bound.
-        timeout-minutes: 12
+        # See the main attempt's timeout-minutes comment — same reasoning, same bound (#719).
+        timeout-minutes: 5
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
-          # Unattended-CI resilience: wait out a subscription usage-limit/capacity (429/529) window
-          # and retry instead of failing — the pool-exhaustion jam, without a metered key.
-          CLAUDE_CODE_RETRY_WATCHDOG: "1"
+          # OFF as of #719 — see the main attempt's comment. This retry exists for a
+          # seconds-long transient blip, which needs no watchdog; a throttled pool is the
+          # break-glass path's job, not this one's.
+          CLAUDE_CODE_RETRY_WATCHDOG: "0"
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         with:
