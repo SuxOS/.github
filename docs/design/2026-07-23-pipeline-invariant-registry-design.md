@@ -54,7 +54,9 @@ Where a `drift` check would just watch a hand-maintained list that could instead
 *generated* from live state, generate it and skip the check entirely (prevention over
 detection where it's free) — e.g. `managed-repos.json` becomes a query against
 `gh repo list --org SuxOS` filtered by an explicit inclusion rule, rather than a
-hand-edited file #689 already caught drifting.
+hand-edited file #689 already caught drifting. This is a *generation* fix, not a
+registry check — once generated, there's nothing left for a `drift` entry to compare
+(see §3, which deliberately does not list a managed-repos.json row for this reason).
 
 No new subsystem: this reuses infrastructure the pipeline already trusts and already
 keeps alive, rather than adding a second thing that itself needs watching.
@@ -65,7 +67,6 @@ keeps alive, rather than adding a second thing that itself needs watching.
 |---|---|---|---|---|
 | `ttl` | retry-bound circuit breaker | a batch attempt resolves (success or explicit give-up) within N consecutive tries | consecutive cancelled-on-timeout runs of the identical workflow | #701 — 28 consecutive identical-timeout retries, no bound |
 | `effect` | cost-effectiveness | runner-minutes spent on repo X should correlate with landed progress (merged PRs / closed issues) over the same window | spend continues, output stays at zero | #701 (broader signature than the ttl entry above — catches livelocks that aren't identical-batch-shaped too) |
-| `drift` | managed-repos.json vs. live org state | repo list = `gh repo list --org SuxOS` minus explicit exclusions | hand-maintained `managed-repos.json` | #689 — cold-tier repos invisible to budget tracking |
 | `drift` | settings.json vs. claude-config source | repo source of truth | live `~/.claude/settings.json` | already built (`check-settings-drift.py`); registry generalizes the pattern, doesn't replace the existing hook |
 | `ttl` | stale override sweep | every `hold`/`throttle-manual`/disabled-required-check carries an expiry or explicit `permanent: true` | override age vs. its own recorded expiry | required-check jam variants, DIRTY zombie PR claims, stale incident-response overrides (all named in CLAUDE.md) |
 | `effect` | fabric-health push verification | Grafana push HTTP call succeeding implies the metric is actually queryable | round-trip query confirms the pushed value landed | #694 — green while Grafana was dark |
@@ -80,10 +81,16 @@ and the `effect` check catches livelocks shaped differently than identical-batch
 1. **`invariants/manifest.yml`** — declarative `drift` and `ttl` entries. A `drift`
    entry names `declared_source` and `live_source` (each a query/script producing a
    comparable set or value) and a diff mode. A `ttl` entry names where to find an
-   override's timestamp/attempt-count and its bound, with an explicit `permanent: true`
-   escape hatch for intentionally-standing state (e.g. the 1.1-drive project's "ALL
-   drummers stay disarmed" pin — some overrides are meant to be long-lived, and the
-   mechanism must not fight that).
+   override's timestamp/attempt-count and its bound. The escape hatch for
+   intentionally-standing state (e.g. the 1.1-drive project's "ALL drummers stay
+   disarmed" pin) is *per-instance*, not per-manifest-entry — it's a property of the
+   specific override, not the check — and reuses the existing per-domain convention
+   already in place (the `throttle-manual` label budget-governor already honors) rather
+   than inventing a second "this one's exempt" mechanism. A `ttl` entry's `live_source`
+   is responsible for recognizing that domain's existing permanent-marker convention and
+   skipping instances that carry it; where no such convention exists yet for a given
+   override type, add one consistent with `throttle-manual`'s shape rather than a
+   bespoke flag.
 2. **`invariants/effect/*.py`** — one script per effect check, fixed contract: exit
    0/1/2 (OK/WARN/CRIT), one-line message on stdout. Same shape existing hook scripts
    in this repo already use.
