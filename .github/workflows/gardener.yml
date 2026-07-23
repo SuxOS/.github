@@ -98,9 +98,9 @@ jobs:
             echo "go=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Minted early: the default GITHUB_TOKEN is scoped to the triggering repo only and
-      # cannot check out a sibling repo (even a public one) — the cross-repo checkout below
-      # needs the App-installation token, not the caller-repo default.
+      # Minted early: this is the PUSH token for the auto-commit step below. With no
+      # owner/repositories set, create-github-app-token scopes it to the CALLER repo only
+      # (the vault) — correct for the push, but it therefore cannot see sibling repos.
       - name: Mint app token
         if: steps.guard.outputs.go == 'true'
         id: app-token
@@ -109,6 +109,20 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # The push token above is caller-repo-scoped and the caller's GITHUB_TOKEN is too,
+      # so neither can read SuxOS/.github — the cross-repo scripts checkout needs its own
+      # token minted with explicit owner+repositories (#686), the same helper-token
+      # pattern as issue-build.yml's shared-helper checkout (#589).
+      - name: Mint app token for gardener-scripts checkout (SuxOS/.github)
+        if: steps.guard.outputs.go == 'true'
+        id: scripts-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: .github
+
       - name: Checkout gardener scripts (SuxOS/.github)
         if: steps.guard.outputs.go == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,7 +130,7 @@ jobs:
           repository: SuxOS/.github
           ref: main
           path: .suxos-ci
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.scripts-token.outputs.token }}
 
       - name: Lint ratchet (fail on baseline regression)
         if: steps.guard.outputs.go == 'true'
