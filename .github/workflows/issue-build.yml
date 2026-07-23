@@ -667,7 +667,7 @@ jobs:
               // gets picked even when its 4pts alone exceed a 2pt budget).
               for (const [tName, tSet] of [["high", high], ["med", med], ["low", low]]) {
                 if (picked.length >= maxIssues) break;
-                const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels) }));
+                const sorted = [...tSet].sort((a, b) => a.number - b.number).map((i) => ({ ...i, pts: pointsFor(i.labels), tierName: tName }));
                 for (const it of sorted) {
                   if (picked.length >= maxIssues) break;
                   if (picked.length === 0) { picked.push(it); points += it.pts; tier = tName; continue; }
@@ -676,6 +676,87 @@ jobs:
                 }
               }
             }
+
+            // Livelock guard, read half (#701): build's 30-minute timeout can cancel a batch
+            // with nothing committed; the cleanup step below releases the `building` claim on
+            // any no-commit run (including a cancellation), so a cancelled batch is fully
+            // unclaimed again by the time this job next runs. Since select is deterministic
+            // over current backlog state, an unchanged backlog reproduces the IDENTICAL batch
+            // — livelock, no memory of the prior failure (SuxOS/.github#701: 28 consecutive
+            // cancelled runs, ~868 runner-minutes, zero PRs, before this was caught and the
+            // workflow disabled by hand; a same-day max-issues/effort-budget shrink did not
+            // fix it, because the new smaller batch was just as deterministically identical
+            // run to run as the old one — the bug was never batch SIZE, it was the complete
+            // absence of cross-run memory).
+            //
+            // build's own cancelled-path step (added alongside this, "Record cancelled-timeout
+            // attempt") upserts a `<!-- issue-build:cancelled-timeout cycle=N -->` marker
+            // comment — same idiom as the drop-escalation ladder a few hundred lines below,
+            // #589 — on the highest-priority (first-picked) issue of whatever batch it was
+            // cancelled with, recording N = the SIZE of that cancelled attempt. Read it back
+            // here, keyed on THIS run's own highest-priority pick (picked[0]): if the top issue
+            // changed since the marker was written (a higher-priority issue arrived, or the old
+            // top issue closed/got excluded), the marker is simply never read — no explicit
+            // cleanup needed, it just goes inert. Otherwise: halve the attempted size each time
+            // the marker shows a repeat at the current top issue, and once even a single-issue
+            // attempt has timed out ALONE, that issue is the actual problem (not a batching
+            // artifact) — hand it to a human instead of burning another 30 minutes proving it
+            // again. Fail-soft like every other GH-read in this job: a comment-fetch failure is
+            // never treated as "no marker" (that would silently un-shrink a genuinely
+            // still-failing batch, the same #602 trap the drop-escalation ladder guards
+            // against) — it just skips the shrink/give-up check for this run.
+            if (picked.length > 0) {
+              const anchor = picked[0].number;
+              const CANCELLED_MARKER = "<!-- issue-build:cancelled-timeout";
+              let markerOk = true;
+              let markerSize = null;
+              let markerCommentId = "";
+              try {
+                const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: anchor, per_page: 100 });
+                const found = [...comments].reverse().find((c) => (c.body || "").startsWith(CANCELLED_MARKER));
+                if (found) {
+                  markerCommentId = String(found.id);
+                  const m = /cycle=(\d+)/.exec(found.body || "");
+                  markerSize = m ? Number(m[1]) : null;
+                }
+              } catch (e) {
+                markerOk = false;
+                core.warning(`livelock-guard: could not fetch comments for issue #${anchor} — skipping shrink/give-up check this run rather than treating the fetch failure as "no marker" (#602): ${e.message}`);
+              }
+
+              if (markerOk && markerSize !== null && markerSize <= 1) {
+                core.warning(`livelock-guard: issue #${anchor} timed out ALONE (batch size 1) on its last cancelled attempt — giving up: applying needs-human instead of re-attempting`);
+                await github.rest.issues.addLabels({ owner, repo, issue_number: anchor, labels: ["needs-human"] }).catch(() => {});
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: anchor,
+                  body: "🤖 This issue was built alone (batch size 1, no other issues sharing the session) and still didn't finish inside the build job's 30-minute timeout — likely oversized scope or a stuck build loop, not a batching problem. Applying `needs-human` so it stops being re-selected and re-timing-out (SuxOS/.github#701). A `docs/design/YYYY-MM-DD-*.md` scoping doc (re-deriving a concrete plan, sizing it into small independently-buildable slices) is a legitimate, gate-passing build for this per this repo's CLAUDE.md, if a human wants to unblock it that way — not a dodge.",
+                }).catch(() => {});
+                if (markerCommentId) {
+                  // Reset so a human clearing needs-human later doesn't walk straight back into
+                  // an instant give-up on the very next pick (the marker would otherwise still
+                  // read size<=1 forever).
+                  await github.rest.issues.updateComment({
+                    owner, repo, comment_id: Number(markerCommentId),
+                    body: `${CANCELLED_MARKER} cycle=0 at=${new Date().toISOString()} -->\nreset — needs-human applied; this marker is inert until a human clears the label and this issue is picked again.`,
+                  }).catch(() => {});
+                }
+                picked.splice(0, 1);
+                points = picked.reduce((sum, i) => sum + i.pts, 0);
+                // tier is deliberately NOT recomputed here (it stays whatever the ORIGINAL,
+                // pre-give-up top issue's tier was) — cosmetic only: it can only make the
+                // model/effort heuristic below very slightly more generous than the actual
+                // (new) top issue strictly requires for this one run, never less capable, and
+                // this exact give-up path is already rare.
+              } else if (markerOk && markerSize !== null && markerSize > 1) {
+                const keep = Math.max(1, Math.floor(markerSize / 2));
+                if (keep < picked.length) {
+                  core.warning(`livelock-guard: issue #${anchor}'s batch was cancelled last attempt at size ${markerSize} — shrinking this attempt to ${keep} issue(s) (was ${picked.length})`);
+                  picked.length = keep;
+                  points = picked.reduce((sum, i) => sum + i.pts, 0);
+                }
+              }
+            }
+
             // sensedOpus flags the whole HIGH tier (security or priority:high) for the older
             // opt-in `model-hint: auto` escalation. The `effort:large` clause is now a VESTIGIAL
             // backstop: as of the 2026-07-21 setpoint (docs/design/2026-07-17-automation-
@@ -1032,6 +1113,55 @@ jobs:
           # ship-and-roll-back trust model (three-loop-pipeline.md) — CI + security-review
           # still gate the merge.
           claude_args: "--max-turns ${{ needs.select.outputs.turns }} --model ${{ needs.select.outputs.model }} --permission-mode bypassPermissions"
+
+      # Livelock guard, write half (#701) — see the matching read half's comment in select's
+      # `pick` step for the full picture. Placed BEFORE "Push and open ONE PR..." (not after,
+      # not folded into it) on purpose: GitHub gives a cancelled job a shared, tight grace
+      # window for its remaining if-always()/if-cancelled() steps to finish, not a fresh budget
+      # per step, so whichever step runs first gets first claim on it. This step is cheap (no
+      # git push, just a couple of `gh api` calls), so putting it first maximizes the odds it
+      # actually lands even when the grace window is too short for everything. Gated on
+      # cancelled() specifically, not always(): an ordinary no-commit failure (handled by the
+      # very next step) already gets a plain release-and-retry, which is correct as-is — only a
+      # genuine timeout should feed the shrink/give-up ladder.
+      - name: Record cancelled-timeout attempt (livelock guard)
+        if: cancelled()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NUMBERS_JSON: ${{ needs.select.outputs.numbers }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          anchor=$(echo "$ISSUE_NUMBERS_JSON" | jq -r '.[0] // empty' 2>/dev/null || true)
+          size=$(echo "$ISSUE_NUMBERS_JSON" | jq -r 'length' 2>/dev/null || echo 0)
+          if [ -z "$anchor" ] || [ "$size" -eq 0 ]; then
+            echo "no batch was claimed this run — nothing to record"
+            exit 0
+          fi
+
+          MARKER='<!-- issue-build:cancelled-timeout'
+          READ_HELPER=".suxos-ci/.github/actions/marker-cycle-read/read-cycle.sh"
+          UPSERT_HELPER=".suxos-ci/.github/actions/marker-cycle-upsert/upsert-cycle.sh"
+          if [ ! -f "$READ_HELPER" ] || [ ! -f "$UPSERT_HELPER" ]; then
+            echo "::warning::shared marker-cycle helper unavailable (checkout failed) — could not record cancelled-timeout attempt on issue #$anchor"
+            exit 0
+          fi
+
+          # Need the existing marker's comment id (to PATCH it) rather than its cycle value —
+          # this step always writes THIS run's own attempted size, it doesn't increment a
+          # persisted counter. Same #602 semantics as the drop-escalation ladder elsewhere in
+          # this file: a fetch failure is never treated as "no marker exists" (comment_id
+          # empty), which would POST a duplicate marker instead of updating the real one.
+          eval "$(bash "$READ_HELPER" "$GITHUB_REPOSITORY" "$anchor" "$MARKER")"
+          if [ "$ok" != "true" ]; then
+            echo "::warning::could not fetch comments for issue #$anchor — skipping livelock-guard marker update this run"
+            exit 0
+          fi
+
+          plural=""
+          if [ "$size" -ne 1 ]; then plural="s"; fi
+          summary_line="🤖 This batch ($size issue$plural) was cancelled by the build job's 30-minute timeout with nothing committed. Recorded so the next selection can shrink this batch, or — once even a single-issue attempt also times out — hand that issue to a human instead of retrying the identical batch forever (SuxOS/.github#701). Run: $RUN_URL"
+          bash "$UPSERT_HELPER" "$GITHUB_REPOSITORY" "$anchor" "$MARKER" "$size" "$comment_id" "$summary_line"
 
       - name: Push and open ONE PR, or release claims on failure
         # always(): this is the only thing that releases the `building` claim on this run's own
@@ -1545,13 +1675,18 @@ jobs:
             // requeue job still counts its run as in_progress, so it's included — we top UP to
             // the cap, we don't add cap-many on top). GitHub has no "runs for workflow X" filter
             // on the REST list that's reliable across reusable callers, so filter by name.
-            const runs = await github.rest.actions.listWorkflowRunsForRepo({
-              owner, repo, per_page: 100, status: "in_progress",
-            }).then((r) => r.data.workflow_runs).catch(() => []);
-            const queued = await github.rest.actions.listWorkflowRunsForRepo({
-              owner, repo, per_page: 100, status: "queued",
-            }).then((r) => r.data.workflow_runs).catch(() => []);
-            const inFlightRuns = [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
+            // Wrapped in a function (#701) so it can be called a second time, right before
+            // dispatch — see the re-check below.
+            const fetchInFlightRuns = async () => {
+              const runs = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo, per_page: 100, status: "in_progress",
+              }).then((r) => r.data.workflow_runs).catch(() => []);
+              const queued = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo, per_page: 100, status: "queued",
+              }).then((r) => r.data.workflow_runs).catch(() => []);
+              return [...runs, ...queued].filter((r) => /issue.?build/i.test(r.name || "")).length;
+            };
+            const inFlightRuns = await fetchInFlightRuns();
             // A completed run's concurrency lives on as its OPEN PR, which keeps racing the same
             // base until merged/closed — counting only in_progress/queued RUNS undercounts the
             // instant a batch's build finishes and opens a PR: requeue then keeps dispatching past
@@ -1569,10 +1704,33 @@ jobs:
             // and never negative. Sized against points, not raw issue count, to match the
             // documented contract on effort-budget/parallel-batches above (#455).
             const wantForWork = Math.max(Math.ceil(unclaimedPoints / effortBudget), Math.ceil(unclaimed / maxIssues));
-            const toDispatch = Math.max(0, Math.min(effectiveCap - inFlight, wantForWork));
+            let toDispatch = Math.max(0, Math.min(effectiveCap - inFlight, wantForWork));
             core.info(`unclaimed=${unclaimed} unclaimedPoints=${unclaimedPoints} inFlight=${inFlight} cap=${cap} effectiveCap=${effectiveCap} wantForWork=${wantForWork} → dispatching ${toDispatch}`);
             if (toDispatch === 0) {
               core.info("cap already saturated (or no headroom) — a running batch's own requeue will top up as it finishes");
+              return;
+            }
+
+            // Re-verify immediately before dispatching (#701): the concurrency group above
+            // (issue-build-requeue-${{ github.repository }}, #526) serializes requeue JOB
+            // EXECUTIONS repo-wide, so two requeue runs can never read inFlight at the same
+            // instant — but it can't guarantee the Actions run-list API has already indexed a
+            // sibling requeue's dispatch by the moment THIS job starts reading it moments
+            // later (observed live: two workflow_dispatch runs of the caller workflow 1 second
+            // apart). A fresh re-read right here, as close to the actual dispatch as this
+            // script gets, shrinks that propagation-lag window to as small as this one extra
+            // API round-trip. If it now shows MORE runs in flight than the first read did,
+            // trust the higher (more conservative) number and shrink toDispatch to match
+            // rather than overshoot parallel-batches on stale data.
+            const inFlightRunsRecheck = await fetchInFlightRuns();
+            const inFlightRecheck = Math.max(inFlightRunsRecheck, openBuilderPrs);
+            if (inFlightRecheck > inFlight) {
+              const adjusted = Math.max(0, Math.min(effectiveCap - inFlightRecheck, wantForWork));
+              core.info(`in-flight re-check found more runs than the first read (${inFlightRunsRecheck} vs ${inFlightRuns}) — reducing dispatch count ${toDispatch} -> ${adjusted}`);
+              toDispatch = adjusted;
+            }
+            if (toDispatch === 0) {
+              core.info("in-flight re-check found the cap already saturated — not dispatching");
               return;
             }
 

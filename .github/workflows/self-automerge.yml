@@ -1,12 +1,9 @@
 name: Self automerge
 
 # Arms auto-merge for suxbot[bot] PRs against THIS repo — see self-fixer.yml.
-# required-checks is overridden: this repo's own gates are actionlint +
-# pin-consistency (self-check.yml / pin-consistency.yml), not the Node
-# build/test/audit trio the reusable defaults to for app repos like sux.
-# The ruleset on main must actually require these same three checks, or
-# automerge.yml's own verification refuses to arm (see README § Required
-# secrets/vars).
+# Org rulesets (SuxOS/.github#669) require only `security-review` fleet-wide —
+# actionlint/pin-consistency are no longer required status checks, so listing
+# them here just makes assert-branch-protection refuse to arm (see PR #700).
 
 on:
   pull_request_target:
@@ -25,7 +22,5 @@ jobs:
     uses: SuxOS/.github/.github/workflows/automerge.yml@main
     with:
       required-gates: |
-        actionlint
-        pin-consistency
         security-review
     secrets: inherit
