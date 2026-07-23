@@ -21,4 +21,14 @@ jobs:
     uses: SuxOS/.github/.github/workflows/issue-build.yml@main
     with:
       model-hint: sonnet # operator directive 2026-07-17: sonnet pinned org-wide, no Opus escalation
+      # 2026-07-22: batch shrunk from the defaults (5 issues / effort 10) — at post-weekly-
+      # ceiling API throughput (overage credits, heavy rate-limit backoff) a full-size batch
+      # of infra issues can't finish inside build's 30-min timeout: five consecutive runs
+      # 20:18Z–21:52Z timed out on the SAME batch (#678/#686/#687/#689/#690), each burning
+      # ~30 min of paid Claude time with all work lost, then requeuing the identical batch
+      # (the requeue loop has no failure-count breaker). Small batches fit the window, so
+      # the backlog drains serially instead of thrashing. Revert to the defaults once the
+      # weekly window resets (Sat 03:00 UTC) or throughput recovers.
+      max-issues: 2
+      effort-budget: 4
     secrets: inherit

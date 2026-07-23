@@ -1,10 +1,10 @@
 name: Self PR drain
 
 # Close-stale + reconcile on THIS repo — see self-fixer.yml for the self-* pattern.
-# required-gates mirrors self-automerge.yml: this repo's own gates are
-# actionlint + pin-consistency + security-review, not the Node build/test/audit
-# trio the reusable defaults to for app repos like sux. Closes the last drain gap
-# from issue #189 (stale bot/needs-human PRs on .github with no backstop).
+# required-gates mirrors self-automerge.yml: org rulesets (SuxOS/.github#669)
+# require only `security-review` fleet-wide, not the Node build/test/audit trio
+# the reusable defaults to for app repos like sux. Closes the last drain gap from
+# issue #189 (stale bot/needs-human PRs on .github with no backstop).
 
 on:
   schedule: [{ cron: "51 9 * * *" }]
@@ -19,7 +19,5 @@ jobs:
     uses: SuxOS/.github/.github/workflows/pr-drain.yml@main
     with:
       required-gates: |
-        actionlint
-        pin-consistency
         security-review
     secrets: inherit

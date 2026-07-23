@@ -23,6 +23,10 @@ rows below are marked **needs human/broader-access pass** rather than guessed at
 | Disabled workflows (this repo) | `gh workflow list --all` — all 30 workflows in `SuxOS/.github` report `active` | swept per issue ask #3 | 2026-09-01 | **Clean**, nothing to re-enable/remove |
 | Disabled workflows (caller repos) | unknown from this session | same sweep, per caller | — | **needs human/broader-access pass** |
 | Throttle pins (`throttle-manual` label) | none open in this repo (`gh issue list --label throttle-manual` empty) | swept per issue ask #3 | 2026-09-01 | **Clean** |
+> **Update 2026-07-23:** all drummer rows below are moot — the mechanism was retired
+> and its tasks deleted (see `2026-07-23-standing-automation.md`); the "needs
+> human/broader-access pass" on drummer cadences is dissolved.
+
 | `hold` labels older than 48h (this repo) | none open (`gh issue list --label hold` empty) | swept per issue ask #3 | 2026-09-01 | **Clean** |
 | `hold` labels older than 48h (caller repos) | unknown from this session | same sweep, per caller | — | **needs human/broader-access pass** |
 | Drummer cadences (`*/30` audit/drive) | self-disarming per issue's own description | issue states these already self-disarm; no config lives in this repo to change | — | **No action** — confirmed self-disarming, not a stale override |
