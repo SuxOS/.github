@@ -273,3 +273,24 @@ and every YAML/jq linter this repo runs (actionlint's embedded shellcheck, `yaml
 passes clean, since the YAML and the jq text are each individually well-formed; only running the
 actual extracted `run:` block (`bash -n`, or a `scripts/test-*.sh` that exercises it) catches it.
 Write jq comments without apostrophes, or re-word to avoid one, rather than trying to escape it.
+
+A new reusable workflow needing a `.suxos-ci` cross-repo checkout of `SuxOS/.github` must copy
+the FULL mint-app-token + token-scoped-checkout pairing from an existing correct example
+(`security-review.yml`, `issue-build.yml`) — not just the bare checkout step. Confirmed live:
+`gardener.yml` (#685, introduced 2026-07-22) added the checkout with no token at all, despite
+the documented fix pattern above already existing and already correctly wired in sibling
+workflows in this same repo (#686). The pattern being documented elsewhere doesn't mean it gets
+copied when a new workflow is authored — grep for an existing `mint-app-token` + `path:
+.suxos-ci` pairing and reuse it verbatim rather than re-deriving the checkout alone.
+
+A job-level `timeout-minutes` shared across sequential fallback attempts (main → retry →
+break-glass) lets the FIRST attempt's own internal retry-wait (e.g. `CLAUDE_CODE_RETRY_WATCHDOG`
+waiting out a rate-limit) consume the entire job budget. GitHub then cancels the whole JOB
+mid-step — not the same as that step failing — so every downstream step's `if:
+steps.X.outputs.y == ''`-style condition never gets evaluated; they're skipped, not triggered.
+Confirmed live on `security-review.yml` (#692): a 20-40+ min rate-limit window ate the shared
+20-minute ceiling, skipping retry/break-glass/classifier entirely and fail-closing on a
+genuinely empty signal (no verdict AND no infra-vs-fail-closed classification possible, since
+the classifier's own checkout never got a turn either). Fix: give each attempt its own
+step-level `timeout-minutes` well under the job ceiling, never rely on a shared budget for a
+multi-attempt fallback chain.
