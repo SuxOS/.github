@@ -173,6 +173,19 @@ on:
           actually has this dependency should pay for (or risk) the extra clone.
         type: boolean
         default: false
+      needs-nix:
+        description: >-
+          This caller's gates are Nix-based (`nix flake check`/`nix build`, not npm) and its
+          flake consumes the private SuxOS/nix repo as a `github:` input. Without this, the
+          build sandbox has no Nix toolchain, no eval/build cache, and — the part that
+          actually matters — no credential to read a private flake input at all, so a builder
+          session's own attempt to verify gates before pushing is guaranteed to fail or hang
+          regardless of how well-scoped its issue is (mirrors metal/.github/workflows/ci.yml's
+          own nix-installer-action + cache-nix-action + Cachix + SuxOS/nix-scoped token).
+          Opt-in and false by default: only a caller with Nix-based gates should pay for the
+          extra install + cache restore.
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -839,6 +852,12 @@ jobs:
     needs: select
     if: needs.select.outputs.count != '' && needs.select.outputs.count != '0'
     runs-on: ubuntu-latest
+    # `secrets` context isn't allowed in a step-level `if:` (actionlint-caught) — compute the
+    # secret-presence check here in `env:` (which does allow it, same as every `secrets.X`
+    # reference already used in `with:` blocks below) and gate on `env.CACHIX_ENABLED` instead.
+    # Same pattern as metal/.github/workflows/ci.yml's own `CACHIX_ENABLED` env var.
+    env:
+      CACHIX_ENABLED: ${{ secrets.CACHIX_AUTH_TOKEN != '' }}
     # 45 -> 90 -> 30 (2026-07-15, same day): 90 was raised defensively alongside the turns cap
     # (300 -> 500) without real data. Actual runs at the 500-turn cap on 17-19 issue batches
     # completed in 6.5-15 minutes (SuxOS/sux run 29430528029, SuxOS/suxrouter run 29430530912)
@@ -856,10 +875,31 @@ jobs:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
 
+      # Checkout the CALLING repo's default branch FIRST, before any other checkout creates
+      # untracked siblings in the workspace — this step has no `path:`, so it targets
+      # $GITHUB_WORKSPACE itself, and actions/checkout's default `clean: true` runs
+      # `git clean -ffdx` across that whole directory before fetching. If a path-scoped
+      # checkout (e.g. `.suxos-ci` below) already existed at that point, this clean silently
+      # deletes it as untracked content — which is exactly what was happening here until
+      # #714: `.suxos-ci` used to be checked out BEFORE this step, so it was wiped
+      # the instant this step ran, and every later step that depended on it (the livelock
+      # guard's marker read/write, see "Record cancelled-timeout attempt" below) silently
+      # no-op'd for the rest of the job with only a `::warning::` to show for it. A
+      # path-scoped checkout (`path: .suxos-ci`) only ever cleans within its own subdirectory,
+      # so once this bare-workspace checkout runs first, every subsequent path-scoped checkout
+      # is safe — order matters here, not just presence.
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
       # Scoped to SuxOS/.github specifically (this job's own app-token above is scoped to
       # whichever repo is being built, not necessarily .github) so the disposition-handling
       # step below can check out the shared marker-cycle-read/upsert helper scripts (#589) —
-      # same pattern as `select`'s spine-token / .suxos-ci checkout above.
+      # same pattern as `select`'s spine-token / .suxos-ci checkout above. MUST run after
+      # "Checkout default branch" above (see that step's comment) or its own checkout gets
+      # silently deleted by the next bare-workspace checkout's implicit `git clean -ffdx`.
       - name: Mint app token for shared-helper checkout (SuxOS/.github)
         id: helper-token
         uses: SuxOS/.github/.github/actions/mint-app-token@main
@@ -877,12 +917,6 @@ jobs:
           path: .suxos-ci
           token: ${{ steps.helper-token.outputs.token }}
 
-      - name: Checkout default branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
       - name: Create build branch
         id: branch
         env:
@@ -893,6 +927,60 @@ jobs:
           set -euo pipefail
           git checkout -B "$BRANCH"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      # Nix toolchain bootstrap for Nix-gated callers (currently only `metal`) — mirrors that
+      # repo's own ci.yml `flake` job exactly (installer + GH-cache-backed store + optional
+      # Cachix + a SuxOS/nix-scoped token), because the Claude step below is told via
+      # `gates-summary` to get `nix flake check`/`nix build` passing before it finishes, and
+      # without this it has no Nix, no eval/build cache, and no credential to read the
+      # private `github:SuxOS/nix` flake input at all — a genuinely un-passable prerequisite,
+      # not a task-complexity problem. Gated on `needs-nix` so every non-Nix caller is
+      # unaffected. Must run after "Checkout default branch" (needs the repo's own
+      # flake.nix/flake.lock on disk to key the cache).
+      - name: Free runner disk (toplevel closure is large)
+        if: inputs.needs-nix
+        run: sudo rm -rf /opt/hostedtoolcache /usr/local/lib/android /usr/share/dotnet
+
+      - name: Install Nix
+        if: inputs.needs-nix
+        uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # main (2026-07-23)
+
+      - name: GH-cache-backed nix store
+        if: inputs.needs-nix
+        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733888ce6a # v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.nix', '**/flake.lock', 'hosts/**', 'modules/**', 'installer/**') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 6G
+          purge: true
+          purge-prefixes: nix-${{ runner.os }}-
+          purge-created: 0
+          purge-primary-key: never
+
+      # Org-wide binary cache reuse beyond GH's 10GB cache — skips cleanly until the
+      # CACHIX_AUTH_TOKEN secret exists (standing org pattern for secret-gated CI, same as
+      # ci.yml's own use of it).
+      - name: Cachix binary cache
+        if: inputs.needs-nix && env.CACHIX_ENABLED == 'true'
+        uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
+        with:
+          name: suxos
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      # SuxOS/nix is a PRIVATE repo consumed as a flake input (github:SuxOS/nix) — Nix's
+      # github: fetcher needs an authenticated token to read it, and the default per-repo
+      # app-token above can't (scoped to the calling repo only). Passed to the Claude step's
+      # own env as NIX_CONFIG below, same as ci.yml's `nix flake check`/`nix build` steps.
+      - name: Mint app token for SuxOS/nix (private flake input)
+        id: nix-token
+        if: inputs.needs-nix
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          owner: SuxOS
+          repositories: nix
+          permission-contents: read
 
       # mint-app-token (above) scopes its token to this calling repo only — despite the
       # suxbot App installation covering every org repo, create-github-app-token defaults to
@@ -978,6 +1066,10 @@ jobs:
           # would kill them mid-build. Raise the floor and the ceiling the model may set.
           BASH_DEFAULT_TIMEOUT_MS: "600000"
           BASH_MAX_TIMEOUT_MS: "1200000"
+          # Nix's github: fetcher needs this to read the private SuxOS/nix flake input (see
+          # "Mint app token for SuxOS/nix" above) — empty string on a non-Nix caller, same as
+          # ci.yml's own `nix flake check`/`nix build` steps.
+          NIX_CONFIG: ${{ inputs.needs-nix && format('access-tokens = github.com={0}', steps.nix-token.outputs.token) || '' }}
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
           show_full_output: true

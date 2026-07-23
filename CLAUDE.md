@@ -294,3 +294,18 @@ genuinely empty signal (no verdict AND no infra-vs-fail-closed classification po
 the classifier's own checkout never got a turn either). Fix: give each attempt its own
 step-level `timeout-minutes` well under the job ceiling, never rely on a shared budget for a
 multi-attempt fallback chain.
+
+When a job checks out MULTIPLE repos into the same `$GITHUB_WORKSPACE` (e.g. the calling repo
+plus this repo's own `.suxos-ci` helper checkout), the checkout with NO `path:` — the one that
+targets the bare workspace root — must run FIRST, before any `path:`-scoped sibling checkout
+exists. `actions/checkout`'s default `clean: true` runs `git clean -ffdx` across its own target
+directory before fetching; a bare-root checkout's clean sweeps the ENTIRE workspace, silently
+deleting any already-checked-out sibling subdirectory as untracked content, even though that
+sibling's own checkout step reported success earlier in the job. A `path:`-scoped checkout only
+ever cleans within its own subdirectory, so once the bare-root checkout runs first, every later
+path-scoped checkout is safe regardless of order among themselves (#714: issue-build.yml's
+`build` job checked out `.suxos-ci` before "Checkout default branch", so the livelock guard's
+marker-cycle helper scripts were wiped before the guard step ever ran, on every single cycle,
+with only a `::warning::...(checkout failed)` to show for it — a message that reads like the
+checkout itself failed, not "a later step deleted what it checked out." 9+ consecutive cancelled
+cycles on `metal` never once wrote the shrink/give-up marker before this was caught).

@@ -251,6 +251,11 @@ Optional (safe to omit; the gated step just no-ops until the secret is set):
   one line + a run link to a push-notification topic when its predicate trips (N
   consecutive collection failures, budget red, or the backlog-zero streak breaking).
   Dormant (no-op, no failure) until both are set. Org-level secrets.
+- `CACHIX_AUTH_TOKEN` — `issue-build.yml`'s Nix toolchain bootstrap (only runs when the
+  caller opts in via `needs-nix: true`, e.g. `metal`): org-wide binary cache reuse beyond
+  GitHub's 10GB Actions cache (cache name `suxos`, mint at app.cachix.org). Skips cleanly
+  until set — the GH-cache-backed nix store step still works without it, just with less
+  cross-run/cross-repo reuse. Same secret `metal/.github/workflows/ci.yml` already uses.
 
 ### Required secrets/vars for `backup-offsite.yml` (this repo only)
 
