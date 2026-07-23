@@ -84,8 +84,8 @@ issues, one builder session over the batch, always ≥1, never waits; PRs auto-m
 green). The separate Opus `triage` stage, the `confidence:*` taxonomy, and the Claude
 `cluster` pass were removed in the
 three-loop rework — see [docs/design/three-loop-pipeline.md](docs/design/three-loop-pipeline.md)
-(current design) and [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md)
-(historical). Caller-stub examples below. Model/effort defaults for both (sonnet pinned
+(current design) and [docs/design/archive/backlog-pipeline.md](docs/design/archive/backlog-pipeline.md)
+(historical, archived). Caller-stub examples below. Model/effort defaults for both (sonnet pinned
 org-wide, no Opus escalation) are single-sourced in
 [`.github/model-policy.json`](.github/model-policy.json), gated by
 `scripts/test-model-policy.sh` so the reusable defaults, caller-stub pins, and
@@ -184,7 +184,7 @@ jobs:
 ### Backlog-pipeline caller stubs
 
 The event triggers live in the caller (a `workflow_call` file can't re-expose
-`issues:` / `schedule:`). See [docs/design/backlog-pipeline.md](docs/design/backlog-pipeline.md).
+`issues:` / `schedule:`). See [docs/design/archive/backlog-pipeline.md](docs/design/archive/backlog-pipeline.md) (historical, archived).
 
 ```yaml
 # fixer-bugs.yml — propose, tightest tier. 3-tier cadence standardized org-wide

@@ -4,9 +4,9 @@ Status: **Phases 0–3 shipped (2026-07-15), verified live 2026-07-16 — Loops 
 working end to end; Loop 3's `claude-autofix.yml` rung confirmed BROKEN org-wide
 (SuxOS/.github#260), the rest of Loop 3 mixed (see §6).**
 Supersedes the eligibility/confidence machinery in
-[`pipeline-eligibility-throughput-rework.md`](pipeline-eligibility-throughput-rework.md)
-and [`backlog-pipeline.md`](backlog-pipeline.md) where they conflict. This is the target
-shape; the migration is phased and reversible (§6).
+[`archive/pipeline-eligibility-throughput-rework.md`](archive/pipeline-eligibility-throughput-rework.md)
+and [`archive/backlog-pipeline.md`](archive/backlog-pipeline.md) (both archived, historical)
+where they conflict. This is the target shape; the migration is phased and reversible (§6).
 
 ---
 

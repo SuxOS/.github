@@ -1,6 +1,6 @@
 # Pipeline rework — eligibility, throughput, bot-immunity, observability (2026-07)
 
-> **Superseded (2026-07-15) by [three-loop-pipeline.md](three-loop-pipeline.md).** That
+> **Superseded (2026-07-15) by [three-loop-pipeline.md](../three-loop-pipeline.md).** That
 > design collapses the confidence tiers, high-blast classifier, and author-trust gates this
 > doc describes into a two-tier model on the correct (PRIVATE, single-operator) threat
 > assumption. This doc still assumes PUBLIC repos in places (e.g. §"Explicitly NOT changed",
