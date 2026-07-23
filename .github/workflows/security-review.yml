@@ -83,7 +83,17 @@ jobs:
     # (fork/public-repo hardening: re-earn at go-public, not before — private today)
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 35 (was 20, #686 follow-up): up to three sequential review attempts (main/retry/
+    # break-glass) can each run, plus the classifier/gate steps after them. At 20 total, a
+    # single attempt's CLAUDE_CODE_RETRY_WATCHDOG waiting out a persistent rate-limit window
+    # (confirmed live: 20-40+ min of continuous "rate_limit" errors) could consume the WHOLE
+    # job budget by itself — GitHub then cancels the entire job mid-step, which skips every
+    # downstream step (retry/break-glass/classifier) since a job-level cancellation isn't the
+    # same as that one step failing, and the unconditional Gate step (by design, #507) then
+    # fails closed with no verdict AND no infra signal to classify against. Each review-attempt
+    # step below now also carries its own timeout-minutes so no single attempt can repeat that
+    # starvation even within this larger ceiling.
+    timeout-minutes: 35
     steps:
       - name: Preflight — need the key
         id: pre
@@ -153,6 +163,12 @@ jobs:
         # step fail visibly in the log but keep going so Gate's existing logic decides the
         # outcome from the (here, empty) verdict, same as any other no-verdict case.
         continue-on-error: true
+        # 12 (#686 follow-up): bounds how long CLAUDE_CODE_RETRY_WATCHDOG may wait out a
+        # rate-limit before this ONE attempt gives up — without it, a persistent rate-limit
+        # window could let this single step consume the entire job's timeout-minutes, cancelling
+        # the whole job (not just this step) and skipping the retry/break-glass/classifier chain
+        # entirely instead of falling through to it. See the job-level timeout-minutes comment.
+        timeout-minutes: 12
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -199,6 +215,8 @@ jobs:
         # never runs when the review was intentionally inert (missing key).
         if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == ''
         continue-on-error: true
+        # See the main attempt's timeout-minutes comment — same starvation risk, same bound.
+        timeout-minutes: 12
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"
@@ -248,6 +266,10 @@ jobs:
         id: claude_apikey
         if: steps.pre.outputs.go == 'true' && steps.claude.outputs.structured_output == '' && steps.claude_retry.outputs.structured_output == '' && steps.pre.outputs.apikey == 'true'
         continue-on-error: true
+        # Shorter than the two subscription attempts above (8 vs 12): this is the last resort
+        # before the classifier/gate steps, which still need their own room in the job's
+        # timeout-minutes ceiling — see the job-level timeout-minutes comment.
+        timeout-minutes: 8
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         env:
           ENABLE_PROMPT_CACHING_1H: "1"

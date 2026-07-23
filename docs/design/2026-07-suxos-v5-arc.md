@@ -242,6 +242,11 @@ re-derives from current HEAD, never cherry-picks the stale branch.
 
 Per production-driver doctrine, three stages, in order:
 
+> **Update 2026-07-23:** the drummer mechanism is retired (see
+> `2026-07-23-standing-automation.md`). Read the two steps below as: arc-doc merge
+> seeds the milestone's pipeline issues (no shepherd loop), and the cut-audit runs as
+> a pipeline workflow gated on milestone-closed — same pattern, no local scheduled task.
+
 1. **Implement — drummer seeds.** On merge of this doc, drummer `v5-implement` decomposes
    §3 into pipeline issues per the epic-decomposition design: reopen folded issues rather
    than duplicating (#1262/#1263/#1261 are filed; #1187's shrink part re-extracts from
