@@ -1,7 +1,7 @@
 # Budget & cadence redesign — targeting 80% of a Claude Max 20x subscription
 
 Date: 2026-07-14. Status: adopted (this PR). Supersedes the model-per-stage table in
-`backlog-pipeline.md` §"Model per stage" (updated in place there) and re-introduces a
+`archive/backlog-pipeline.md` §"Model per stage" (updated in place there) and re-introduces a
 budget control to replace the retired `budget-guard.yml` — smarter this time: tiered,
 measured, and self-adjusting instead of a binary org-wide pause.
 
