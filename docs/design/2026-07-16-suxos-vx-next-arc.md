@@ -41,7 +41,7 @@ this cycle (production: `sux` main auto-deploys; `.github` main is the live pipe
 | # | Divergence (evidence) | Disposition |
 |---|---|---|
 | R1 | Local clones sit on stale **already-merged** branches (`sux`→#640, `suxlib`→#1) — exactly the audit-against-origin/main trap. | **Land** (hygiene): normalize all clones to `main`, prune gone branches. |
-| R2 | Uncommitted `sux` docs sweep renames the vault to `SuxOS/suxvault` — **a repo that does not exist**. Live truth: the vault is `colinxs/obsidian-vault` (pushed today). Docs must not lead reality. | **Park**: preserve the sweep on branch `docs/suxvault-rename-parked` (no PR); decision item below (§8-D1). |
+| R2 | Uncommitted `sux` docs sweep renames the vault to `SuxOS/suxvault` — **a repo that does not exist**. Live truth: the vault is `colinxs/obsidian-vault` (pushed today; now `SuxOS/vault`). Docs must not lead reality. | **Park**: preserve the sweep on branch `docs/suxvault-rename-parked` (no PR); decision item below (§8-D1). |
 | R3 | ~~Commit `0baa168` (edge health → panel 8) stranded on a gone branch~~ — **corrected post-audit**: #268's squash included *both* branch commits; the `edge-smoke-checks` line is live on main's `self-fabric-health.yml`. The audit's evidence grepped the dashboard JSON instead of the caller workflow the commit touches (invariant 4's verify-the-changed-file corollary). | **Already landed** (#268) — verified, no action. |
 | R4 | `sux` main's durable interpreter hardcodes `faithfulUnion` (durable.ts) while `suxlib` main ships `last-write-wins` + `field-merge` — a durable run of a moded op **silently degrades to faithful-union**. The slice-3 spec explicitly left this wiring as sux's follow-on. | **Land**: K1 — wire `runReconcile` dispatch + test. |
 | R5 | **Loop 3's autofix rung is dead org-wide at the caller level.** .github#263 made the reusable `workflow_call`-only (job-chained from the caller's `ci.yml`), but `sux`, `suxrouter`, `suxlib` all still carry the dead `workflow_run` stub and **no** caller chains it — hence the `startup_failure`s (suxlib#7, class .github#51) and a red-rebase loop that structurally never fires. | **Land**: K2 — adopt the documented job-chain in all three callers, delete the stubs. |
@@ -143,10 +143,10 @@ are historical (superseded / parked with re-triggers).
 ## 8. Decisions recorded (parked, human-gated where admin)
 
 - **D1 — vault home.** The `SuxOS/suxvault` rename sweep is parked until the repo
-  transfer actually happens (admin: GitHub transfer of `colinxs/obsidian-vault` +
-  `OBSIDIAN_VAULT_REPO` secret rotation + docs sweep — the parked branch). Until then
-  every doc keeps saying `colinxs/obsidian-vault`, because that is what production uses.
-  Filed `needs-human`.
+  transfer actually happens (admin: GitHub transfer of `colinxs/obsidian-vault`
+  (now `SuxOS/vault`) + `OBSIDIAN_VAULT_REPO` secret rotation + docs sweep — the parked
+  branch). Until then every doc keeps saying `colinxs/obsidian-vault`, because that is
+  what production uses. Filed `needs-human`.
 - **D2 — `sux-fileops` archive.** After K4 de-registration, archiving the repo (making
   "read-only for history" mechanically true) is one click that only the owner should
   take. Filed `needs-human`.
