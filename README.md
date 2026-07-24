@@ -91,6 +91,20 @@ org-wide, no Opus escalation) are single-sourced in
 `scripts/test-model-policy.sh` so the reusable defaults, caller-stub pins, and
 `budget-governor.yml`'s opus/sonnet classification can't silently drift from each other.
 
+`issue-build.yml` carries two independent stop conditions, and it is worth keeping them
+straight. The **livelock guard** (#701) bounds repeats of ONE anchor issue: it shrinks the
+batch after a cancelled attempt and parks an issue that times out alone as `needs-human`.
+The **spend breaker** (#725, `timeout-breaker-threshold` / `timeout-breaker-enabled`) bounds
+spend across the LOOP: after N consecutive `build`-job timeouts in a repo it files one rolling
+tracking issue and skips `select`/`build`/`requeue` entirely until that issue is closed —
+because a parked anchor doesn't stop the hourly cron, it just makes it pay full freight on the
+next one (23 of 25 consecutive `self-issue-build.yml` runs, ~11 hours of discarded compute,
+motivated it). Both key off the same fact that made those runs invisible: GitHub reports a job
+killed by `timeout-minutes` and one killed by `gh run cancel` identically as
+`conclusion: cancelled`. `.github/actions/red-streak` is the shared rule that separates them —
+a timeout-cancel runs to the job's ceiling, a user-cancel stops short of it, and a user-cancel
+is neutral so an operator can never trip the breaker.
+
 **Self-hosted (`self-*.yml`)** — this repo also runs the backlog pipeline on itself:
 `self-fixer.yml` · `self-fixer-30m.yml` · `self-fixer-bugs.yml` · `self-issue-build.yml` ·
 `self-automerge.yml` · `self-security-review.yml` are caller stubs that wire

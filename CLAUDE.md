@@ -295,6 +295,21 @@ the classifier's own checkout never got a turn either). Fix: give each attempt i
 step-level `timeout-minutes` well under the job ceiling, never rely on a shared budget for a
 multi-attempt fallback chain.
 
+GitHub reports a job killed by `timeout-minutes` and a job killed by a human `gh run cancel`
+IDENTICALLY as `conclusion: cancelled` — there is no cancel-actor field on the run or job API to
+tell them apart. That makes a burning loop look benign in `gh run list` (23 of 25
+`self-issue-build.yml` runs read as "someone kept stopping it," #725) and makes it invisible to
+`fabric-health.yml`'s `workflow_red`, which counts only `failure`/`timed_out`. The one signal
+that does differ is DURATION: a timeout-cancel runs the job's full budget, a user-cancel lands
+wherever the operator hit it. `.github/actions/red-streak` is the single place that rule lives —
+reuse it rather than re-deriving a second cancel classifier, and note that a value it depends on
+(`job-timeout-minutes`) has to be written twice because a job-level `timeout-minutes:` cannot read
+`env`/`inputs`, so any such pairing needs a `scripts/test-*.sh` equality assertion or it drifts
+silently. Related trap when adding any breaker that skips work: the no-op runs it creates must be
+NEUTRAL in whatever streak re-arms it, never "recoveries," or the breaker un-trips itself on the
+very next cycle; and a latch cleared by a human needs an acknowledgement floor (only count runs
+after the clear) or it re-trips instantly on the same history.
+
 When a job checks out MULTIPLE repos into the same `$GITHUB_WORKSPACE` (e.g. the calling repo
 plus this repo's own `.suxos-ci` helper checkout), the checkout with NO `path:` — the one that
 targets the bare workspace root — must run FIRST, before any `path:`-scoped sibling checkout

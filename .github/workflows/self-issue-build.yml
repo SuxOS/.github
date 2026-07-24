@@ -29,6 +29,14 @@ jobs:
       # (the requeue loop has no failure-count breaker). Small batches fit the window, so
       # the backlog drains serially instead of thrashing. Revert to the defaults once the
       # weekly window resets (Sat 03:00 UTC) or throughput recovers.
+      #
+      # 2026-07-24 (#725): the shrink did NOT hold. The next 25 runs went 23 cancelled / 2
+      # success — every cancel the `build` job hitting its 30-minute ceiling, ~11 hours of paid
+      # compute with all work discarded — and this workflow was disabled by hand to stop the
+      # burn. So batch size was never the binding control here; the loop had no spend breaker.
+      # It has one now (issue-build.yml's `breaker` job, threshold 3 by default), which is what
+      # makes re-enabling this schedule safe: a repeat of that streak stands the loop down and
+      # files one tracking issue instead of running until someone notices the bill.
       max-issues: 2
       effort-budget: 4
     secrets: inherit
