@@ -230,7 +230,7 @@ jobs:
                confident about (close name/typo match to exactly one existing note — if in
                doubt, skip it). Cap: 20 repairs today, committed as one batch.
             2. Orphan weaving: for notes with no inbound links, add a link to them from the
-               most relevant MOC/index note (start from `_meta/Life-Organization-Index.md`
+               most relevant MOC/index note (start from `Home.md`
                and the per-area MOCs). Never delete an orphan, only add a link to it.
             3. Prune to `.trash/<ISO-date>/` via `git mv` (never hard-delete). A note is a
                prune candidate ONLY if ALL of: signal-rank bottom decile, last modified more
