@@ -44,7 +44,6 @@ on:
         type: string
         default: |
           Type-check & build
-          security-review
           npm audit & SBOM
 
 permissions:
