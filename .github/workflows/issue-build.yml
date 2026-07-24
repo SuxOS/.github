@@ -1310,6 +1310,60 @@ jobs:
           npm install -g typescript-language-server typescript
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
+      # Dual-account failover rung selection (#734). Chain per operator directive
+      # "oauth>api, bot>m": 1=CLAUDE_CODE_OAUTH_TOKEN (claude@), 2=CLAUDE_CODE_OAUTH_TOKEN_M
+      # (m@), 3=ANTHROPIC_API_KEY (claude@), 4=ANTHROPIC_API_KEY_M (m@). A single account's
+      # five-hour exhaustion should flip the drain to the next account instead of stalling.
+      # FAIL-SAFE BY CONSTRUCTION: this only ever escalates when it POSITIVELY finds a lower
+      # rung down (a live five_hour reset still in the future, logged by a recent run that
+      # used that rung) AND a higher rung whose secret is set; any error, empty scan, missing
+      # secret, or uncertainty leaves rung=1 — today's exact single-account behavior. The
+      # chosen rung is echoed as `builder rung=N` so the next run's selector can attribute
+      # this run's outcome to the right account. m@ rungs (2,4) are reached only after the
+      # claude@ rung above them is down, sparing m@'s interactive pool.
+      - name: Select builder auth rung (dual-account failover)
+        id: acct
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HAVE1: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          HAVE2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_M != '' }}
+          HAVE3: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAVE4: ${{ secrets.ANTHROPIC_API_KEY_M != '' }}
+        run: |
+          set +e -o pipefail   # best-effort scan; NEVER abort — a failed scan must fall to rung 1
+          rung=1
+          now=$(date -u +%s)
+          since=$(date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-6H +%Y-%m-%dT%H:%M:%SZ)
+          down=" "
+          ids=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 20 --created ">=$since" \
+                  --json databaseId,conclusion \
+                  --jq '.[] | select(.conclusion=="failure" or .conclusion=="cancelled") | .databaseId')
+          for id in $ids; do
+            log=$(gh run view --repo "$GITHUB_REPOSITORY" "$id" --log 2>/dev/null)
+            [ -n "$log" ] || continue
+            r=$(printf '%s' "$log" | grep -oE 'builder rung=[1-4]' | tail -1 | grep -oE '[1-4]')
+            [ -n "$r" ] || continue
+            reset=$(printf '%s' "$log" | grep '"rateLimitType":"five_hour"' \
+                     | grep -oE '"resetsAt":[0-9]+' | grep -oE '[0-9]+' | sort -rn | head -1)
+            [ -n "$reset" ] || continue
+            [ "${#reset}" -ge 13 ] && reset=$(( reset / 1000 ))
+            # plausibility bound (same as budget-governor): discard a reset >6h out (forged/garbage log text)
+            [ "$reset" -le $(( now + 21600 )) ] || continue
+            if [ "$reset" -gt "$now" ]; then
+              case "$down" in *" $r "*) : ;; *) down="${down}${r} " ;; esac
+            fi
+          done
+          for n in 1 2 3 4; do
+            case "$n" in
+              1) h="$HAVE1" ;; 2) h="$HAVE2" ;; 3) h="$HAVE3" ;; 4) h="$HAVE4" ;;
+            esac
+            [ "$h" = "true" ] || continue
+            case "$down" in *" $n "*) continue ;; esac
+            rung=$n; break
+          done
+          echo "builder rung=$rung (down rungs:${down})"
+          echo "rung=$rung" >> "$GITHUB_OUTPUT"
+
       - name: Claude — plan and build the batch into one PR
         id: claude
         env:
@@ -1341,7 +1395,11 @@ jobs:
         uses: anthropics/claude-code-action@f1bd27ca5b54584506e40e17884d90bdaaa1a9b3 # v1
         with:
           show_full_output: true
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # #734 dual-account failover: rungs 1-2 set the OAuth input, rungs 3-4 the API-key
+          # input; the unused input resolves to '' (= unset). The selector (id: acct) defaults
+          # to rung 1, so with only CLAUDE_CODE_OAUTH_TOKEN set this is identical to before.
+          claude_code_oauth_token: ${{ (steps.acct.outputs.rung == '2' && secrets.CLAUDE_CODE_OAUTH_TOKEN_M) || (steps.acct.outputs.rung == '1' && secrets.CLAUDE_CODE_OAUTH_TOKEN) || '' }}
+          anthropic_api_key: ${{ (steps.acct.outputs.rung == '3' && secrets.ANTHROPIC_API_KEY) || (steps.acct.outputs.rung == '4' && secrets.ANTHROPIC_API_KEY_M) || '' }}
           github_token: ${{ steps.app-token.outputs.token }}
           allowed_bots: suxbot[bot]
           prompt: |
