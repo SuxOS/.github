@@ -140,6 +140,10 @@ jobs:
         run: bash scripts/test-pr-drain-dirty-collision.sh
         shell: bash
 
+      - name: Assert pr-auto-update re-queries a lazily-computed UNKNOWN mergeStateStatus instead of skipping the PR
+        run: bash scripts/test-pr-auto-update-unknown-retry.sh
+        shell: bash
+
       - name: Assert model-policy.json stays in sync with fixer/issue-build defaults, caller-stub pins, and budget-governor's opus classification
         run: bash scripts/test-model-policy.sh
         shell: bash

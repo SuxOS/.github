@@ -68,6 +68,7 @@ jobs:
             open
 
       - name: Update armed BEHIND PRs onto default branch
+        id: update-behind
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
@@ -85,6 +86,51 @@ jobs:
           # rebase any PR (SuxOS/.github#612), same fix as pr-watch.yml.
           default_branch=$(gh api "repos/$GH_REPO" --jq .default_branch 2>/dev/null) || default_branch=""
           default_branch="${default_branch:-main}"
+          # GitHub computes mergeStateStatus LAZILY: the first query for a PR returns
+          # UNKNOWN and merely STARTS the background computation; a later query returns the
+          # real value. Because this sweep is usually the first thing to ask about these PRs
+          # in a given window, it reliably got UNKNOWN — so the BEHIND/BLOCKED filter matched
+          # nothing and the step exited green having updated nothing, on every run. That was
+          # the NORMAL path, not an intermittent blip, and it masked itself by succeeding
+          # (SuxOS/.github#723).
+          # Re-query only the candidates (armed, non-draft, unheld) that are still UNKNOWN,
+          # bounded — computation is typically sub-second, so a couple of passes is plenty.
+          candidates_unknown() {
+            jq -r '.[]
+              | select(.isDraft == false)
+              | select(.autoMergeRequest != null)
+              | select(([.labels[].name] | index("hold")) | not)
+              | select(([.labels[].name] | index("autofix-in-progress")) | not)
+              | select(.mergeStateStatus == "UNKNOWN")
+              | .number' <<<"$PRS_JSON"
+          }
+          for attempt in 1 2 3; do
+            unknown=$(candidates_unknown) || unknown=""
+            if [ -z "$unknown" ]; then
+              break
+            fi
+            echo "mergeStateStatus still UNKNOWN for: $(tr '\n' ' ' <<<"$unknown")(attempt ${attempt}/3, re-querying)"
+            sleep 4
+            while read -r u; do
+              if [ -z "$u" ]; then
+                continue
+              fi
+              live=$(gh pr view "$u" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null) || live=""
+              if [ -z "$live" ] || [ "$live" = "UNKNOWN" ]; then
+                continue
+              fi
+              PRS_JSON=$(jq --argjson n "$u" --arg s "$live" 'map(if .number == $n then .mergeStateStatus = $s else . end)' <<<"$PRS_JSON")
+            done <<<"$unknown"
+          done
+          still_unknown=$(candidates_unknown) || still_unknown=""
+          if [ -n "$still_unknown" ]; then
+            # By number, never silently dropped — an unresolvable PR is a real stall, and the
+            # whole point of #723 is that a green no-op must not be indistinguishable from
+            # "nothing to do".
+            echo "::warning::mergeStateStatus unresolved after retries for PR(s): $(tr '\n' ' ' <<<"$still_unknown")— skipping them this run"
+          fi
+          considered=$(jq -r 'length' <<<"$PRS_JSON")
+          unknown_count=$(printf '%s' "$still_unknown" | grep -c . || true)
           if ! prs=$(jq -r '.[]
               | select(.isDraft == false)
               | select(.autoMergeRequest != null)
@@ -96,7 +142,7 @@ jobs:
             exit 1
           fi
           if [ -z "$prs" ]; then
-            echo "No armed BEHIND/BLOCKED PRs to update."
+            echo "No armed BEHIND/BLOCKED PRs to update (${considered} open PR(s) considered, ${unknown_count} still UNKNOWN after retries)."
             exit 0
           fi
           while IFS=$'\t' read -r n head_ref; do
