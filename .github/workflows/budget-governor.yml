@@ -77,8 +77,24 @@ env:
   # rate-limit scan below still forces `red` the instant the real account pool is actually
   # hit, so raising the total proxy widens headroom without risking a true overrun.
   # Recalibrate against claude.ai's usage page per the design-doc ritual as real usage climbs.
-  OPUS_BUDGET_MIN: "900"
-  TOTAL_BUDGET_MIN: "12000"
+  #
+  # 2026-07-24 (operator directive: "we don't actually want to rate limit except for dumb
+  # high spikes — smooth average throughput over the month; development is spiky; may add
+  # cash / a second account, so the PROXY must not be what stops the drain"). The
+  # runner-minute proxy is hereby demoted from a preemptive throttle to a RUNAWAY-ONLY
+  # BACKSTOP: TOTAL 12000 -> 48000, OPUS 900 -> 3600 (both 4x). Draining the whole current
+  # ~130-issue backlog costs only ~a few thousand runner-min, and steady-state cron overhead
+  # sits ~7300/wk, so 48000 stays green through any legitimate spiky-dev burst and only trips
+  # on a pathological runaway (a wedged loop pegging ~5 runners 24/7 for a week). The token
+  # bucket's continuous refill already does the month-averaging; capacity this large just
+  # widens the burst it absorbs. The REAL ceiling is unchanged: the live five-hour rate-limit
+  # scan below still forces `red` on a genuine account exhaustion and self-heals at the
+  # account's own resetsAt — the one brake kept deliberately, because hammering a truly
+  # exhausted pool only manufactures failed runs (wasted work). Dual-account token failover
+  # (claude@ + m@) is the complementary fix for that reactive stop — see the reusable
+  # claude-invoking workflows.
+  OPUS_BUDGET_MIN: "3600"
+  TOTAL_BUDGET_MIN: "48000"
   # Fraction of a budget at which the throttle goes yellow.
   YELLOW_FRACTION: "0.75"
   LOOKBACK_DAYS: "7"
