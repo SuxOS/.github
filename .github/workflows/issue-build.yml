@@ -186,6 +186,26 @@ on:
           extra install + cache restore.
         type: boolean
         default: false
+      timeout-breaker-threshold:
+        description: >-
+          Spend breaker (#725): how many CONSECUTIVE `build`-job timeouts in this repo stand
+          the whole loop down. The #701 livelock guard bounds repeated attempts on ONE anchor
+          issue (shrink, then park it `needs-human`); it does NOT bound spend across the loop,
+          so the hourly cron keeps paying full freight on a fresh anchor. 3 is a deliberate
+          floor, not a tuning knob: a `build` timeout costs the FULL 30-minute job budget with
+          every byte of work discarded, so three of them is already ~90 minutes of paid
+          compute for nothing (23 of 25 consecutive runs in this repo, ~11 hours, is what
+          motivated the breaker).
+        type: number
+        default: 3
+      timeout-breaker-enabled:
+        description: >-
+          Set false to disable the spend breaker for this caller — the loop then keeps
+          building through a timeout streak exactly as it did before #725. Only sensible for a
+          repo deliberately being watched by hand; the breaker is fail-open already (a
+          degraded run-history read never trips it).
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -193,6 +213,12 @@ permissions:
   issues: write
   actions: read
   id-token: write
+
+env:
+  # ONE exact title, shared by the breaker's latch READ and its trip WRITE — upsert-tracking-
+  # issue finds its rolling issue by exact title match, so a divergence between the two would
+  # silently file a second issue every cycle instead of latching on the first.
+  BREAKER_TITLE: "Issue-build spend breaker: build job timing out repeatedly"
 
 # NO top-level concurrency: the whole run must NOT serialize, or parallel batches can't run.
 # Only `select` (the claim step) is serialized — see its job-level concurrency below — so two
@@ -202,7 +228,237 @@ permissions:
 # `parallel-batches` concurrent runs against the remaining backlog.
 
 jobs:
+  # SPEND BREAKER (#725) — the loop-level counterpart to the #701 livelock guard.
+  #
+  # #701 bounds repeated attempts on ONE anchor issue: shrink the batch, then park the issue
+  # `needs-human`. It works, and it is not this. What it cannot see is SPEND ACROSS THE LOOP:
+  # once an anchor is parked, the hourly cron simply picks a fresh anchor and pays full freight
+  # again. Live evidence in this repo: 25 consecutive `self-issue-build.yml` runs, 23 of them
+  # the `build` job hitting its 30-minute ceiling with nothing committed — ~11 hours of paid
+  # Claude compute, all work discarded — while `max-issues: 2 / effort-budget: 4` (already
+  # shrunk on 2026-07-22 for exactly this) kept timing out anyway. Shrinking the batch further
+  # was not the missing control; a breaker was.
+  #
+  # WHY THE RUNS LOOKED BENIGN: GitHub reports a job killed by `timeout-minutes` as
+  # `conclusion: cancelled`, exactly like a human `gh run cancel`. A run list of 23 cancelled
+  # runs reads as "someone kept stopping it," and fabric-health's own `workflow_red` collector
+  # counts only `failure`/`timed_out`, so it never saw them either. The `red-streak` action
+  # separates the two by the one signal that actually differs — a timeout-cancel lands AT the
+  # job's ceiling, a user-cancel lands short of it — and treats a user-cancel as NEUTRAL, so an
+  # operator stopping a run can never trip this. Same discrimination problem the #701 write half
+  # (`Record cancelled-timeout attempt`) faces from inside the job; one shared rule, not two.
+  #
+  # LATCH + FLOOR: the trip writes ONE tracking issue and every later cycle stands down while
+  # that issue is open (a plain streak recount would not hold, because the stood-down runs it
+  # creates are neutral, not recoveries — and are therefore also not resets). Closing that issue
+  # is the reset, and it works because the streak walk only counts runs created AFTER the most
+  # recent close: without that floor, clearing the latch would re-trip on the same old history
+  # forever. Both edges are loud — a trip is an `::error::` plus a new issue, a stood-down cycle
+  # is a `::warning::`, and every cycle writes its state to the job summary.
+  breaker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    outputs:
+      tripped: ${{ steps.state.outputs.tripped }}
+      streak: ${{ steps.streak.outputs.streak }}
+    steps:
+      # Same inert-without-the-token preflight select/requeue already carry: with no builder
+      # token nothing spends anything, so there is nothing for a spend breaker to guard.
+      - name: Preflight — need the token
+        id: pre
+        run: |
+          if [ "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}" != "true" ]; then
+            echo "CLAUDE_CODE_OAUTH_TOKEN not set → issue-build inert"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Mint app token
+        if: steps.pre.outputs.go == 'true'
+        id: app-token
+        uses: SuxOS/.github/.github/actions/mint-app-token@main
+        with:
+          app-id: ${{ secrets.SUX_BOT_APP_ID }}
+          private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+
+      # The caller stub's own file — a reusable workflow has no run history of its own, so the
+      # streak has to be walked over whatever stub invoked us (self-issue-build.yml here,
+      # issue-build.yml in every other caller repo). Same `github.workflow_ref` source `requeue`
+      # already uses to re-dispatch itself.
+      - name: Resolve the caller's workflow file and the breaker latch
+        id: latch
+        if: steps.pre.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -uo pipefail
+          ref_path=${WORKFLOW_REF%%@*}
+          workflow_file=${ref_path##*/}
+          echo "caller workflow file: $workflow_file"
+
+          # Fail OPEN, loudly: a failed lookup must not silently stand a repo down, and must
+          # not silently re-arm one either — so say so and let this cycle proceed unbroken.
+          degrade() {
+            echo "::warning::breaker: $1 — proceeding unbroken this cycle (no latch asserted)"
+            {
+              echo "workflow=$workflow_file"
+              echo "latched=false"
+              echo "since="
+              echo "lookup_ok=false"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # Exhaustive by construction (CLAUDE.md): the raw issues endpoint with --paginate
+          # --slurp rather than a bounded listing, whose cap could silently hide an open latch
+          # behind a busy backlog and quietly re-arm a repo that is meant to be stood down.
+          # `--slurp` always wraps pages as an array-of-arrays, so flatten with `(add // [])`;
+          # the raw endpoint also returns PRs, so drop those.
+          issues=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=all&per_page=100&sort=created&direction=desc" \
+                     --paginate --slurp 2>/dev/null) || issues=""
+          [ -n "$issues" ] || degrade "could not read this repo's issues"
+
+          match=$(printf '%s' "$issues" | jq -c --arg t "$BREAKER_TITLE" \
+            '(add // []) | [ .[] | select(.pull_request == null) | select(.title == $t) ]
+             | { open: ([ .[] | select(.state == "open") ] | first),
+                 last_closed: ([ .[] | select(.state == "closed") | .closed_at | select(. != null) ] | sort | last) }' \
+            2>/dev/null) || match=""
+          [ -n "$match" ] || degrade "could not parse the issue list"
+
+          open_number=$(printf '%s' "$match" | jq -r '.open.number // empty')
+          # The acknowledgement floor: only runs created after the breaker was last cleared
+          # count. Without it, closing the tracking issue would re-arm the loop straight into
+          # the same historical streak and re-trip on the next cycle, forever.
+          since=$(printf '%s' "$match" | jq -r '.last_closed // empty')
+          latched=false
+          if [ -n "$open_number" ]; then latched=true; fi
+          {
+            echo "workflow=$workflow_file"
+            echo "latched=$latched"
+            echo "since=$since"
+            echo "number=$open_number"
+            echo "lookup_ok=true"
+          } >>"$GITHUB_OUTPUT"
+          echo "latched=$latched open=#${open_number:-none} acknowledgement_floor=${since:-none}"
+
+      - name: Count consecutive build timeouts (a user cancel is neutral)
+        id: streak
+        if: steps.pre.outputs.go == 'true' && inputs.timeout-breaker-enabled && steps.latch.outputs.latched != 'true'
+        uses: SuxOS/.github/.github/actions/red-streak@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          workflow: ${{ steps.latch.outputs.workflow }}
+          job-name: build
+          # MUST equal the `build` job's own `timeout-minutes` below — that equality is what
+          # makes "cancelled at the ceiling" mean "timed out". scripts/test-issue-build-
+          # timeout-breaker.sh asserts the two stay in sync, since `env`/`inputs` are not
+          # allowed in a job-level `timeout-minutes:` and the value therefore has to be
+          # written twice.
+          job-timeout-minutes: "30"
+          threshold: ${{ inputs.timeout-breaker-threshold }}
+          since: ${{ steps.latch.outputs.since }}
+
+      - name: Trip the breaker — file/refresh the one tracking issue
+        if: steps.streak.outputs.tripped == 'true'
+        uses: SuxOS/.github/.github/actions/upsert-tracking-issue@main
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          title: ${{ env.BREAKER_TITLE }}
+          mode: open
+          update-mode: replace
+          labels: "tracking,needs-human"
+          body: |
+            🔴 **issue-build is stood down in this repo.** The `build` job hit its
+            `timeout-minutes` ceiling on
+            ${{ steps.streak.outputs.streak }} consecutive runs of
+            `${{ steps.latch.outputs.workflow }}`, each one burning the full job budget with
+            every byte of work discarded. Continuing hourly would just keep paying for that,
+            so `select`/`build`/`requeue` are skipped while this issue is open.
+
+            A job killed by `timeout-minutes` and a job killed by `gh run cancel` are both
+            reported by GitHub as `conclusion: cancelled`; only the runs below were classified
+            as timeouts (cancelled at the ceiling). An operator cancelling a run is treated as
+            neutral and never counts toward this.
+
+            **Runs counted (newest first):**
+
+            ${{ steps.streak.outputs.evidence }}
+
+            ---
+
+            **To resume: close this issue.** The next cycle re-arms automatically and only
+            counts runs created after this issue was closed, so the history above cannot
+            re-trip it. Before you do, it is worth knowing why the batch does not fit — the
+            usual causes are a caller config that is still too large for the window, a
+            degraded API-throughput window, or a genuinely oversized anchor issue (which the
+            #701 livelock guard parks separately as `needs-human`).
+
+            *Filed by `issue-build.yml`'s spend breaker (SuxOS/.github#725). One issue, rolling
+            — it is refreshed rather than duplicated.*
+
+      - name: Decide, and make the state loud either way
+        id: state
+        if: always()
+        env:
+          ENABLED: ${{ inputs.timeout-breaker-enabled }}
+          PRE_GO: ${{ steps.pre.outputs.go }}
+          LATCHED: ${{ steps.latch.outputs.latched }}
+          LATCH_NUMBER: ${{ steps.latch.outputs.number }}
+          LOOKUP_OK: ${{ steps.latch.outputs.lookup_ok }}
+          STREAK: ${{ steps.streak.outputs.streak }}
+          STREAK_OK: ${{ steps.streak.outputs.ok }}
+          TRIPPED_NOW: ${{ steps.streak.outputs.tripped }}
+          THRESHOLD: ${{ inputs.timeout-breaker-threshold }}
+          SINCE: ${{ steps.latch.outputs.since }}
+          WORKFLOW: ${{ steps.latch.outputs.workflow }}
+        run: |
+          set -uo pipefail
+          tripped=false
+          if [ "$PRE_GO" != "true" ]; then
+            state="inert — no CLAUDE_CODE_OAUTH_TOKEN, so nothing spends anything to guard"
+          elif [ "$ENABLED" != "true" ]; then
+            state="disabled — timeout-breaker-enabled=false for this caller"
+          elif [ "$LATCHED" = "true" ]; then
+            tripped=true
+            state="STOOD DOWN — breaker tracking issue #${LATCH_NUMBER:-?} is open"
+            echo "::warning::issue-build spend breaker is tripped in $GITHUB_REPOSITORY — skipping this cycle. Close issue #${LATCH_NUMBER:-?} to resume."
+          elif [ "$TRIPPED_NOW" = "true" ]; then
+            tripped=true
+            state="TRIPPING NOW — ${STREAK} consecutive build timeouts on $WORKFLOW"
+            echo "::error::issue-build spend breaker TRIPPED in $GITHUB_REPOSITORY after ${STREAK} consecutive build-job timeouts on $WORKFLOW — the loop is stood down until the tracking issue is closed."
+          elif [ "$STREAK_OK" = "0" ] || [ "$LOOKUP_OK" = "false" ]; then
+            state="armed, but this cycle's read was DEGRADED — no streak asserted (fail-open)"
+            echo "::warning::issue-build spend breaker could not fully read its inputs this cycle — proceeding unbroken rather than standing the loop down on a bad query."
+          else
+            state="armed — ${STREAK:-0}/${THRESHOLD} consecutive build timeouts"
+          fi
+          echo "tripped=$tripped" >>"$GITHUB_OUTPUT"
+          echo "$state"
+          {
+            echo "### issue-build: spend breaker"
+            echo ""
+            echo "| state | streak | threshold | counting runs after | tracking issue |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| $state | ${STREAK:-0} | $THRESHOLD | ${SINCE:-(all history)} | ${LATCH_NUMBER:+#}${LATCH_NUMBER:-none} |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
   select:
+    needs: breaker
+    # A tripped breaker stands the WHOLE loop down, not just this job: `build` is skipped
+    # transitively (its `needs: select` never resolves), and `requeue` — which is `always()`
+    # and re-derives backlog on its own rather than from select's outputs — carries the same
+    # gate on its fan-out step, or it would happily dispatch fresh batches past a stood-down
+    # repo.
+    #
+    # `!cancelled()` rather than a bare condition: without a status function GitHub keeps the
+    # implicit `success()` on `needs`, so a breaker job that failed outright (a token-mint
+    # blip, say) would silently halt every caller's backlog drain. The breaker is fail-open by
+    # design — every one of its own steps degrades to "proceed unbroken" — and that has to hold
+    # for the job as a whole too. Only a POSITIVE `tripped=true` stands the loop down.
+    if: ${{ !cancelled() && needs.breaker.outputs.tripped != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -866,6 +1122,13 @@ jobs:
     # unverified guess. The build prompt (step 1, PLAN) now tells the model its actual budget
     # and to trim scope proactively rather than risk the timeout — losing whatever isn't yet
     # committed+pushed is still possible, just meant to be rare, not routine.
+    #
+    # This number is ALSO the breaker's definition of a timeout-cancel (`job-timeout-minutes`
+    # in the `breaker` job above): a job cancelled at this ceiling is a timeout, one cancelled
+    # short of it is a human `gh run cancel`. GitHub reports both as `conclusion: cancelled`, so
+    # the two values have to agree or the breaker starts counting operator cancels. A job-level
+    # `timeout-minutes:` cannot read `env`/`inputs`, so the literal is necessarily written
+    # twice; scripts/test-issue-build-timeout-breaker.sh asserts they stay equal.
     timeout-minutes: 30
     steps:
       - name: Mint app token
@@ -1534,7 +1797,11 @@ jobs:
   # remains; the schedule trigger is the wake-up call once new work arrives or the governor
   # clears. The governor (red) is the runaway backstop; the cap bounds concurrency+spend.
   requeue:
-    needs: [select, build]
+    # `breaker` is a hard dependency, not just an ordering hint: requeue re-derives the backlog
+    # itself rather than reading select's outputs, so with `always()` it would keep dispatching
+    # fresh batches into a repo the breaker just stood down — the one path that could defeat the
+    # whole thing. Its fan-out step below carries the gate.
+    needs: [breaker, select, build]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1597,8 +1864,10 @@ jobs:
       # A plain GITHUB_TOKEN cannot dispatch new workflow runs — GitHub blocks that
       # specifically to prevent runaway self-triggering loops — hence the app token above,
       # same as select/build already use to mutate issues/PRs across a run boundary.
+      # The spend breaker (#725) gates this the same way the autonomy throttle does: dispatching
+      # more batches is exactly the spend a tripped breaker exists to stop.
       - name: Fan out up to parallel-batches while unclaimed backlog remains
-        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
+        if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true' && needs.breaker.outputs.tripped != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           WORKFLOW_REF: ${{ github.workflow_ref }}

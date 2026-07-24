@@ -1,0 +1,250 @@
+name: Red streak
+description: >-
+  Count a workflow's CONSECUTIVE bad runs (newest-first) over its own run
+  history, attributing each run to ONE named job so a spend breaker can key off
+  "the build job timed out N times in a row" rather than off a run conclusion.
+  The load-bearing distinction (SuxOS/.github#725, #718): GitHub reports a job
+  killed by `timeout-minutes` and a job killed by a human `gh run cancel`
+  IDENTICALLY as `conclusion: cancelled`, so a naive streak over run
+  conclusions can be tripped by an operator cancelling a run. This action
+  separates them by the only signal that actually differs — a timeout-cancel
+  lands AT the job's configured ceiling, a user-cancel lands somewhere short of
+  it — and treats a user-cancel as NEUTRAL (neither red nor a reset).
+  Stateless by construction: the streak is re-derived from run history on every
+  call, so there is no persisted counter to drift or to forget to reset.
+
+inputs:
+  repo:
+    description: '"owner/name" whose run history is walked. Defaults to the calling workflow''s own repo.'
+    required: false
+    default: ${{ github.repository }}
+  workflow:
+    description: >-
+      Workflow FILE BASENAME to walk (e.g. `self-issue-build.yml`). This is the
+      caller stub's own file, not the reusable it calls — a reusable workflow
+      has no run history of its own.
+    required: true
+  job-name:
+    description: >-
+      Name of the job inside each run whose outcome the streak is about. Matched
+      exactly, or as the `<caller job> / <name>` form GitHub gives a reusable
+      workflow's jobs. A run with no such job (or a skipped one) is NEUTRAL — it
+      neither extends nor resets the streak, which is what keeps a run the
+      breaker itself stood down from reading as a recovery.
+    required: false
+    default: build
+  job-timeout-minutes:
+    description: >-
+      The named job's configured `timeout-minutes`. Used only to classify a
+      cancelled job: cancelled AND ran for at least
+      (job-timeout-minutes - margin-minutes) is a timeout-cancel; anything
+      shorter is a user-cancel. Keep this in sync with the real job — there is a
+      self-check invariant asserting exactly that for issue-build.
+    required: true
+  margin-minutes:
+    description: Slack subtracted from job-timeout-minutes when classifying a cancelled job.
+    required: false
+    default: "2"
+  red-conclusions:
+    description: >-
+      Comma-list of classified job outcomes that count as red. Recognised
+      tokens: `timed_out` (GitHub's own conclusion), `timeout_cancelled` (the
+      cancelled-at-the-ceiling case this action exists to name), `failure`.
+      The spend-breaker default is timeouts only — an ordinary `failure` is
+      cheap, already visible, and already handled by the retry path.
+    required: false
+    default: "timed_out,timeout_cancelled"
+  threshold:
+    description: Consecutive reds at which `tripped` flips true. The walk stops early once reached.
+    required: false
+    default: "3"
+  since:
+    description: >-
+      Optional ISO8601 timestamp. Runs created at or before it are not walked —
+      the walk stops there, since rows are newest-first. This is what makes a
+      breaker resettable: history that has already been acknowledged (e.g. the
+      moment an operator closed the breaker's tracking issue) must not keep
+      re-tripping it forever, and clearing a latch with no floor would do
+      exactly that.
+    required: false
+    default: ""
+  scan-limit:
+    description: >-
+      How many recent runs of the workflow to walk. A bounded window is the
+      correct semantics here (the streak is newest-first and stops at the first
+      reset), not the client-side-filtered undercount class gh-list-exhaustive
+      guards against.
+    required: false
+    default: "12"
+  github-token:
+    description: "Token with `actions: read` on `repo`."
+    required: true
+
+outputs:
+  streak:
+    description: Consecutive red runs counted newest-first (capped at threshold — the walk stops there).
+    value: ${{ steps.streak.outputs.streak }}
+  tripped:
+    description: "true when streak >= threshold AND ok == 1. Never true on a degraded read."
+    value: ${{ steps.streak.outputs.tripped }}
+  ok:
+    description: >-
+      Collection integrity (this repo's #305 contract): 1 when every query the
+      walk needed succeeded, 0 when any did not. A caller must not read
+      `tripped=false` as healthy while `ok=0` — that is the
+      fail-silent-to-a-healthy-zero shape the contract exists to prevent.
+    value: ${{ steps.streak.outputs.ok }}
+  evidence:
+    description: Markdown bullet list of the runs the streak was counted over (newest-first).
+    value: ${{ steps.streak.outputs.evidence }}
+
+runs:
+  using: composite
+  steps:
+    - name: Walk run history
+      id: streak
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        WORKFLOW: ${{ inputs.workflow }}
+        JOB_NAME: ${{ inputs.job-name }}
+        JOB_TIMEOUT_MINUTES: ${{ inputs.job-timeout-minutes }}
+        MARGIN_MINUTES: ${{ inputs.margin-minutes }}
+        RED_CONCLUSIONS: ${{ inputs.red-conclusions }}
+        THRESHOLD: ${{ inputs.threshold }}
+        SCAN_LIMIT: ${{ inputs.scan-limit }}
+        SINCE: ${{ inputs.since }}
+      run: |
+        set -uo pipefail
+
+        ok=1
+        streak=0
+        evidence=""
+        threshold=$(( THRESHOLD + 0 ))
+        if [ "$threshold" -lt 1 ]; then threshold=1; fi
+
+        # Cancelled-at-the-ceiling floor. A job killed by `timeout-minutes` runs its full
+        # budget (observed: a 30-minute build job cancelled at 30m19s, run 30061399900);
+        # a human `gh run cancel` lands wherever the operator happened to hit it. At or
+        # past (ceiling - margin) is therefore a timeout; anything shorter is a user-cancel
+        # and is deliberately NEUTRAL rather than red.
+        floor_s=$(( (JOB_TIMEOUT_MINUTES - MARGIN_MINUTES) * 60 ))
+        if [ "$floor_s" -lt 60 ]; then floor_s=60; fi
+
+        is_red() {
+          case ",$RED_CONCLUSIONS," in
+            *",$1,"*) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+
+        emit() {
+          {
+            echo "streak=$streak"
+            echo "ok=$ok"
+            if [ "$ok" -eq 1 ] && [ "$streak" -ge "$threshold" ]; then
+              echo "tripped=true"
+            else
+              echo "tripped=false"
+            fi
+            echo "evidence<<RED_STREAK_EOF"
+            printf '%s\n' "$evidence"
+            echo "RED_STREAK_EOF"
+          } >>"$GITHUB_OUTPUT"
+        }
+
+        # Bounded on purpose (see scan-limit): the walk is newest-first and stops at the
+        # first reset or at the threshold, so a deeper page cannot change the answer.
+        runs=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --limit "$SCAN_LIMIT" \
+                 --json databaseId,conclusion,status,url,createdAt 2>/dev/null) || runs=""
+        if [ -z "$runs" ] || ! printf '%s' "$runs" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          echo "::warning::red-streak: could not read run history for $WORKFLOW in $REPO — reporting ok=0 and asserting no streak (a failed query must never read as a healthy zero)"
+          ok=0
+          emit
+          exit 0
+        fi
+
+        rows=$(printf '%s' "$runs" | jq -r '.[] | [(.databaseId|tostring), (.status // ""), (.createdAt // ""), (.url // "")] | @tsv') || rows=""
+
+        # The possibly-empty `conclusion` field is deliberately NOT read here: tab is IFS
+        # whitespace, so consecutive tabs collapse and an empty middle field would silently
+        # shift every later column. Classification is job-level anyway.
+        while IFS=$'\t' read -r run_id run_status run_created run_url; do
+          if [ -z "${run_id:-}" ]; then continue; fi
+          # Rows are newest-first, so the first run at or before the acknowledgement floor
+          # ends the walk — everything older is already accounted for.
+          # Both sides are GitHub's own `...Z` ISO8601, so a lexicographic compare is a
+          # chronological compare — no date parsing (and no GNU-vs-BSD `date` trap) needed.
+          if [ -n "$SINCE" ] && [ -n "$run_created" ] && [[ ! "$run_created" > "$SINCE" ]]; then
+            echo "red-streak: reached the acknowledgement floor ($SINCE) — stopping the walk"
+            break
+          fi
+          # An in-flight run has no outcome yet (the newest row is usually this very run) —
+          # skip rather than guess.
+          if [ "$run_status" != "completed" ]; then continue; fi
+
+          jobs=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null) || jobs=""
+          if [ -z "$jobs" ]; then
+            echo "::warning::red-streak: could not read jobs for run $run_url — reporting ok=0 and stopping the walk here"
+            ok=0
+            break
+          fi
+
+          job=$(printf '%s' "$jobs" | jq -c --arg n "$JOB_NAME" \
+            '[.jobs[]? | select(.name == $n or (.name | endswith(" / " + $n)))] | first // empty') || job=""
+          # No such job in this run at all: it never reached the stage the streak is about
+          # (breaker stood it down, nothing to build, a preflight bailed). Neutral.
+          if [ -z "$job" ]; then continue; fi
+
+          job_concl=$(printf '%s' "$job" | jq -r '.conclusion // ""')
+          # jq's fromdateiso8601 rather than `date -d`: GNU-only date flags are a standing
+          # portability trap for logic that also has to run under a local test harness.
+          dur=$(printf '%s' "$job" | jq -r \
+            'if (.started_at != null and .completed_at != null)
+               then ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601))
+               else -1 end') || dur=-1
+
+          classified=""
+          case "$job_concl" in
+            success)
+              # A real run of the job succeeded — the streak is over, full stop.
+              evidence="${evidence}- ${run_url}: \`${JOB_NAME}\` succeeded — streak reset here"$'\n'
+              break
+              ;;
+            skipped|"")
+              continue
+              ;;
+            timed_out)
+              classified="timed_out"
+              ;;
+            failure)
+              classified="failure"
+              ;;
+            cancelled)
+              if [ "$dur" -ge "$floor_s" ]; then
+                classified="timeout_cancelled"
+              else
+                # User cancel (or a cancel landing well short of the ceiling). NOT red — an
+                # operator stopping a run must never trip a spend breaker — and not a reset
+                # either, since nothing was proven to work.
+                evidence="${evidence}- ${run_url}: \`${JOB_NAME}\` cancelled after ${dur}s, short of the ${floor_s}s ceiling — read as a user-cancel, neutral"$'\n'
+                continue
+              fi
+              ;;
+            *)
+              continue
+              ;;
+          esac
+
+          if is_red "$classified"; then
+            streak=$(( streak + 1 ))
+            evidence="${evidence}- ${run_url}: \`${JOB_NAME}\` ${classified} after ${dur}s"$'\n'
+            if [ "$streak" -ge "$threshold" ]; then break; fi
+          else
+            evidence="${evidence}- ${run_url}: \`${JOB_NAME}\` ${classified} — not in the red set, neutral"$'\n'
+          fi
+        done <<<"$rows"
+
+        echo "red-streak: workflow=$WORKFLOW job=$JOB_NAME streak=$streak threshold=$threshold ok=$ok"
+        emit

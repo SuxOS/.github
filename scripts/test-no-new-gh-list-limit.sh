@@ -54,6 +54,10 @@ ALLOWLIST=(
   ".github/workflows/fixer.yml::gh issue list --repo \"\$GITHUB_REPOSITORY\" --state open --limit 300"
   ".github/workflows/pr-auto-update.yml::A bounded \`gh pr list --limit N\`"
   ".github/actions/upsert-tracking-issue/action.yml::gh issue list --repo \"\$REPO\" --state open --limit \"\$limit\""
+  # Spend breaker (#725): a newest-first streak walk that stops at the first reset or at the
+  # threshold. A deeper page cannot change the answer, so exhaustive listing buys nothing —
+  # this is a genuinely bounded window, not the client-side-filtered undercount class.
+  ".github/actions/red-streak/action.yml::gh run list --repo \"\$REPO\" --workflow \"\$WORKFLOW\" --limit \"\$SCAN_LIMIT\""
   ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/.github\" --state open"
   # Epic reconciler (#471): per-repo, per-epic-label query. Bounded by construction — an
   # epic's repo set is a small, manually-curated `epic.repos` array a fixer proposal
