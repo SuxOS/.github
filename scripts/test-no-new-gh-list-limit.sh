@@ -67,6 +67,10 @@ ALLOWLIST=(
   # action, and this call sits inside a bash loop over runtime-discovered epic ids/repos,
   # which a `uses:` step structurally can't be invoked from (CLAUDE.md).
   ".github/workflows/fabric-health.yml::gh issue list --repo \"\${ORG}/\${repo}\" --label \"epic:\${id}\" --state all --limit 200"
+  # Dual-account failover rung selector (#734): a bounded recent-window scan (last 20 runs /
+  # 6h) for per-account five_hour rate-limit markers — same bounded rate-limit-scan class as
+  # budget-governor's --limit 50 above, deliberately NOT exhaustive, so not the undercount class.
+  ".github/workflows/issue-build.yml::gh run list --repo \"\$GITHUB_REPOSITORY\" --limit 20 --created"
 )
 
 is_allowlisted() {
