@@ -30,6 +30,10 @@ ALLOWLIST=(
   ".github/workflows/pr-drain.yml::gh pr list --state open --limit \"\$PR_LIMIT\""
   ".github/workflows/pr-watch.yml::gh pr list --repo \"\$GITHUB_REPOSITORY\" --state open --limit \"\$PR_LIMIT\""
   ".github/workflows/issue-build.yml::gh issue list --state open --limit 300"
+  # Dual-account Anthropic failover (#734): a best-effort 6h-window scan to pick a
+  # rate-limit failover rung. Explicitly `set +e`, never aborts, falls to rung 1 on
+  # any failure — a bounded recent sample, not the client-side-filtered undercount class.
+  ".github/workflows/issue-build.yml::gh run list --repo \"\$GITHUB_REPOSITORY\" --limit 20 --created"
   ".github/workflows/org-consistency.yml::gh issue list --limit 200 --state all"
   ".github/workflows/budget-governor.yml::gh run list --repo \"SuxOS/\$r\" --limit 1001 --created"
   ".github/workflows/budget-governor.yml::gh run list --repo \"SuxOS/\$r\" --limit 50 --created"
