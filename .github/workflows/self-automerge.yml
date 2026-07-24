@@ -22,4 +22,6 @@ jobs:
     uses: SuxOS/.github/.github/workflows/automerge.yml@main
     with:
       required-gates: |
+        actionlint
+        pin-consistency
     secrets: inherit
