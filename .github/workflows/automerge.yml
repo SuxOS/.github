@@ -72,6 +72,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # Refuse to enable auto-merge unless every required gate is present in main's
       # required checks — native auto-merge completes the instant REQUIRED checks go

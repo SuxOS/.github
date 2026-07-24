@@ -282,6 +282,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # The caller stub's own file — a reusable workflow has no run history of its own, so the
       # streak has to be walked over whatever stub invoked us (self-issue-build.yml here,
@@ -521,6 +522,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       - name: Mint app token for spine signal read (SuxOS/.github)
         if: steps.pre.outputs.go == 'true' && steps.throttle.outputs.go == 'true'
@@ -529,6 +531,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
 
@@ -1137,6 +1140,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # Checkout the CALLING repo's default branch FIRST, before any other checkout creates
       # untracked siblings in the workspace — this step has no `path:`, so it targets
@@ -1169,6 +1173,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
 
@@ -1241,9 +1246,9 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: nix
-          permission-contents: read
 
       # mint-app-token (above) scopes its token to this calling repo only — despite the
       # suxbot App installation covering every org repo, create-github-app-token defaults to
@@ -1260,9 +1265,9 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: suxlib
-          permission-contents: read
 
       # $GITHUB_WORKSPACE is .../work/<repo>/<repo>, so ../suxlib lands where npm's
       # file:../suxlib resolution looks.
@@ -1835,6 +1840,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       - name: Non-buildable labels
         id: nonbuildable
@@ -1847,6 +1853,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
 

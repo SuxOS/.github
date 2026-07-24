@@ -159,3 +159,7 @@ jobs:
       - name: Assert Safe-Outputs-envelope harness flags path/secret/label violations without false-positiving on mentions (#541)
         run: bash scripts/test-check-safe-outputs-envelope.sh
         shell: bash
+
+      - name: Assert every mint-app-token call site declares a read/sudo tier and nothing mints directly (#729)
+        run: bash scripts/test-mint-app-token-tier.sh
+        shell: bash

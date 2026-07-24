@@ -159,6 +159,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # Minimal (.github-only) token just to read the deterministic managed-repos.json
       # allowlist below — NOT the token epic filing itself writes with. Needed because
@@ -171,6 +172,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: ".github"
 
@@ -208,6 +210,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
           owner: SuxOS
           repositories: ${{ steps.managed-repos.outputs.repos != '' && format('{0},.github', steps.managed-repos.outputs.repos) || '.github' }}
 

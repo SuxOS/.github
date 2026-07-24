@@ -108,6 +108,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # The push token above is caller-repo-scoped and the caller's GITHUB_TOKEN is too,
       # so neither can read SuxOS/.github — the cross-repo scripts checkout needs its own
@@ -120,6 +121,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
 
@@ -197,6 +199,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       - name: Checkout vault
         if: steps.pre.outputs.go == 'true'

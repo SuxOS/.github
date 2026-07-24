@@ -132,6 +132,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
       - name: Checkout
         if: steps.pre.outputs.go == 'true'
         # fetch-depth 0 (was shallow): the review now gets read-only git diff/log/show
@@ -334,6 +335,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
       - name: Checkout classifier (SuxOS/.github — scripts/classify-security-noverdict.sh lives only there, never in caller repos)

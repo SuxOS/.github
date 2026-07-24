@@ -48,6 +48,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # A bounded `gh pr list --limit N` silently drops armed BEHIND/BLOCKED PRs past
       # page N on a busy queue — the same undercount shape gh-list-exhaustive (#396)

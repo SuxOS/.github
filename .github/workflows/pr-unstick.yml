@@ -108,6 +108,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       # Both sweeps below can trigger a `gh run rerun --failed` that re-invokes
       # security-review.yml (an LLM-costing check), so gate them the same way
@@ -138,9 +139,9 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: .github
-          permission-contents: read
 
       - name: Checkout SuxOS/.github (pr-live-hold-check + is-trusted-author helpers)
         id: helper-checkout
