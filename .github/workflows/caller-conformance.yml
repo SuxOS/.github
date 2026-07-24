@@ -117,6 +117,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: SuxOS
           repositories: ${{ matrix.repo }}
 
@@ -175,10 +176,9 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
           owner: SuxOS
           repositories: ${{ matrix.repo }}
-          permission-contents: write
-          permission-pull-requests: write
 
       - name: Checkout SuxOS/${{ matrix.repo }}
         id: checkout

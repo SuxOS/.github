@@ -190,6 +190,7 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: sudo
 
       - name: Lock branch — mark PR autofix-in-progress
         if: steps.gate.outputs.go == 'true'

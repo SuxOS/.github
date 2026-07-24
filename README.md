@@ -379,7 +379,21 @@ job keeps this from firing on a `push`/`merge_group` run of `ci.yml`.
    re-fires downstream CI — the PR looks stuck green with a required check
    permanently missing. Every workflow here that pushes or merges (autofix,
    mention, auto-update, drain, automerge, skill-sync) mints a
-   `SUX_BOT`-style App token via `actions/create-github-app-token` first.
+   `SUX_BOT`-style App token via the shared `.github/actions/mint-app-token`
+   composite action first — never `actions/create-github-app-token` directly.
+   That action takes a **required `tier:` of `read` or `sudo`** (#729): `read`
+   grants every permission the suxbot App holds at read level and cannot mutate
+   anything; `sudo` grants them at write level. Exactly two tiers, broad by
+   construction and split only by access level — there is no third tier and no
+   per-site permission override. A job that only lists/views/clones takes `read`;
+   anything that creates, edits, comments, merges, closes, labels, dispatches or
+   pushes takes `sudo`. `owner:`/`repositories:` are orthogonal and still scope
+   *which* repos the token reaches. `scripts/test-mint-app-token-tier.sh`
+   (wired into `self-check.yml`) fails the build on an untiered call site, an
+   invalid tier, a per-site permission override, or a direct
+   `create-github-app-token` call. The tier maps and their derivation from the
+   App's live installation grant are documented at the top of
+   `.github/actions/mint-app-token/action.yml`.
 
 2. **Read verdicts from `structured_output`, never a written file.**
    `claude-code-action` runs the model in a sandbox `cwd` that is not

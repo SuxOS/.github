@@ -1,9 +1,76 @@
 name: Mint app token
 description: >-
-  Mint a short-lived GitHub App installation token for the SUX bot identity.
-  Pushes/merges must use this token, never GITHUB_TOKEN, so that CI and deploy
-  workflows fire on the resulting commit. Pinned version and secret wiring live
-  here so a token-action bump or bot-secret rename is a one-file edit.
+  Mint a short-lived GitHub App installation token for the SUX bot identity at one of
+  two access tiers (`read` or `sudo`). Pushes/merges must use this token, never
+  GITHUB_TOKEN, so that CI and deploy workflows fire on the resulting commit. Pinned
+  version, secret wiring and the tier permission maps live here so a token-action bump,
+  a bot-secret rename, or a permission-surface change is a one-file edit.
+
+# ── The two-tier model (#729) ────────────────────────────────────────────────────────
+#
+# `create-github-app-token` grants the installation's ENTIRE permission set when no
+# `permission-*` input is named, and narrows to EXACTLY the named set as soon as one is.
+# There is no "everything except X" form. Before #729 this action exposed only
+# `permission-contents` / `permission-pull-requests`, so a caller needing `issues: write`
+# could not express it — naming contents/PRs would have DROPPED issues. 26 of 32 call
+# sites therefore passed nothing and inherited all ~45 write permissions the suxbot App
+# holds, including `secrets`, `organization_secrets`, `security_events` and `workflows`,
+# on every model-driven builder/autofix run.
+#
+# The fix is deliberately NOT a narrow, per-job permission set. A narrow tier rots: the
+# first time a workflow needs a permission its tier omits, it fails at runtime and the
+# tempting "fix" is to revert that call site to inherit-everything — which is exactly the
+# state being removed here. So both tiers are BROAD BY CONSTRUCTION, covering past,
+# present and future uses, and are split only by ACCESS LEVEL:
+#
+#   tier: read  → every permission the App holds, at `read`.
+#   tier: sudo  → every permission the App holds, at `write` (i.e. root/`sudo`).
+#
+# The security property this buys is precise and worth having on its own:
+#   ** a `read`-tier job cannot mutate anything. **
+# That is the whole distinction. There is no third tier and no per-site permission
+# override — do not add one (operator decision, #729). If a job mutates, it is `sudo`.
+#
+# ── Deriving the maps ────────────────────────────────────────────────────────────────
+#
+# The maps below are derived from three machine-readable sources, not from memory:
+#
+#   1. the App's live installation grant —
+#        gh api orgs/SuxOS/installations \
+#          --jq '.installations[] | select(.app_slug=="suxbot") | .permissions'
+#   2. the pinned action's own declared `permission-*` inputs (action.yml at the SHA
+#      pinned below), and
+#   3. the documented per-permission level enum, from GitHub's OpenAPI description:
+#        components.schemas.app-permissions.properties.<name>.enum
+#      in github/rest-api-description → descriptions/api.github.com/api.github.com.json
+#
+# Three rules fall out of those sources and explain every asymmetry below:
+#
+#   * A permission the App holds only at `read` (`members`, `metadata`,
+#     `organization_events`) is pinned `read` in BOTH tiers — a token can never exceed
+#     its installation grant, and requesting more 422s.
+#   * A permission with no `read` level (`workflows` is `write`-only per the schema) is
+#     OMITTED from the read tier — an empty value is skipped by the action's own
+#     `getPermissionsFromInputs()` — rather than smuggling a write into a read token.
+#   * A permission the App holds that the pinned action declares no input for is not
+#     expressible at all, and is dropped from BOTH tiers equally (list below). That is an
+#     upstream constraint, not a choice: naming ANY permission narrows to the named set,
+#     and v3.2.0 (verified current latest, 2026-07-24) has no input for these:
+#       actions_variables, agent_secrets, agent_tasks, agent_variables, code_quality,
+#       organization_actions_variables, organization_agent_secrets,
+#       organization_agent_variables, organization_code_scanning_dismissal_requests,
+#       organization_credentials, organization_dependabot_dismissal_requests,
+#       organization_dependabot_secrets, organization_innersource_vulnerabilities,
+#       organization_private_registries, organization_secret_scanning_bypass_requests,
+#       repo_secret_scanning_dismissal_requests, repository_advisories,
+#       secret_scanning_bypass_requests, secret_scanning_dismissal_requests
+#     Nothing in this repo uses any of them (org-wide `gh`-verb audit, #729). If a future
+#     job genuinely needs one, the fix is to bump `create-github-app-token` to a version
+#     that declares its input and re-run the derivation above — NOT to reintroduce an
+#     unscoped mint.
+#
+# Re-run the derivation whenever the App's installed permissions change, so the tiers
+# cannot silently drift from what the App actually holds.
 
 inputs:
   app-id:
@@ -11,6 +78,16 @@ inputs:
     required: true
   private-key:
     description: GitHub App private key (pass secrets.SUX_BOT_PRIVATE_KEY).
+    required: true
+  tier:
+    description: >-
+      REQUIRED. Access tier for the minted token — `read` or `sudo`. `read` grants every
+      permission the App holds at read level and CANNOT mutate anything; `sudo` grants
+      them at write level. A job that only lists/views/clones takes `read`; a job that
+      creates, edits, comments, merges, closes, labels, dispatches or pushes takes
+      `sudo`. Orthogonal to `owner`/`repositories`, which scope WHICH repos the token
+      reaches. (`required: true` is not enforced by the Actions runner for action inputs,
+      so the Validate step below enforces it — an omitted or misspelled tier fails loud.)
     required: true
   owner:
     description: >-
@@ -25,18 +102,6 @@ inputs:
       Leave unset for the default same-calling-repo-only behavior.
     required: false
     default: ""
-  permission-contents:
-    description: >-
-      Optional `contents` permission override (passthrough to create-github-app-token's
-      own `permission-contents:`), e.g. `read` for a checkout-only token.
-    required: false
-    default: ""
-  permission-pull-requests:
-    description: >-
-      Optional `pull-requests` permission override (passthrough to create-github-app-token's
-      own `permission-pull-requests:`), e.g. `write` for a token that opens/updates PRs.
-    required: false
-    default: ""
 
 outputs:
   token:
@@ -46,6 +111,20 @@ outputs:
 runs:
   using: composite
   steps:
+    # Fail loud on a missing/typo'd tier rather than minting something unintended. Runs
+    # before the mint so a bad value never reaches GitHub as a token request.
+    - name: Validate tier
+      shell: bash
+      env:
+        TIER: ${{ inputs.tier }}
+      run: |
+        set -euo pipefail
+        case "${TIER:-}" in
+          read|sudo) echo "mint-app-token: tier=${TIER}" ;;
+          "") echo "::error::mint-app-token: 'tier' is required — pass tier: read or tier: sudo (see .github/actions/mint-app-token/action.yml)"; exit 1 ;;
+          *) echo "::error::mint-app-token: invalid tier '${TIER}' — must be exactly 'read' or 'sudo'"; exit 1 ;;
+        esac
+
     - name: Mint app token
       id: app-token
       uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -54,5 +133,38 @@ runs:
         private-key: ${{ inputs.private-key }}
         owner: ${{ inputs.owner }}
         repositories: ${{ inputs.repositories }}
-        permission-contents: ${{ inputs.permission-contents }}
-        permission-pull-requests: ${{ inputs.permission-pull-requests }}
+        # ── tier permission map (derived; see the header block) ──────────────────────
+        permission-actions: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-artifact-metadata: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-attestations: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-checks: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-contents: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-custom-properties-for-organizations: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-dependabot-secrets: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-deployments: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-environments: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-issues: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        # App grants `members` at read only — write would 422. Same for the two below.
+        permission-members: read
+        permission-merge-queues: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-metadata: read
+        permission-organization-custom-properties: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-organization-events: read
+        permission-organization-hooks: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-organization-secrets: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-packages: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-pages: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-pull-requests: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-repository-custom-properties: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-repository-hooks: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-secret-scanning-alerts: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-secrets: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-security-events: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-statuses: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        permission-vulnerability-alerts: ${{ inputs.tier == 'sudo' && 'write' || 'read' }}
+        # `workflows` is write-only in GitHub's schema, so it has no read form: the read
+        # tier passes "" (skipped by the action's getPermissionsFromInputs) instead of
+        # smuggling a write permission into a read token. Required on the sudo tier —
+        # every builder PR in this repo touches .github/workflows/*.yml, and GitHub
+        # rejects a push that modifies a workflow file without it.
+        permission-workflows: ${{ inputs.tier == 'sudo' && 'write' || '' }}

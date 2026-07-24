@@ -88,9 +88,9 @@ jobs:
         with:
           app-id: ${{ secrets.SUX_BOT_APP_ID }}
           private-key: ${{ secrets.SUX_BOT_PRIVATE_KEY }}
+          tier: read
           owner: ${{ github.repository_owner }}
           repositories: ${{ inputs.sibling-repos }}
-          permission-contents: read
 
       # $GITHUB_WORKSPACE is .../work/<repo>/<repo>, so ../<name> lands at
       # .../work/<repo>/<name> — exactly where npm's file:../<name> resolution looks.

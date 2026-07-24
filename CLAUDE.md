@@ -324,3 +324,28 @@ marker-cycle helper scripts were wiped before the guard step ever ran, on every 
 with only a `::warning::...(checkout failed)` to show for it — a message that reads like the
 checkout itself failed, not "a later step deleted what it checked out." 9+ consecutive cancelled
 cycles on `metal` never once wrote the shrink/give-up marker before this was caught).
+
+Every bot token in this repo is minted through `.github/actions/mint-app-token` with a
+**required `tier:` of `read` or `sudo`** (#729) — never `actions/create-github-app-token`
+directly, and never a per-site `permission-*` override (both fail
+`scripts/test-mint-app-token-tier.sh`, wired into `self-check.yml`). The reason the tiers
+are BROAD rather than per-job-minimal: `create-github-app-token` grants the installation's
+ENTIRE permission set when no `permission-*` input is named and narrows to EXACTLY the named
+set as soon as one is — there is no "everything except X" form — so the old two-passthrough
+action made `issues: write` inexpressible and 26 of 32 call sites correctly took the only
+working path, inheriting all ~45 of the suxbot App's write permissions on every model-driven
+run. A narrow tier would recreate that pressure the first time a job needs a permission it
+omits; a broad one never does, so the split survives. The security property is exactly one
+thing and it is worth having alone: **a `read`-tier job cannot mutate anything.** Do not add
+a third tier. When adding a mint: read-only (list/view/clone/artifact-download) ⇒ `read`;
+anything that creates, edits, comments, merges, closes, labels, dispatches or pushes ⇒
+`sudo`; ambiguous ⇒ `sudo`, since an over-narrow token fails loudly and recoverably.
+The tier maps are DERIVED, not hand-listed — re-run the three-source derivation documented
+at the top of that action.yml (live installation grant via `gh api orgs/SuxOS/installations`,
+the pinned action's declared `permission-*` inputs, and the `app-permissions` level enum from
+GitHub's OpenAPI description) whenever the App's installed permissions change, rather than
+editing an entry by hand. Note the action is referenced `@main` by every call site including
+this repo's own, so a change to it is NOT exercised by the PR that makes it — the first real
+run is post-merge, fleet-wide. The rollback is correspondingly cheap and should stay that way:
+reverting action.yml alone is sufficient, because an undeclared `tier:` input degrades to an
+"Unexpected input" warning rather than a step failure.
